@@ -25,15 +25,15 @@ cd "$HOME_DIR"
 echo ">> Pass 1: Generating base network for intersection analysis"
 
 srun pitremove -z $HOME_DIR/dem/bow-bassano-elv.tif -fel $INT_DIR/stream-network_elv-fel.tif
-srun d8flowdir -fel $INT_DIR/stream-network_elv-fel.tif -sd8 $INT_DIR/stream-network_elv-sd8.tif -p $INT_DIR/stream-network_elv-fdir_sask.tif
-srun aread8 -p $INT_DIR/stream-network_elv-fdir_sask.tif -ad8 $INT_DIR/stream-network_elv-ad8.tif -nc
-srun gridnet -p $INT_DIR/stream-network_elv-fdir_sask.tif -gord $INT_DIR/stream-network_elv-gord.tif
+srun d8flowdir -fel $INT_DIR/stream-network_elv-fel.tif -sd8 $INT_DIR/stream-network_elv-sd8.tif -p $INT_DIR/stream-network_elv-fdir.tif
+srun aread8 -p $INT_DIR/stream-network_elv-fdir.tif -ad8 $INT_DIR/stream-network_elv-ad8.tif -nc
+srun gridnet -p $INT_DIR/stream-network_elv-fdir.tif -gord $INT_DIR/stream-network_elv-gord.tif
 srun threshold -ssa $INT_DIR/stream-network_elv-ad8.tif -src $INT_DIR/stream-network_elv-src.tif -thresh 5555
 
 # Run streamnet without outlets to get the full network for Python to use
 srun streamnet \
   -fel "$INT_DIR/stream-network_elv-fel.tif" \
-  -p "$INT_DIR/stream-network_elv-fdir_sask.tif" \
+  -p "$INT_DIR/stream-network_elv-fdir.tif" \
   -ad8 "$INT_DIR/stream-network_elv-ad8.tif" \
   -src "$INT_DIR/stream-network_elv-src.tif" \
   -ord "$INT_DIR/stream-network_elv-ord.tif" \
@@ -160,5 +160,6 @@ cp $FINAL_DIR/snapped-outlets.* $OUT_DIR/
 echo " --------------------------------------------------- $(date) ---------------------------------------------------"
 echo ">> Running Python Script combiningBasins"
 python3 combiningBasins.py
+python3 cleanGeofabric.py
 
 echo "$(basename $0): Delineation ended at $(date)"
