@@ -106,7 +106,7 @@ if __name__ == "__main__":
     input_streams = "merged_basins/reservoirStreams.shp"
     input_basins = "merged_basins/reservoirBasins.shp"
     output_streams = "merged_basins/reservoirStreams_final.shp"
-    output_basins_layer = "merged_basins/reservoirBasins_final.shp"
+    output_basins = "merged_basins/reservoirBasins_final.shp"
 
-    dissolve_split_basins(input_basins_layer, output_basins_layer)
+    dissolve_split_basins(input_basins, output_basins)
     bypass_phantom_streams(input_streams, input_basins, output_streams)
