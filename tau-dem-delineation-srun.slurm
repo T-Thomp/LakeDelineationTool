@@ -33,9 +33,11 @@
 #        |
 #        v
 #   [Python] combiningBasins.py  -- merge lake-adjacent subbasins
-#            cleanGeofabric.py   -- remove phantom stream links
+#            cleanGeofabric.py   -- remove phantom stream links; attach gauges
+#            basinAggregation.py -- (optional) merge small headwater subbasins
 #        v
 #   delineation-product/         -- final streams, watersheds, outlets
+#   merged_basins/               -- reservoir + cleaned (+ optional aggregated) fabric
 #
 # KEY DIRECTORIES (under HOME_DIR)
 # --------------------------------
@@ -45,13 +47,75 @@
 #   delineation-product/         -- published outputs copied here after each pass
 #   points/                      -- pour point shapefiles produced by Python
 #   lakes/                       -- filtered reservoir polygons (filterLakes.py)
+#   merged_basins/               -- combiningBasins / cleanGeofabric / aggregation outputs
+#
+# SETUP CHECKLIST (paths & knobs to edit when adapting this workflow)
+# --------------------------------------------------------------------
+# Work top-to-bottom. Most Python scripts assume you run them from HOME_DIR
+# (this slurm cd's there). Relative paths below are from HOME_DIR.
+#
+# [ ] tau-dem-delineation-srun.slurm  (this file)
+#       HOME_DIR           -- project root on the cluster
+#       DEM                -- input elevation GeoTIFF
+#       VENV               -- Python venv activate script (geopandas, etc.)
+#       STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
+#       FLOWPATH_NCORES    -- MPI ranks for rasterFlowpathEdit.py
+#       #SBATCH --account / --ntasks / --mem-per-cpu / --time
+#
+# [ ] filterLakes.py
+#       HydroLAKES .shp path (hardcoded near top)
+#       Pass-1 watersheds/streams under delineation-product/
+#       MIN_AREA           -- km² lake-size filter
+#       output             -- lakes/filtered_lakes.shp
+#
+# [ ] getGauges.py
+#       Hydat.sqlite3 path (db_path)
+#       Pass-1 watersheds under delineation-product/
+#       output             -- points/gauges_in_basin.shp
+#
+# [ ] rasterFlowpathEdit.py  (defaults near __main__ / argparse)
+#       FDR / SRC / AD8 / watershed rasters under taudem-interim-files/d8/
+#       streams            -- delineation-product/original-delineated-streams.shp
+#       lakes / gauges     -- lakes/filtered_lakes.shp, points/gauges_in_basin.shp
+#       outlet_overrides.csv
+#       outputs            -- taudem-interim-files/d8/fdr_centerline_all.tif
+#                             points/selected_outlets.shp
+#
+# [ ] pourPointsPass2.py  (paths dict in __main__)
+#       intermediate streams/watersheds under delineation-product/ and d8/
+#       fdr_centerline_all.tif, lakes, gauges
+#       outputs            -- points/pourPointsFinal.shp
+#                             points/reservoir_io_nodes.shp
+#
+# [ ] combiningBasins.py
+#       PATHS{}            -- basins, streams, lakes, snapped outlets, gauges
+#       OVERRIDES_CSV      -- outlet_overrides.csv
+#       OUTPUT_DIR         -- merged_basins/
+#       GAUGE_SEARCH_RADIUS, MIN_INTERNAL_STREAM_LEN
+#
+# [ ] cleanGeofabric.py  (paths in __main__)
+#       input              -- merged_basins/reservoir{Basins,Streams}.shp
+#       gauges             -- points/gauges_in_basin.shp
+#       output             -- merged_basins/reservoir{Basins,Streams}_final.shp
+#
+# [ ] basinAggregation.py  (optional; globals at top of file)
+#       INPUT_BASINS / INPUT_RIVERS / OUTPUT_BASINS / OUTPUT_RIVERS
+#       MIN_SUB_AREA       -- km² aggregation threshold (default 100)
+#       MIN_RIV_SLOPE, MIN_RIV_LENGTH
+#       column-name globals if your attribute table differs from TauDEM
+#
+# [ ] External / one-time inputs to stage before running
+#       dem/*.tif          -- study DEM
+#       HydroLAKES polys   -- for filterLakes.py
+#       Hydat.sqlite3      -- for getGauges.py
+#       outlet_overrides.csv -- optional manual lake-outlet overrides
 #
 # =============================================================================
 
 #SBATCH --account=rrg-alpie
 #SBATCH --job-name=TauDEM_Delineation
 #SBATCH --output=delineate_%j.out
-#SBATCH --ntasks=250
+#SBATCH --ntasks=150
 #SBATCH --cpus-per-task=1
 #SBATCH --mem-per-cpu=5G
 #SBATCH --time=02:30:00
@@ -88,6 +152,11 @@ OUT_DIR="$HOME_DIR/delineation-product"          # Published products for Python
 # Applied identically in all three TauDEM passes.
 STREAM_THRESHOLD=5555
 
+# Worker MPI ranks for rasterFlowpathEdit.py (lake flow-path edits).
+# Launch with srun --ntasks=N --cpus-per-task=1 (one MPI rank per task).
+# Set lower than SBATCH --ntasks if you want fewer Python ranks than TauDEM cores.
+FLOWPATH_NCORES=16
+
 DEM="$HOME_DIR/dem/Sask-mrdem-30-dtm.tif"
 VENV="/home/$USER/virtual-envs/scienv/bin/activate"
 
@@ -110,11 +179,11 @@ cd "$HOME_DIR" || exit 1
 # -----------------------------------------------------------------------------
 log_section "Pass 1: TauDEM base network (no pour points)"
 
-#srun pitremove -z "$DEM" -fel "$INT_DIR/stream-network_elv-fel.tif"
-srun d8flowdir \
-    -fel "$INT_DIR/stream-network_elv-fel.tif" \
-    -sd8 "$INT_DIR/stream-network_elv-sd8.tif" \
-    -p  "$INT_DIR/stream-network_elv-fdir.tif"
+# srun pitremove -z "$DEM" -fel "$INT_DIR/stream-network_elv-fel.tif"
+# srun d8flowdir \
+#    -fel "$INT_DIR/stream-network_elv-fel.tif" \
+#    -sd8 "$INT_DIR/stream-network_elv-sd8.tif" \
+#   -p  "$INT_DIR/stream-network_elv-fdir.tif"
 srun aread8 \
     -p  "$INT_DIR/stream-network_elv-fdir.tif" \
     -ad8 "$INT_DIR/stream-network_elv-ad8.tif" \
@@ -158,9 +227,15 @@ publish_shp "$INT_DIR/original-delineated-watersheds"
 log_section "Python: lake filtering, gauges, and raster flow-path edits"
 source "$VENV"
 
-python3 filterLakes.py
-python3 getGauges.py
-python3 rasterFlowpathEdit.py
+#python3 filterLakes.py
+#python3 getGauges.py
+
+echo " before rasterFlowpathEdit.py $(date)"
+export FLOWPATH_NCORES
+#srun --ntasks="${FLOWPATH_NCORES}" --cpus-per-task=1 \
+#    python3 rasterFlowpathEdit.py --ncores "${FLOWPATH_NCORES}"
+python3 rasterFlowpathEdit.py --ncores 1
+echo " after rasterFlowpathEdit.py $(date)"
 
 # -----------------------------------------------------------------------------
 # 3. TauDEM Pass 2 -- network using corrected lake flow directions
@@ -250,12 +325,27 @@ publish_shp "$FINAL_DIR/snapped-outlets"
 # -----------------------------------------------------------------------------
 # 6. Python -- post-process final geofabric
 # -----------------------------------------------------------------------------
-#   combiningBasins.py -- merge subbasins split by lakes into unified units
-#   cleanGeofabric.py  -- fix stream topology (remove phantom links)
+#   combiningBasins.py   -- merge subbasins split by lakes into unified units;
+#                          writes lake_id / is_lake / lake_area / frac_lake
+#                          -> merged_basins/reservoirBasins.shp
+#                             merged_basins/reservoirStreams.shp
+#   cleanGeofabric.py    -- dissolve split basins, fix phantom stream links,
+#                          attach STATION_NU gauge IDs
+#                          -> merged_basins/reservoirBasins_final.shp
+#                             merged_basins/reservoirStreams_final.shp
+#   basinAggregation.py  -- OPTIONAL: aggregate small headwater subbasins below
+#                          MIN_SUB_AREA (default 100 km²), preserving gauges and
+#                          lake units. Comment out if you want the unaggregated
+#                          cleanGeofabric products only.
+#                          -> merged_basins/aggregated_basins.shp
+#                             merged_basins/aggregated_rivers.shp
 # -----------------------------------------------------------------------------
 log_section "Python: basin merging and geofabric cleanup"
 python3 combiningBasins.py
 python3 cleanGeofabric.py
+
+log_section "Python: optional basin aggregation (basinAggregation.py)"
+python3 basinAggregation.py
 
 echo ""
 echo "$(basename "$0"): Delineation ended at $(date)"
