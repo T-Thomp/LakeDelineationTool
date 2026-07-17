@@ -536,6 +536,10 @@ def export_shapefile(gdf, filename):
                 export_gdf[col] = export_gdf[col].astype(str)
         export_gdf.to_file(filename, driver="ESRI Shapefile")
 
+def add_lake_areas(merged_basins, lakes)
+    
+
+
 
 # ==============================================================================
 # MAIN PIPELINE
@@ -642,15 +646,32 @@ def process_reservoir_basins():
         swallowed_basins = basins[basins["DN"].isin(internal_links)]
         if swallowed_basins.empty:
             continue
+    
+        merged_geom = swallowed_basins.geometry.union_all()
 
-        all_swallowed_ids.update(swallowed_basins["DN"].tolist())
+        # Lake area
+        lake_area = lake_polys.iloc[0]["Lake_area"]*1000000
+        
+        # Percent of lake inside the merged basin
+        intersection_geom = merged_geom.intersection(lake_geom)
+        
+        if lake_area > 0:
+            fractional_lake_in_basin = (
+                intersection_geom.area / lake_area
+            )
+        else:
+            fractional_lake_in_basin = 0
+        
         catchment_results.append({
             "DN": int(l_id + lake_id_offset),
             "lake_id": l_id,
-            "geometry": swallowed_basins.geometry.union_all(),
+            "geometry": merged_geom,
             "is_lake": 1,
+            # Shapefile DBF fields are limited to 10 characters
+            "lake_area": lake_area,           # m²
+            "frac_lake": fractional_lake_in_basin,
         })
-
+    
     # --- D. Stream dissolve, hydrometric aggregation, and topology rewire ---
     print("Merging segments and recalculating hydrometric statistics...")
     streams_work = streams.copy()
@@ -697,6 +718,8 @@ def process_reservoir_basins():
     )
     final_geofabric["is_lake"] = final_geofabric["is_lake"].fillna(0).astype(int)
     final_geofabric["lake_id"] = final_geofabric["lake_id"].fillna(-1).astype(int)
+    final_geofabric["lake_area"] = final_geofabric["lake_area"].fillna(0.0)
+    final_geofabric["frac_lake"] = final_geofabric["frac_lake"].fillna(0.0)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     export_shapefile(final_geofabric, f"{OUTPUT_DIR}/reservoirBasins.shp")
