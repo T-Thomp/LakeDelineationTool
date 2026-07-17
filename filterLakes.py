@@ -43,7 +43,7 @@ lakes = lakes.to_crs(river.crs)
 
 print("Applying attribute filter logic...")
 # Condition A: Lake is larger than the 100.0 sq km threshold
-MIN_AREA = 100.0 
+MIN_AREA = 5.0 
 cond_size = lakes['Lake_area'] > MIN_AREA
 
 # Condition B: Lake is explicitly a managed reservoir (Lake_type != 1)

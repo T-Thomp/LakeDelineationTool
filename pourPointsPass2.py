@@ -9,6 +9,17 @@ from scipy.ndimage import binary_erosion
 # Enable GDAL exceptions to catch raster I/O issues cleanly
 gdal.UseExceptions()
 
+def load_gauges(gauges_path, target_crs):
+    """Load gauge points, or return an empty frame if the file is missing."""
+    if not os.path.exists(gauges_path):
+        print(
+            f"No gauge file found at {gauges_path}; "
+            "skipping gauge pour points."
+        )
+        return gpd.GeoDataFrame(columns=['name', 'point_type', 'geometry'], crs=target_crs)
+    return gpd.read_file(gauges_path)
+
+
 def build_vector_lookup_tables(streams_path):
     """
     Pre-builds dictionaries for fast tracking of stream relationships
@@ -56,7 +67,7 @@ def extract_reservoir_io_points(paths):
     
     wsno_to_link, link_to_downstream = build_vector_lookup_tables(paths["river"])
     lakes = gpd.read_file(paths["lakes"])
-    gauges = gpd.read_file(paths["gauges"])
+    gauges = load_gauges(paths["gauges"], streams_gdf.crs)
     
     ds_fdr = gdal.Open(paths["fdr"])
     ds_src = gdal.Open(paths["stream"])
@@ -306,18 +317,24 @@ def extract_reservoir_io_points(paths):
     lake_pts.to_file(paths["out_lake_nodes"])
     print(f"  -> Successfully saved pure reservoir node intersections to: {paths['out_lake_nodes']}")
 
-    # Process Gauges
-    gauge_col = 'STATION_NA' if 'STATION_NA' in gauges.columns else 'STATION_NAME'
-    gauge_pts = gauges.rename(columns={gauge_col: 'name'}).copy()
-    gauge_pts['point_type'] = 'gauge'
-    gauge_pts = gauge_pts[['name', 'point_type', 'geometry']]
-    
-    if gauge_pts.crs != streams_gdf.crs:
-        gauge_pts = gauge_pts.to_crs(streams_gdf.crs)
+    # Process Gauges (optional)
+    if gauges.empty:
+        export_gdf = lake_pts
+    else:
+        gauge_col = 'STATION_NA' if 'STATION_NA' in gauges.columns else 'STATION_NAME'
+        gauge_pts = gauges.rename(columns={gauge_col: 'name'}).copy()
+        gauge_pts['point_type'] = 'gauge'
+        gauge_pts = gauge_pts[['name', 'point_type', 'geometry']]
+
+        if gauge_pts.crs != streams_gdf.crs:
+            gauge_pts = gauge_pts.to_crs(streams_gdf.crs)
+
+        export_gdf = gpd.GeoDataFrame(
+            pd.concat([lake_pts, gauge_pts], ignore_index=True), crs=streams_gdf.crs,
+        )
 
     # [5/5] Combining Features & Final Vector Layer Export
     print("\n[5/5] Merging hydrologic layers and creating final master shapefile...")
-    export_gdf = gpd.GeoDataFrame(pd.concat([lake_pts, gauge_pts], ignore_index=True), crs=streams_gdf.crs)
 
     os.makedirs(os.path.dirname(paths["out"]), exist_ok=True)
     export_gdf.to_file(paths["out"])
