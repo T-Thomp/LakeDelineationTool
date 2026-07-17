@@ -24,7 +24,7 @@ import pandas as pd
 # COLUMN NAMES — edit these to match your shapefile attribute tables
 # ==============================================================================
 # Shared topology
-BASIN_ID = "DN"                 # sub-basin ID (matches stream link ID in TauDEM)
+BASIN_ID = "LINKNO"             # primary basin object id
 RIVER_ID = "LINKNO"             # stream reach ID
 NEXT_DOWN_ID = "DSLINKNO"       # downstream link / basin ID (-1 = outlet)
 
@@ -39,7 +39,7 @@ LENGTH = "Length"                # reach length; converted with LENGTH_SCALE
 # Masking / special units
 LAKE_FLAG = "is_lake"            # >0 marks reservoir/lake sub-basins (not aggregated)
 GAUGE_FLAG: Optional[str] = None  # numeric 0/1 column; None -> derive from GAUGE_IDS
-GAUGE_IDS = "STATION_NU"         # comma-separated gauge IDs when GAUGE_FLAG is None
+GAUGE_IDS = "STATION_NU"         # gauge attribute only (not the basin object id)
 
 # Basin attributes carried through to aggregated output (from pour-point basin)
 LAKE_ID = "lake_id"
@@ -121,7 +121,7 @@ def prepare_input_tables(
   join_cols = [
     c
     for c in river.columns
-    if c not in basin.columns or c == RIVER_ID
+    if (c not in basin.columns or c == RIVER_ID) and c != "geometry"
   ]
   basin = basin.merge(
     river[join_cols].rename(columns={RIVER_ID: BASIN_ID}),
@@ -195,9 +195,9 @@ def basin_aggregation(
   """
   Aggregate basins and rivers based on drainage area, slope, and reservoir masking.
 
-  Returns aggregated basin and river GeoDataFrames. Gauge IDs, lake flags/IDs,
-  lake area, and fractional lake area are taken from the pour-point basin of
-  each aggregated unit.
+  Returns aggregated basin and river GeoDataFrames. Each basin is identified by
+  BASIN_ID. Gauge IDs, lake flags/IDs, lake area, and fractional lake area are
+  pour-point attributes only.
   """
   basin, river = prepare_input_tables(input_basin, input_river)
 
@@ -286,16 +286,24 @@ def basin_aggregation(
     columns={"agg": id_col}
   )
 
-  # Carry pour-point attributes (gauge, lake id/area/fraction, topology, uparea)
+  # Carry pour-point attributes; object id remains BASIN_ID
   keep_cols = [id_col, "aggdown", "_uparea"] + _basin_attr_cols(basin)
-  keep_cols = list(dict.fromkeys(keep_cols))  # stable unique
+  keep_cols = list(dict.fromkeys(keep_cols))
   agg_basin = agg_basin.merge(
     basin[keep_cols].copy(),
     on=id_col,
     how="left",
   ).rename(columns={"aggdown": down_col})
 
-  agg_river = river.merge(basin[[id_col, "agg"]].copy(), left_on=riv_id_col, right_on=id_col, how="left")
+  if id_col == riv_id_col:
+    agg_river = river.merge(basin[[id_col, "agg"]].copy(), on=riv_id_col, how="left")
+  else:
+    agg_river = river.merge(
+      basin[[id_col, "agg"]].copy(),
+      left_on=riv_id_col,
+      right_on=id_col,
+      how="left",
+    )
   agg_river["mask"] = 0
   for agg_id in agg_river["agg"].dropna().unique():
     xx = agg_river.index[agg_river["agg"] == agg_id].tolist()
@@ -319,11 +327,10 @@ def basin_aggregation(
   ).rename(columns={"agg": riv_id_col})
 
   agg_river[SLOPE] = agg_river["_slope_weighted"] / agg_river["_lengthkm"].replace(0, np.nan)
-  agg_river = agg_river.merge(
-    agg_basin[[id_col, down_col, "_uparea"]].rename(columns={id_col: riv_id_col}),
-    on=riv_id_col,
-    how="left",
-  )
+  basin_topo = agg_basin[[id_col, down_col, "_uparea"]].copy()
+  if id_col != riv_id_col:
+    basin_topo = basin_topo.rename(columns={id_col: riv_id_col})
+  agg_river = agg_river.merge(basin_topo, on=riv_id_col, how="left")
 
   extra_river_cols = [riv_id_col]
   if STREAM_ORDER in river.columns:
@@ -341,9 +348,14 @@ def basin_aggregation(
 
   agg_river[LENGTH] = agg_river["_lengthkm"] / LENGTH_SCALE
   agg_river[UP_AREA] = agg_river["_uparea"] / AREA_SCALE
-  agg_river = agg_river.drop(columns=["_lengthkm", "_uparea", "_slope_weighted", "mask"], errors="ignore")
+  drop_riv = ["_lengthkm", "_uparea", "_slope_weighted", "mask"]
+  if id_col != riv_id_col and id_col in agg_river.columns:
+    drop_riv.append(id_col)
+  agg_river = agg_river.drop(columns=drop_riv, errors="ignore")
 
+  agg_basin[id_col] = agg_basin[id_col].astype("int64")
   agg_basin[down_col] = agg_basin[down_col].astype("int64")
+  agg_river[riv_id_col] = agg_river[riv_id_col].astype("int64")
   agg_river[down_col] = agg_river[down_col].astype("int64")
 
   return agg_basin, agg_river
