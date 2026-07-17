@@ -1,10 +1,6 @@
 """
 Aggregate small sub-basins and stream reaches for TauDEM / cleanGeofabric outputs.
 
-Adapted from basin_aggregation() in 01-pre-process-geospatial-fabric.ipynb.
-Column names are configured as globals at the top so the logic is not tied to
-MERIT-Hydro field names (COMID, NextDownID, etc.).
-
 Expected inputs (defaults match cleanGeofabric.py outputs):
   merged_basins/reservoirBasins_final.shp
   merged_basins/reservoirStreams_final.shp
