@@ -461,9 +461,3 @@ Contains the cleaned geofabric:
 - Optional aggregated watershed products
 
 ---
-
-# Notes
-
-The workflow uses **three TauDEM passes** because flat reservoir surfaces often cause unrealistic flow routing in standard D8 processing.
-
-Custom Python scripts modify flow directions and derive improved pour points between TauDEM runs, producing a more hydrologically realistic watershed network in regulated river systems.
