@@ -37,14 +37,15 @@ C. INTERNAL LINK IDENTIFICATION ("swallow" set)
    unioned into one reservoir polygon.
 
 D. STREAM TOPOLOGY REWIRING & HYDROMETRIC AGGREGATION
-   dissolve() internal links by merged_ID (lake_id + offset)
+   dissolve() internal links by merged_ID (winning outlet LINKNO)
    compute_lake_path_metrics() traces the longest inflow-to-outlet path through
      each lake and recalculates Length, strmDrop, StraightL, DOUTEND/START/MID,
      and Slope for the merged link
-   Rewire DSLINKNO so merged lake links drain to the winning outlet link
+   Rewire DSLINKNO so merged lake links drain to the link downstream of the winner
 
 E. BASIN FABRIC ASSEMBLY
    Remove swallowed subbasin polygons; append new reservoir catchment polygons
+   Merged basin/stream primary ID remains the winning outlet LINKNO (DN / LINKNO)
    export_shapefile() -> merged_basins/reservoirBasins.shp, reservoirStreams.shp
 
 Inputs
@@ -504,7 +505,7 @@ def export_shapefile(gdf, filename):
     Write a shapefile with type-aware numeric formatting.
 
     Float columns are rounded to 3 decimal places (Slope is left unrounded).
-    Integer columns are preserved as ints. Wide float fields use float:20.3
+    Integer columns are preserved as ints. Wide float fields use float:24.3
     in the Fiona schema to avoid DBF truncation. Falls back to string columns
     if the schema export fails.
     """
@@ -524,8 +525,15 @@ def export_shapefile(gdf, filename):
 
     schema = gpd.io.file.infer_schema(export_gdf)
     for col in float_cols:
-        if col in schema["properties"] and col != "Slope":
-            schema["properties"][col] = "float:20.3"
+        if col not in schema["properties"]:
+            continue
+        if col == "Slope":
+            continue
+        # lake_area in m² can be >1e10 for large lakes; keep a wide DBF float
+        if col == "lake_area":
+            schema["properties"][col] = "float:24.1"
+        else:
+            schema["properties"][col] = "float:24.3"
 
     try:
         export_gdf.to_file(filename, driver="ESRI Shapefile", schema=schema, engine="fiona")
@@ -535,10 +543,6 @@ def export_shapefile(gdf, filename):
             if col in export_gdf.columns:
                 export_gdf[col] = export_gdf[col].astype(str)
         export_gdf.to_file(filename, driver="ESRI Shapefile")
-
-def add_lake_areas(merged_basins, lakes)
-    
-
 
 
 # ==============================================================================
@@ -584,9 +588,6 @@ def process_reservoir_basins():
     basins["DN"] = basins["DN"].astype(int)
     streams["LINKNO"] = streams["LINKNO"].astype(int)
 
-    # New lake link/basin IDs must not collide with existing TauDEM DN values.
-    # Offset = 10^(digits in max DN), e.g. max DN 12345 -> offset 100000.
-    lake_id_offset = 10 ** len(str(int(basins["DN"].max())))
     down_map = streams.set_index("LINKNO")["DSLINKNO"].to_dict()
 
     # Links that appear as someone else's DSLINKNO (network junctions / trunks).
@@ -640,55 +641,65 @@ def process_reservoir_basins():
             lake_geom, in_pts, raw_outflow_candidates, streams,
             buffer_dist, down_map, terminal_link_ids,
         )
-        lake_to_links[l_id] = list(internal_links)
+        # Always swallow the winning outlet link so the merged unit keeps that DN
+        # and the original winner polygon is not left behind.
+        internal_links.add(winner_id)
 
         # Union subbasins whose DN matches swallowed internal links
         swallowed_basins = basins[basins["DN"].isin(internal_links)]
         if swallowed_basins.empty:
             continue
-    
+
+        lake_to_links[l_id] = list(internal_links)
+        all_swallowed_ids.update(internal_links)
+
         merged_geom = swallowed_basins.geometry.union_all()
 
-        # Lake area
-        lake_area = lake_polys.iloc[0]["Lake_area"]*1000000
-        
-        # Percent of lake inside the merged basin
+        # HydroLAKES Lake_area is km²; convert to m² for the routing model
+        lake_area_km2 = float(pd.to_numeric(lake_polys.iloc[0]["Lake_area"], errors="coerce") or 0.0)
+        lake_area_m2 = lake_area_km2 * 1e6
+        basin_area_m2 = float(merged_geom.area)
+
+        # Fraction of the merged basin covered by lake (works if basins are later split)
         intersection_geom = merged_geom.intersection(lake_geom)
-        
-        if lake_area > 0:
-            fractional_lake_in_basin = (
-                intersection_geom.area / lake_area
-            )
+        if basin_area_m2 > 0:
+            fractional_lake_in_basin = float(intersection_geom.area / basin_area_m2)
         else:
-            fractional_lake_in_basin = 0
-        
+            fractional_lake_in_basin = 0.0
+        fractional_lake_in_basin = max(0.0, min(1.0, fractional_lake_in_basin))
+
+        # Keep the winning outlet LINKNO as the basin DN so the primary ID
+        # stays the stream-network ID (not a lake-offset or gauge ID).
         catchment_results.append({
-            "DN": int(l_id + lake_id_offset),
+            "DN": int(winner_id),
             "lake_id": l_id,
             "geometry": merged_geom,
             "is_lake": 1,
             # Shapefile DBF fields are limited to 10 characters
-            "lake_area": lake_area,           # m²
+            "lake_area": lake_area_m2,  # m²
             "frac_lake": fractional_lake_in_basin,
         })
-    
+
     # --- D. Stream dissolve, hydrometric aggregation, and topology rewire ---
     print("Merging segments and recalculating hydrometric statistics...")
     streams_work = streams.copy()
     lake_metrics = {}
-    swallowed_map = {}  # old LINKNO -> new merged lake LINKNO
+    swallowed_map = {}  # old LINKNO -> winning outlet LINKNO (merged lake ID)
 
     for l_id, links in lake_to_links.items():
         if not links:
             continue
-        new_id = l_id + lake_id_offset
+        winner_id = lake_to_winner.get(l_id)
+        if winner_id is None:
+            continue
+        new_id = int(winner_id)
         for link in links:
             swallowed_map[link] = new_id
         lake_metrics[new_id] = compute_lake_path_metrics(
-            links, lake_to_winner.get(l_id), streams_work, down_map,
+            links, winner_id, streams_work, down_map,
         )
 
-    # Assign merged_ID: swallowed links get the lake offset ID; others keep LINKNO
+    # Assign merged_ID: swallowed links get the winning outlet LINKNO; others keep LINKNO
     streams_work["merged_ID"] = streams_work["LINKNO"].replace(swallowed_map)
 
     streams_dissolved = (
@@ -700,15 +711,19 @@ def process_reservoir_basins():
 
     apply_lake_metrics(streams_dissolved, lake_metrics)
 
-    # Point each merged lake link at its winning downstream outlet
+    # Point each merged lake link at the link immediately downstream of the winner
     for l_id, ds_id in lake_to_outlet.items():
-        streams_dissolved.loc[streams_dissolved["LINKNO"] == (l_id + lake_id_offset), "DSLINKNO"] = ds_id
+        winner_id = lake_to_winner.get(l_id)
+        if winner_id is None:
+            continue
+        streams_dissolved.loc[streams_dissolved["LINKNO"] == int(winner_id), "DSLINKNO"] = ds_id
 
-    # Redirect any DSLINKNO that pointed to a swallowed link to the new merged ID
+    # Redirect any DSLINKNO that pointed to a swallowed link to the merged winner ID
     streams_dissolved["DSLINKNO"] = streams_dissolved["DSLINKNO"].replace(swallowed_map)
     streams_dissolved = streams_dissolved.drop(columns=["USLINKNO1", "USLINKNO2"], errors="ignore")
 
     # --- E. Assemble final basin fabric ---
+    # Drop every swallowed subbasin, then append one merged reservoir polygon per lake.
     final_geofabric = pd.concat(
         [
             basins[~basins["DN"].isin(all_swallowed_ids)],
