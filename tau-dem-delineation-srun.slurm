@@ -115,10 +115,10 @@
 #SBATCH --account=rrg-alpie
 #SBATCH --job-name=TauDEM_Delineation
 #SBATCH --output=delineate_%j.out
-#SBATCH --ntasks=150
+#SBATCH --ntasks=250
 #SBATCH --cpus-per-task=1
 #SBATCH --mem-per-cpu=5G
-#SBATCH --time=02:30:00
+#SBATCH --time=05:00:00
 
 # Print a labelled section header to the job log.
 log_section() {
@@ -179,11 +179,11 @@ cd "$HOME_DIR" || exit 1
 # -----------------------------------------------------------------------------
 log_section "Pass 1: TauDEM base network (no pour points)"
 
-# srun pitremove -z "$DEM" -fel "$INT_DIR/stream-network_elv-fel.tif"
-# srun d8flowdir \
-#    -fel "$INT_DIR/stream-network_elv-fel.tif" \
-#    -sd8 "$INT_DIR/stream-network_elv-sd8.tif" \
-#   -p  "$INT_DIR/stream-network_elv-fdir.tif"
+ srun pitremove -z "$DEM" -fel "$INT_DIR/stream-network_elv-fel.tif"
+ srun d8flowdir \
+    -fel "$INT_DIR/stream-network_elv-fel.tif" \
+    -sd8 "$INT_DIR/stream-network_elv-sd8.tif" \
+   -p  "$INT_DIR/stream-network_elv-fdir.tif"
 srun aread8 \
     -p  "$INT_DIR/stream-network_elv-fdir.tif" \
     -ad8 "$INT_DIR/stream-network_elv-ad8.tif" \
@@ -227,14 +227,14 @@ publish_shp "$INT_DIR/original-delineated-watersheds"
 log_section "Python: lake filtering, gauges, and raster flow-path edits"
 source "$VENV"
 
-#python3 filterLakes.py
-#python3 getGauges.py
+python3 filterLakes.py
+python3 getGauges.py
 
 echo " before rasterFlowpathEdit.py $(date)"
 export FLOWPATH_NCORES
-#srun --ntasks="${FLOWPATH_NCORES}" --cpus-per-task=1 \
-#    python3 rasterFlowpathEdit.py --ncores "${FLOWPATH_NCORES}"
-python3 rasterFlowpathEdit.py --ncores 1
+srun --ntasks="${FLOWPATH_NCORES}" --cpus-per-task=1 \
+    python3 rasterFlowpathEdit.py --ncores "${FLOWPATH_NCORES}"
+#python3 rasterFlowpathEdit.py --ncores 1
 echo " after rasterFlowpathEdit.py $(date)"
 
 # -----------------------------------------------------------------------------

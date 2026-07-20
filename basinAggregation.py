@@ -20,7 +20,7 @@ import pandas as pd
 # COLUMN NAMES — edit these to match your shapefile attribute tables
 # ==============================================================================
 # Shared topology
-BASIN_ID = "LINKNO"             # primary basin object id
+BASIN_ID = "DN"             # primary basin object id
 RIVER_ID = "LINKNO"             # stream reach ID
 NEXT_DOWN_ID = "DSLINKNO"       # downstream link / basin ID (-1 = outlet)
 
@@ -40,7 +40,7 @@ GAUGE_IDS = "STATION_NU"         # gauge attribute only (not the basin object id
 # Basin attributes carried through to aggregated output (from pour-point basin)
 LAKE_ID = "lake_id"
 LAKE_AREA = "lake_area"          # m² (shapefile-safe name, ≤10 chars)
-FRAC_LAKE_AREA = "frac_lake"     # fraction of lake polygon inside the basin
+FRAC_LAKE_AREA = "frac_lake"     # fraction of basin covered by lake (geom intersection / basin area)
 
 # Extra river attributes carried through to aggregated output
 STREAM_ORDER = "strmOrder"
