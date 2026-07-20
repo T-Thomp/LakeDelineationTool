@@ -1,114 +1,469 @@
-# LakeDelineationTool
+# Lake Delineation Tool
 
-=============================================================================
-TauDEM Lake Basin Delineation Pipeline
-=============================================================================
+A hydrologic delineation workflow built around **TauDEM** for generating stream networks and watershed boundaries with **special handling for instream reservoirs (lakes)**.
 
-Submit with:  sbatch tau-dem-delineation-srun.slurm
+Unlike a standard TauDEM workflow, this pipeline performs multiple delineation passes with custom Python preprocessing to ensure realistic flow paths through flat lake surfaces.
 
-This job builds a stream network and watershed delineation for the Bow-Bassano
-DEM, with special handling for instream reservoirs (lakes). TauDEM alone
-cannot pick sensible outlets through flat lake surfaces, so Python scripts
-edit flow directions and pour points between TauDEM passes.
+---
 
-PIPELINE OVERVIEW
------------------
+# Overview
 
-  DEM (bow-bassano-elv.tif)
-       |
-       v
-  [Pass 1] TauDEM -- standard hydrologic conditioning + full network
-       |              (no pour points; discovers all subbasins)
-       v
-  [Python] filterLakes.py      -- clip HydroLAKES reservoirs to basin
-           getGauges.py        -- find stream gauges inside basin
-           rasterFlowpathEdit.py -- fix flow dirs inside each lake
-                                  (writes fdr_centerline_all.tif)
-       v
-  [Pass 2] TauDEM -- re-run network using corrected lake flow directions
-       |
-       v
-  [Python] pourPointsPass2.py -- derive refined pour points at lake in/outflows
-       v
-  [Pass 3] TauDEM -- final delineation snapped to pour points
-       |
-       v
-  [Python] combiningBasins.py  -- merge lake-adjacent subbasins
-           cleanGeofabric.py   -- remove phantom stream links; attach gauges
-           basinAggregation.py -- (optional) merge small headwater subbasins
-       v
-  delineation-product/         -- final streams, watersheds, outlets
-  merged_basins/               -- reservoir + cleaned (+ optional aggregated) fabric
+Submit the workflow using:
 
-KEY DIRECTORIES (under HOME_DIR)
---------------------------------
-  dem/                         -- input elevation raster
-  taudem-interim-files/d8/     -- TauDEM rasters + intermediate shapefiles
-  taudem-interim-files/final/  -- Pass 3 TauDEM outputs
-  delineation-product/         -- published outputs copied here after each pass
-  points/                      -- pour point shapefiles produced by Python
-  lakes/                       -- filtered reservoir polygons (filterLakes.py)
-  merged_basins/               -- combiningBasins / cleanGeofabric / aggregation outputs
+```bash
+sbatch tau-dem-delineation-srun.slurm
+```
 
-SETUP CHECKLIST (paths & knobs to edit when adapting this workflow)
---------------------------------------------------------------------
-Work top-to-bottom. Most Python scripts assume you run them from HOME_DIR
-(this slurm cd's there). Relative paths below are from HOME_DIR.
+The workflow builds a stream network and watershed delineation for the **Bow–Bassano DEM** using three TauDEM passes with Python-based corrections between each pass.
 
-[ ] tau-dem-delineation-srun.slurm  (this file)
-      HOME_DIR           -- project root on the cluster
-      DEM                -- input elevation GeoTIFF
-      VENV               -- Python venv activate script (geopandas, etc.)
-      STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
-      FLOWPATH_NCORES    -- MPI ranks for rasterFlowpathEdit.py
-      #SBATCH --account / --ntasks / --mem-per-cpu / --time
+---
 
-[ ] filterLakes.py
-      HydroLAKES .shp path (hardcoded near top)
-      Pass-1 watersheds/streams under delineation-product/
-      MIN_AREA           -- km² lake-size filter
-      output             -- lakes/filtered_lakes.shp
+# Pipeline
 
-[ ] getGauges.py
-      Hydat.sqlite3 path (db_path)
-      Pass-1 watersheds under delineation-product/
-      output             -- points/gauges_in_basin.shp
+```text
+DEM (bow-bassano-elv.tif)
+       │
+       ▼
+Pass 1 ─ TauDEM
+Standard hydrologic conditioning and watershed delineation
+(no pour points)
 
-[ ] rasterFlowpathEdit.py  (defaults near __main__ / argparse)
-      FDR / SRC / AD8 / watershed rasters under taudem-interim-files/d8/
-      streams            -- delineation-product/original-delineated-streams.shp
-      lakes / gauges     -- lakes/filtered_lakes.shp, points/gauges_in_basin.shp
-      outlet_overrides.csv
-      outputs            -- taudem-interim-files/d8/fdr_centerline_all.tif
-                            points/selected_outlets.shp
+       │
+       ▼
+Python preprocessing
 
-[ ] pourPointsPass2.py  (paths dict in __main__)
-      intermediate streams/watersheds under delineation-product/ and d8/
-      fdr_centerline_all.tif, lakes, gauges
-      outputs            -- points/pourPointsFinal.shp
-                            points/reservoir_io_nodes.shp
+• filterLakes.py
+    Filter HydroLAKES reservoirs to the study basin
 
-[ ] combiningBasins.py
-      PATHS{}            -- basins, streams, lakes, snapped outlets, gauges
-      OVERRIDES_CSV      -- outlet_overrides.csv
-      OUTPUT_DIR         -- merged_basins/
-      GAUGE_SEARCH_RADIUS, MIN_INTERNAL_STREAM_LEN
+• getGauges.py
+    Find stream gauges inside the basin
 
-[ ] cleanGeofabric.py  (paths in __main__)
-      input              -- merged_basins/reservoir{Basins,Streams}.shp
-      gauges             -- points/gauges_in_basin.shp
-      output             -- merged_basins/reservoir{Basins,Streams}_final.shp
+• rasterFlowpathEdit.py
+    Correct flow directions through reservoirs
+    Outputs:
+        fdr_centerline_all.tif
 
-[ ] basinAggregation.py  (optional; globals at top of file)
-      INPUT_BASINS / INPUT_RIVERS / OUTPUT_BASINS / OUTPUT_RIVERS
-      MIN_SUB_AREA       -- km² aggregation threshold (default 100)
-      MIN_RIV_SLOPE, MIN_RIV_LENGTH
-      column-name globals if your attribute table differs from TauDEM
+       │
+       ▼
+Pass 2 ─ TauDEM
+Re-run delineation using corrected flow directions
 
-[ ] External / one-time inputs to stage before running
-      dem/*.tif          -- study DEM
-      HydroLAKES polys   -- for filterLakes.py
-      Hydat.sqlite3      -- for getGauges.py
-      outlet_overrides.csv -- optional manual lake-outlet overrides
+       │
+       ▼
+pourPointsPass2.py
 
-=============================================================================
+Generate refined pour points at lake inflow/outflow locations
+
+       │
+       ▼
+Pass 3 ─ TauDEM
+Final watershed delineation snapped to refined pour points
+
+       │
+       ▼
+Post-processing
+
+• combiningBasins.py
+    Merge reservoir-adjacent subbasins
+
+• cleanGeofabric.py
+    Remove phantom stream links
+    Attach stream gauges
+
+• basinAggregation.py (optional)
+    Merge small headwater subbasins
+
+       │
+       ▼
+Final Products
+
+delineation-product/
+merged_basins/
+```
+
+---
+
+# Project Directory Structure
+
+All paths below are relative to `HOME_DIR`.
+
+```text
+HOME_DIR/
+│
+├── dem/
+│   └── Input DEM
+│
+├── taudem-interim-files/
+│   ├── d8/
+│   │   ├── TauDEM rasters
+│   │   ├── Intermediate shapefiles
+│   │   └── fdr_centerline_all.tif
+│   │
+│   └── final/
+│       └── Pass 3 TauDEM outputs
+│
+├── delineation-product/
+│   ├── Final streams
+│   ├── Watersheds
+│   └── Outlets
+│
+├── points/
+│   ├── Gauges
+│   ├── Pour points
+│   └── Reservoir IO nodes
+│
+├── lakes/
+│   └── Filtered HydroLAKES polygons
+│
+└── merged_basins/
+    ├── Reservoir merged basins
+    ├── Cleaned geofabric
+    └── Optional aggregated basins
+```
+
+---
+
+# Workflow
+
+## Pass 1 – Initial TauDEM Delineation
+
+Runs a standard TauDEM workflow:
+
+- Fill depressions
+- Compute flow directions
+- Flow accumulation
+- Stream extraction
+- Watershed delineation
+
+No pour points are used during this stage.
+
+Outputs define the preliminary watershed network used by subsequent scripts.
+
+---
+
+## Reservoir Processing
+
+### `filterLakes.py`
+
+Filters HydroLAKES polygons to include only reservoirs intersecting the study basin.
+
+Produces:
+
+```text
+lakes/
+└── filtered_lakes.shp
+```
+
+---
+
+### `getGauges.py`
+
+Queries the HYDAT database to identify stream gauges located inside the basin.
+
+Produces:
+
+```text
+points/
+└── gauges_in_basin.shp
+```
+
+---
+
+### `rasterFlowpathEdit.py`
+
+Corrects TauDEM D8 flow directions across flat lake surfaces.
+
+Uses:
+
+- DEM flow directions
+- Flow accumulation
+- Stream raster
+- HydroLAKES polygons
+- Stream gauges
+
+Produces:
+
+```text
+taudem-interim-files/d8/
+└── fdr_centerline_all.tif
+
+points/
+└── selected_outlets.shp
+```
+
+---
+
+## Pass 2 – Corrected Delineation
+
+TauDEM is rerun using the corrected lake flow-direction raster.
+
+This produces a more realistic stream network through reservoirs.
+
+---
+
+## `pourPointsPass2.py`
+
+Computes refined pour points located at reservoir inflows and outflows.
+
+Produces:
+
+```text
+points/
+├── pourPointsFinal.shp
+└── reservoir_io_nodes.shp
+```
+
+---
+
+## Pass 3 – Final Delineation
+
+TauDEM performs a final watershed delineation using the refined pour points.
+
+Outputs are copied into:
+
+```text
+delineation-product/
+```
+
+---
+
+## Post-processing
+
+### `combiningBasins.py`
+
+Merges subbasins surrounding reservoirs into unified watershed units.
+
+Inputs include:
+
+- Basins
+- Streams
+- Reservoir polygons
+- Gauges
+- Outlet overrides
+
+Outputs:
+
+```text
+merged_basins/
+```
+
+---
+
+### `cleanGeofabric.py`
+
+Cleans the river network by:
+
+- Removing phantom stream links
+- Attaching stream gauges
+- Producing a clean geofabric
+
+Outputs:
+
+```text
+merged_basins/
+├── reservoirBasins_final.shp
+└── reservoirStreams_final.shp
+```
+
+---
+
+### `basinAggregation.py` *(Optional)*
+
+Aggregates small upstream subbasins into larger watershed units.
+
+Default aggregation threshold:
+
+```text
+100 km²
+```
+
+Outputs aggregated basin and river shapefiles.
+
+---
+
+# Configuration Checklist
+
+Before adapting the workflow to another watershed, verify the following settings.
+
+---
+
+## `tau-dem-delineation-srun.slurm`
+
+Update:
+
+- `HOME_DIR`
+- `DEM`
+- `VENV`
+- `STREAM_THRESHOLD`
+- `FLOWPATH_NCORES`
+
+Also verify:
+
+- `#SBATCH --account`
+- `#SBATCH --ntasks`
+- `#SBATCH --mem-per-cpu`
+- `#SBATCH --time`
+
+---
+
+## `filterLakes.py`
+
+Update:
+
+- HydroLAKES shapefile path
+- Pass 1 watershed path
+- Stream path
+- `MIN_AREA`
+
+Output:
+
+```text
+lakes/filtered_lakes.shp
+```
+
+---
+
+## `getGauges.py`
+
+Update:
+
+- `Hydat.sqlite3`
+- Watershed path
+
+Output:
+
+```text
+points/gauges_in_basin.shp
+```
+
+---
+
+## `rasterFlowpathEdit.py`
+
+Verify:
+
+- D8 flow-direction raster
+- Flow accumulation raster
+- Source raster
+- Watershed raster
+- Stream shapefile
+- Filtered lakes
+- Gauges
+- `outlet_overrides.csv`
+
+Outputs:
+
+```text
+taudem-interim-files/d8/fdr_centerline_all.tif
+
+points/selected_outlets.shp
+```
+
+---
+
+## `pourPointsPass2.py`
+
+Update all path definitions for:
+
+- Streams
+- Watersheds
+- Corrected flow directions
+- Lakes
+- Gauges
+
+Outputs:
+
+```text
+points/pourPointsFinal.shp
+points/reservoir_io_nodes.shp
+```
+
+---
+
+## `combiningBasins.py`
+
+Verify:
+
+- `PATHS`
+- `OVERRIDES_CSV`
+- `OUTPUT_DIR`
+- `GAUGE_SEARCH_RADIUS`
+- `MIN_INTERNAL_STREAM_LEN`
+
+---
+
+## `cleanGeofabric.py`
+
+Update:
+
+- Input merged basins
+- Input streams
+- Gauge layer
+
+Outputs:
+
+```text
+merged_basins/
+├── reservoirBasins_final.shp
+└── reservoirStreams_final.shp
+```
+
+---
+
+## `basinAggregation.py`
+
+Update:
+
+- Input basin layer
+- Input river layer
+- Output filenames
+
+Review:
+
+- `MIN_SUB_AREA`
+- `MIN_RIV_SLOPE`
+- `MIN_RIV_LENGTH`
+
+Also ensure attribute names match your TauDEM outputs.
+
+---
+
+# Required External Data
+
+Before running the workflow, stage the following datasets:
+
+| Dataset | Purpose |
+|----------|---------|
+| DEM (`.tif`) | Elevation model |
+| HydroLAKES polygons | Reservoir delineation |
+| HYDAT (`Hydat.sqlite3`) | Stream gauge database |
+
+---
+
+# Outputs
+
+## `delineation-product/`
+
+Contains the final watershed products:
+
+- Watersheds
+- Stream network
+- Snapped outlets
+
+---
+
+## `merged_basins/`
+
+Contains the cleaned geofabric:
+
+- Reservoir-merged basins
+- Cleaned stream network
+- Optional aggregated watershed products
+
+---
+
+# Notes
+
+The workflow uses **three TauDEM passes** because flat reservoir surfaces often cause unrealistic flow routing in standard D8 processing.
+
+Custom Python scripts modify flow directions and derive improved pour points between TauDEM runs, producing a more hydrologically realistic watershed network in regulated river systems.
