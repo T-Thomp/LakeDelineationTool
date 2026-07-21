@@ -77,8 +77,6 @@ Post-processing
        ▼
 Final Products
 
-delineation-product/
-merged_basins/
 ```
 
 ---
@@ -115,10 +113,13 @@ HOME_DIR/
 ├── lakes/
 │   └── Filtered HydroLAKES polygons
 │
-└── merged_basins/
-    ├── Reservoir merged basins
-    ├── Cleaned geofabric
+├── merged_basins/
+│   ├── Reservoir merged basins
+│   ├── Cleaned geofabric
+│   
+└──final_basins/
     └── Optional aggregated basins
+
 ```
 
 ---
@@ -427,6 +428,19 @@ Review:
 Also ensure attribute names match your TauDEM outputs.
 
 ---
+
+
+## `basinTrimming.ipynb`
+
+Generates the final basin boundary and trims the delineation products to the watershed of interest.
+
+The notebook is used to post-process the full DEM-scale delineation by identifying the desired stream network and clipping all associated datasets to the selected basin.
+
+---
+
+
+
+
 
 # Required External Data
 
