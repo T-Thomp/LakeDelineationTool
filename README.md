@@ -282,6 +282,15 @@ Outputs aggregated basin and river shapefiles.
 
 ---
 
+
+## `basinTrimming.ipynb`
+
+Generates the final basin boundary and trims the delineation products to the watershed of interest.
+
+The notebook is used to post-process the full DEM-scale delineation by identifying the desired stream network and clipping all associated datasets to the selected basin.
+
+---
+
 # Configuration Checklist
 
 Before adapting the workflow to another watershed, verify the following settings.
@@ -428,18 +437,6 @@ Review:
 Also ensure attribute names match your TauDEM outputs.
 
 ---
-
-
-## `basinTrimming.ipynb`
-
-Generates the final basin boundary and trims the delineation products to the watershed of interest.
-
-The notebook is used to post-process the full DEM-scale delineation by identifying the desired stream network and clipping all associated datasets to the selected basin.
-
----
-
-
-
 
 
 # Required External Data
