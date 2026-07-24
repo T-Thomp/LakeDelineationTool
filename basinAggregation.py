@@ -22,7 +22,7 @@ import pandas as pd
 # Shared topology
 BASIN_ID = "DN"             # primary basin object id
 RIVER_ID = "LINKNO"             # stream reach ID
-NEXT_DOWN_ID = "DSLINKNO"       # downstream link / basin ID (-1 = outlet)
+NEXT_DOWN_ID = "DSLINKNO"       # downstream link / basin ID (outlet sentinel below)
 
 # Basin areas (km² after conversion; see AREA_SCALE)
 UNIT_AREA: Optional[str] = None  # local sub-basin area; None -> polygon area
@@ -63,6 +63,10 @@ MIN_SUB_AREA = 100.0          # km²
 MIN_RIV_SLOPE = 0.0000001     # minimum accepted river slope (WATFLOOD manual)
 MIN_RIV_LENGTH = 1.0          # km
 
+# Sentinel written to DSLINKNO for the most-downstream basin(s).
+# Match this to MESH outlet_value (e.g. -9999).
+OUTLET_VALUE = -9999
+
 
 # ==============================================================================
 # HELPERS
@@ -93,6 +97,97 @@ def _basin_attr_cols(basin: gpd.GeoDataFrame) -> list[str]:
   return [c for c in candidates if c in basin.columns]
 
 
+def _is_outlet_id(down_id: object, outlet_value: int) -> bool:
+  """Return True for outlet sentinels (configured value, or legacy <= 0)."""
+  try:
+    down = int(down_id)
+  except (TypeError, ValueError):
+    return True
+  return down == int(outlet_value) or down <= 0
+
+
+def _remap_aggdown_to_survivors(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  agg_col: str = "agg",
+  aggdown_col: str = "aggdown",
+  outlet_value: int = OUTLET_VALUE,
+) -> gpd.GeoDataFrame:
+  """
+  Rewrite ``aggdown`` so every link targets a surviving aggregate id.
+
+  Small basins are absorbed into a downstream ``agg`` id during aggregation, but
+  lakes and other protected units can keep a stale ``aggdown`` that still points
+  at the absorbed (now missing) id. Map each original id to its final ``agg`` and
+  resolve ``aggdown`` through that map. Terminal / self-draining links become
+  ``outlet_value``.
+  """
+  outlet_value = int(outlet_value)
+  id_to_agg = {
+    int(orig): int(agg)
+    for orig, agg in zip(basin[id_col].to_numpy(), basin[agg_col].to_numpy())
+  }
+  survivors = set(id_to_agg.values())
+
+  def remap_one(down_id: object, self_agg: int) -> int:
+    try:
+      down = int(down_id)
+    except (TypeError, ValueError):
+      return outlet_value
+    if _is_outlet_id(down, outlet_value):
+      return outlet_value
+
+    seen: set[int] = set()
+    while down not in survivors:
+      if down not in id_to_agg or down in seen:
+        # Leaves the aggregated domain — treat as outlet.
+        return outlet_value
+      seen.add(down)
+      down = id_to_agg[down]
+
+    if down == self_agg:
+      return outlet_value
+    return down
+
+  out = basin.copy()
+  out[aggdown_col] = [
+    remap_one(down, int(self_agg))
+    for down, self_agg in zip(out[aggdown_col].to_numpy(), out[agg_col].to_numpy())
+  ]
+  return out
+
+
+def _validate_topology(
+  basins: gpd.GeoDataFrame,
+  rivers: gpd.GeoDataFrame,
+  id_col: str,
+  down_col: str,
+  outlet_value: int = OUTLET_VALUE,
+) -> None:
+  """Raise when any DSLINKNO points at a missing LINKNO / basin id."""
+  basin_ids = set(basins[id_col].astype(int))
+  river_ids = set(rivers[id_col].astype(int)) if id_col in rivers.columns else set()
+  ids = basin_ids | river_ids
+  outlet_value = int(outlet_value)
+
+  def dangling(gdf: gpd.GeoDataFrame) -> list[int]:
+    downs = set(int(d) for d in gdf[down_col].to_numpy())
+    return sorted(
+      d for d in downs
+      if d not in ids and not _is_outlet_id(d, outlet_value)
+    )
+
+  bad_b = dangling(basins)
+  bad_r = dangling(rivers)
+  if bad_b or bad_r:
+    raise ValueError(
+      "Aggregated topology has DSLINKNO values with no matching LINKNO: "
+      f"basins={bad_b[:10]}{'...' if len(bad_b) > 10 else ''}, "
+      f"rivers={bad_r[:10]}{'...' if len(bad_r) > 10 else ''}. "
+      "Downstream links were not fully remapped onto surviving aggregates."
+    )
+
+
 def prepare_input_tables(
   input_basin: gpd.GeoDataFrame,
   input_river: gpd.GeoDataFrame,
@@ -112,7 +207,7 @@ def prepare_input_tables(
 
   basin[BASIN_ID] = basin[BASIN_ID].astype(int)
   river[RIVER_ID] = river[RIVER_ID].astype(int)
-  river[NEXT_DOWN_ID] = river[NEXT_DOWN_ID].fillna(-1).astype(int)
+  river[NEXT_DOWN_ID] = river[NEXT_DOWN_ID].fillna(OUTLET_VALUE).astype(int)
 
   join_cols = [
     c
@@ -187,6 +282,7 @@ def basin_aggregation(
   min_sub_area: float,
   min_riv_slope: float,
   min_riv_length: float,
+  outlet_value: int = OUTLET_VALUE,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
   """
   Aggregate basins and rivers based on drainage area, slope, and reservoir masking.
@@ -194,7 +290,10 @@ def basin_aggregation(
   Returns aggregated basin and river GeoDataFrames. Each basin is identified by
   BASIN_ID. Gauge IDs, lake flags/IDs, lake area, and fractional lake area are
   pour-point attributes only.
+
+  Terminal basins receive ``outlet_value`` in ``DSLINKNO`` (default ``OUTLET_VALUE``).
   """
+  outlet_value = int(outlet_value)
   basin, river = prepare_input_tables(input_basin, input_river)
 
   id_col = BASIN_ID
@@ -205,17 +304,29 @@ def basin_aggregation(
   river.loc[river[SLOPE] >= 1.0, SLOPE] = min_riv_slope
   river["_lengthkm"] = river["_lengthkm"].clip(lower=min_riv_length)
 
+  # Normalize any legacy outlet markers (-1, 0, ...) to the configured sentinel.
+  river.loc[
+    river[down_col].map(lambda d: _is_outlet_id(d, outlet_value)),
+    down_col,
+  ] = outlet_value
+
   basin["Mask"] = 0
-  basin.loc[basin[down_col] <= 0, "Mask"] = 1
+  basin.loc[basin[down_col].map(lambda d: _is_outlet_id(d, outlet_value)), "Mask"] = 1
   basin.loc[basin["_has_gauge"] > 0, "Mask"] = 2
   basin.loc[basin["_lake_cat"] > 0, "Mask"] = 3
   basin["agg"] = basin[id_col]
   basin["aggdown"] = basin[down_col]
+  basin.loc[
+    basin["aggdown"].map(lambda d: _is_outlet_id(d, outlet_value)),
+    "aggdown",
+  ] = outlet_value
+
+  def _drop_small_outlets(df: pd.DataFrame) -> pd.DataFrame:
+    is_outlet = df["aggdown"].map(lambda d: _is_outlet_id(d, outlet_value))
+    return df[~(is_outlet & (df["_uparea"] < min_sub_area) | (df["Mask"] == 3))]
 
   agg_basin = basin[["agg", "aggdown", "_unitarea", "_uparea", "Mask"]].copy()
-  agg_basin = agg_basin[
-    ~(((agg_basin["aggdown"] <= 0) & (agg_basin["_uparea"] < min_sub_area)) | (agg_basin["Mask"] == 3))
-  ]
+  agg_basin = _drop_small_outlets(agg_basin)
   lake_subs = basin[basin["Mask"] == 3]["agg"]
   no_subbasin = len(basin)
 
@@ -241,9 +352,7 @@ def basin_aggregation(
       agg_basin = agg_basin.rename(columns={"agg": id_col, "aggdown": down_col})
       agg_basin = agg_basin.merge(basin[[id_col, "_uparea", "Mask"]], on=id_col, how="left")
       agg_basin = agg_basin.rename(columns={id_col: "agg", down_col: "aggdown"})
-      agg_basin = agg_basin[
-        ~(((agg_basin["aggdown"] <= 0) & (agg_basin["_uparea"] < min_sub_area)) | (agg_basin["Mask"] == 3))
-      ]
+      agg_basin = _drop_small_outlets(agg_basin)
 
     condition = (
       agg_basin["agg"].isin(agg_basin["aggdown"])
@@ -270,13 +379,19 @@ def basin_aggregation(
       agg_basin = agg_basin.rename(columns={"agg": id_col, "aggdown": down_col})
       agg_basin = agg_basin.merge(basin[[id_col, "_uparea", "Mask"]], on=id_col, how="left")
       agg_basin = agg_basin.rename(columns={id_col: "agg", down_col: "aggdown"})
-      agg_basin = agg_basin[
-        ~(((agg_basin["aggdown"] <= 0) & (agg_basin["_uparea"] < min_sub_area)) | (agg_basin["Mask"] == 3))
-      ]
+      agg_basin = _drop_small_outlets(agg_basin)
 
     if len(agg_basin[agg_basin["_unitarea"] < min_sub_area]) == no_subbasin:
       break
     no_subbasin = len(agg_basin[agg_basin["_unitarea"] < min_sub_area])
+
+  # Lakes / gauges keep their original downstream ids; remap those onto the
+  # surviving aggregate that absorbed each missing target.
+  basin = _remap_aggdown_to_survivors(
+    basin, id_col=id_col, outlet_value=outlet_value
+  )
+  pour_down = basin.loc[basin[id_col] == basin["agg"], ["agg", "aggdown"]]
+  basin = basin.drop(columns=["aggdown"]).merge(pour_down, on="agg", how="left")
 
   agg_basin = basin.dissolve(by="agg", aggfunc={"_unitarea": "sum"}, as_index=False).rename(
     columns={"agg": id_col}
@@ -354,6 +469,20 @@ def basin_aggregation(
   agg_river[riv_id_col] = agg_river[riv_id_col].astype("int64")
   agg_river[down_col] = agg_river[down_col].astype("int64")
 
+  # Basin object ids (DN) match river LINKNO values after aggregation; expose a
+  # single LINKNO key on both layers for MESH / topology tools.
+  if id_col != riv_id_col:
+    agg_basin = agg_basin.rename(columns={id_col: riv_id_col})
+    id_col = riv_id_col
+
+  _validate_topology(
+    agg_basin,
+    agg_river,
+    id_col=id_col,
+    down_col=down_col,
+    outlet_value=outlet_value,
+  )
+
   return agg_basin, agg_river
 
 
@@ -365,6 +494,7 @@ def run_aggregation(
   min_sub_area: float = MIN_SUB_AREA,
   min_riv_slope: float = MIN_RIV_SLOPE,
   min_riv_length: float = MIN_RIV_LENGTH,
+  outlet_value: int = OUTLET_VALUE,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
   """Load cleanGeofabric outputs, aggregate, and write shapefiles."""
   print(f"Loading basins: {basins_path}")
@@ -378,6 +508,7 @@ def run_aggregation(
     min_sub_area,
     min_riv_slope,
     min_riv_length,
+    outlet_value=outlet_value,
   )
 
   os.makedirs(os.path.dirname(output_basins_path) or ".", exist_ok=True)
