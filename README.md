@@ -14,7 +14,7 @@ Submit the workflow using:
 sbatch tau-dem-delineation-srun.slurm
 ```
 
-The workflow builds a stream network and watershed delineation for the **Bow–Bassano DEM** using three TauDEM passes with Python-based corrections between each pass.
+The workflow builds a stream network and watershed delineation for a selected DEM using three TauDEM passes with Python-based corrections between each pass.
 
 ---
 
