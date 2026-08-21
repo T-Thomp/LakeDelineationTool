@@ -21,7 +21,7 @@ The workflow builds a stream network and watershed delineation for a selected DE
 # Pipeline
 
 ```text
-DEM (bow-bassano-elv.tif)
+DEM (DEM.tif)
        │
        ▼
 Pass 1 ─ TauDEM
