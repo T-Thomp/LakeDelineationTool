@@ -17,12 +17,28 @@ import pandas as pd
 
 
 # ==============================================================================
-# COLUMN NAMES — edit these to match your shapefile attribute tables
+# COLUMN NAMES — legacy TauDEM/MESH fields on disk; canonical HY_Features names
+# are added by hy_features.enrich. See docs/hy_features_mapping.md.
 # ==============================================================================
-# Shared topology
-BASIN_ID = "DN"             # primary basin object id
-RIVER_ID = "LINKNO"             # stream reach ID
-NEXT_DOWN_ID = "DSLINKNO"       # downstream link / basin ID (outlet sentinel below)
+from hy_features.schema import (
+    FRAC_LAKE,
+    LEGACY_BASIN_ID,
+    LEGACY_FLOWPATH_ID,
+    LEGACY_GAUGE_IDS,
+    LEGACY_IS_LAKE,
+    LEGACY_LAKE_AREA,
+    LEGACY_LAKE_ID,
+    LEGACY_LOWER_ID,
+)
+
+BASIN_ID = LEGACY_BASIN_ID
+RIVER_ID = LEGACY_FLOWPATH_ID
+NEXT_DOWN_ID = LEGACY_LOWER_ID
+GAUGE_IDS = LEGACY_GAUGE_IDS
+LAKE_FLAG = LEGACY_IS_LAKE
+LAKE_ID = LEGACY_LAKE_ID
+LAKE_AREA = LEGACY_LAKE_AREA
+FRAC_LAKE_AREA = FRAC_LAKE
 
 # Basin areas (km² after conversion; see AREA_SCALE)
 UNIT_AREA: Optional[str] = None  # local sub-basin area; None -> polygon area
@@ -33,14 +49,7 @@ SLOPE = "Slope"
 LENGTH = "Length"                # reach length; converted with LENGTH_SCALE
 
 # Masking / special units
-LAKE_FLAG = "is_lake"            # >0 marks reservoir/lake sub-basins (not aggregated)
 GAUGE_FLAG: Optional[str] = None  # numeric 0/1 column; None -> derive from GAUGE_IDS
-GAUGE_IDS = "STATION_NU"         # gauge attribute only (not the basin object id)
-
-# Basin attributes carried through to aggregated output (from pour-point basin)
-LAKE_ID = "lake_id"
-LAKE_AREA = "lake_area"          # m² (shapefile-safe name, ≤10 chars)
-FRAC_LAKE_AREA = "frac_lake"     # fraction of basin covered by lake (geom intersection / basin area)
 
 # Extra river attributes carried through to aggregated output
 STREAM_ORDER = "strmOrder"

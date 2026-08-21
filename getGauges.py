@@ -16,6 +16,7 @@ Inputs
 Outputs
 -------
   points/gauges_in_basin.shp
+  points/gauges_in_basin.gpkg  (optional, when HY_Features enabled)
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ from pathlib import Path
 import geopandas as gpd
 import pandas as pd
 
+from hy_features.config import hy_features_enabled
+
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
@@ -33,7 +36,10 @@ PATHS = {
     "basins": "delineation-product/original-delineated-watersheds.shp",
     "hydat_db": "Hydat.sqlite3",
     "output_shp": "points/gauges_in_basin.shp",
+    "output_gpkg": "points/gauges_in_basin.gpkg",
 }
+
+ENABLE_HY_FEATURES = False  # overridden by HY_FEATURES_ENABLED env var if set
 
 HYDAT_ACTIVE_FLOW_QUERY = """
 SELECT DISTINCT
@@ -88,9 +94,18 @@ def clip_gauges_to_basin(
     return clipped.to_crs(subbasins.crs)
 
 
-def export_gauges(gauges: gpd.GeoDataFrame, output_shp: str) -> None:
-    """Write gauge point shapefile."""
+def export_gauges(gauges: gpd.GeoDataFrame) -> None:
+    """Write shapefile and optional HY_Features GeoPackage sidecar."""
+    output_shp = PATHS["output_shp"]
     Path(output_shp).parent.mkdir(parents=True, exist_ok=True)
+
+    if hy_features_enabled(default=ENABLE_HY_FEATURES):
+        from hy_features.enrich import enrich_hydrometric_features
+        from hy_features.export import export_geopackage
+
+        gauges = enrich_hydrometric_features(gauges)
+        export_geopackage({"hydrometric_feature": gauges}, PATHS["output_gpkg"])
+
     gauges.to_file(output_shp)
     print(f"Saved {len(gauges)} gauges to {output_shp}")
 
@@ -102,7 +117,7 @@ def get_gauges_in_basin(paths: dict[str, str] | None = None) -> gpd.GeoDataFrame
     subbasins, basin_dissolved = load_basin_layers(paths["basins"])
     gauges = query_active_flow_gauges(paths["hydat_db"])
     gauges_in_basin = clip_gauges_to_basin(gauges, basin_dissolved, subbasins)
-    export_gauges(gauges_in_basin, paths["output_shp"])
+    export_gauges(gauges_in_basin)
 
     print(f"{len(gauges_in_basin)} gauge(s) within the combined basin.")
     return gauges_in_basin

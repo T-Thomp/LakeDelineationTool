@@ -3,6 +3,11 @@ import pandas as pd
 from shapely.ops import linemerge, snap
 from shapely.geometry import MultiLineString
 
+from hy_features.config import hy_features_enabled
+
+ENABLE_HY_FEATURES = False  # overridden by HY_FEATURES_ENABLED env var if set
+
+
 def bypass_phantom_streams(streams_path, basins_path, output_path):
     """
     Removes TauDEM phantom streams by merging them into upstream reaches.
@@ -276,6 +281,66 @@ def dissolve_split_basins(input_path, output_path):
     dissolved_basins.to_file(output_path, driver="ESRI Shapefile")
     print(f"Successfully saved dissolved basins to {output_path}")
 
+
+def export_hy_features_geofabric(
+    basins_path: str,
+    streams_path: str,
+    gauges_path: str,
+    gpkg_path: str = "merged_basins/geofabric.gpkg",
+    registry_path: str = "merged_basins/catchment_registry.json",
+    waterbodies_path: str | None = "lakes/filtered_lakes.shp",
+    hydro_locations_path: str | None = "points/pourPointsFinal.shp",
+) -> None:
+    """Assemble and export fully HY_Features-conformant geofabric products."""
+    if not hy_features_enabled(default=ENABLE_HY_FEATURES):
+        print("HY_Features disabled; skipping geofabric.gpkg assembly.")
+        return
+
+    from hy_features.assemble import assemble_full_geofabric, export_full_geofabric
+
+    basins = gpd.read_file(basins_path)
+    streams = gpd.read_file(streams_path)
+
+    gauges = None
+    try:
+        gauges = gpd.read_file(gauges_path)
+    except Exception as exc:
+        print(f"No gauge layer: {exc}")
+
+    waterbodies = None
+    if waterbodies_path:
+        try:
+            waterbodies = gpd.read_file(waterbodies_path)
+            if waterbodies.crs != basins.crs:
+                waterbodies = waterbodies.to_crs(basins.crs)
+        except Exception as exc:
+            print(f"No waterbody layer: {exc}")
+
+    hydro_locations = None
+    if hydro_locations_path:
+        try:
+            hydro_locations = gpd.read_file(hydro_locations_path)
+            if hydro_locations.crs != basins.crs:
+                hydro_locations = hydro_locations.to_crs(basins.crs)
+        except Exception as exc:
+            print(f"No hydro_location layer: {exc}")
+
+    assembled = assemble_full_geofabric(
+        basins,
+        streams,
+        gauges=gauges,
+        waterbodies=waterbodies,
+        hydro_locations=hydro_locations,
+    )
+
+    export_full_geofabric(
+        assembled,
+        gpkg_path=gpkg_path,
+        registry_path=registry_path,
+        metadata_path=str(gpkg_path).replace(".gpkg", "_network.json"),
+        validation_path=str(gpkg_path).replace(".gpkg", "_validation.json"),
+    )
+
 def add_gauge_info_to_basins(input_path, gauge_path, output_path):
     # 1. Load your data
     basins = gpd.read_file(input_path)
@@ -315,9 +380,23 @@ if __name__ == "__main__":
     input_gauges = "points/gauges_in_basin.shp"
     output_streams = "merged_basins/reservoirStreams_final.shp"
     output_basins = "merged_basins/reservoirBasins_final.shp"
-    
-    
+
     dissolve_split_basins(input_basins, output_basins)
     bypass_phantom_streams(input_streams, input_basins, output_streams)
-    # Join gauges onto the dissolved basins (not the pre-dissolve input)
     add_gauge_info_to_basins(output_basins, input_gauges, output_basins)
+
+    export_hy_features_geofabric(
+        output_basins,
+        output_streams,
+        input_gauges,
+    )
+
+    if hy_features_enabled(default=ENABLE_HY_FEATURES):
+        from hy_features.export import export_shapefile_legacy
+
+        assembled_layers = gpd.read_file("merged_basins/geofabric.gpkg", layer="catchment_area")
+        assembled_streams = gpd.read_file("merged_basins/geofabric.gpkg", layer="flowpath")
+        export_shapefile_legacy(assembled_layers, output_basins)
+        export_shapefile_legacy(assembled_streams, output_streams)
+    else:
+        print("HY_Features disabled; using TauDEM-only reservoirBasins_final / reservoirStreams_final shapefiles.")

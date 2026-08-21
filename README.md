@@ -14,14 +14,14 @@ Submit the workflow using:
 sbatch tau-dem-delineation-srun.slurm
 ```
 
-The workflow builds a stream network and watershed delineation for the **Bow–Bassano DEM** using three TauDEM passes with Python-based corrections between each pass.
+The workflow builds a stream network and watershed delineation for a selected DEM using three TauDEM passes with Python-based corrections between each pass.
 
 ---
 
 # Pipeline
 
 ```text
-DEM (bow-bassano-elv.tif)
+DEM (DEM.tif)
        │
        ▼
 Pass 1 ─ TauDEM
@@ -469,6 +469,59 @@ Contains the cleaned geofabric:
 
 - Reservoir-merged basins
 - Cleaned stream network
+- **`geofabric.gpkg`** — full HY_Features GeoPackage (`catchment_area`, `flowpath`, `hydro_nexus`, `waterbody`, `hydrometric_feature`, `hydro_location`)
+- **`catchment_registry.json`** — catchment identity ↔ realization links
+- **`hydrographic_network.json`** — dendritic catchment table + network metadata
+- **`hy_features_validation.json`** — conformance inspection report
 - Optional aggregated watershed products
+
+---
+
+# OGC HY_Features alignment
+
+HY_Features enrichment is **off by default**. Enable it for `geofabric.gpkg`, HY columns, and validation JSON:
+
+```bash
+export HY_FEATURES_ENABLED=1   # or set ENABLE_HY_FEATURES = True in a script
+```
+
+When enabled, outputs implement the [OGC HY_Features conceptual model (14-111r6)](https://docs.ogc.org/is/14-111r6/14-111r6.html) as an **implementation schema** with automated validation. Mandatory associations include outflow/inflow nexus IDs, river referencing on gauges, and waterbody network links.
+
+After `cleanGeofabric.py`, confirm `"conformant": true` in `merged_basins/hy_features_validation.json`.
+
+See [`docs/hy_features_mapping.md`](docs/hy_features_mapping.md) for the complete property mapping.
+
+## Downstream model remapping
+
+The canonical product is `geofabric.gpkg`. To export shapefiles for a specific routing model, use [`remap_fields.py`](remap_fields.py):
+
+```bash
+python remap_fields.py --list-presets
+python remap_fields.py --list-mappings --preset mesh
+
+python remap_fields.py \
+  --preset mesh \
+  --basins merged_basins/geofabric.gpkg \
+  --streams merged_basins/geofabric.gpkg \
+  --drop-metadata \
+  --out-dir remapped_products/
+```
+
+Writes `remapped_products/basins_mesh.shp` and `streams_mesh.shp` (integer IDs; outlet sentinel from preset).
+
+### Other models
+
+Add a preset to [`hy_features/model_presets.json`](hy_features/model_presets.json) or use `--override`:
+
+```bash
+python remap_fields.py \
+  --preset my_model \
+  --preset-file my_model.json \
+  --streams merged_basins/geofabric.gpkg \
+  --streams-layer flowpath \
+  --override lower_catchment_id=DOWN_ID \
+  --output remapped_products/streams.shp \
+  --drop-metadata
+```
 
 ---

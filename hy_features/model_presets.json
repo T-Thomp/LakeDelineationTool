@@ -1,0 +1,34 @@
+{
+  "mesh": {
+    "description": "MESH / WATFLOOD — TauDEM-style DN, LINKNO, DSLINKNO (-9999 outlet)",
+    "outlet_sentinel": -9999,
+    "layers": {
+      "catchment_area": {
+        "catchment_id": "LINKNO",
+        "is_lake_catchment": "is_lake",
+        "waterbody_id": "lake_id",
+        "lake_area_m2": "lake_area",
+        "STATION_NU": "STATION_N"
+      },
+      "flowpath": {
+        "flowpath_id": "LINKNO",
+        "catchment_id": "LINKNO",
+        "lower_catchment_id": "DSLINKNO",
+        "realizes_catchment": "LINKNO"
+      }
+    }
+  },
+  "taudem_raw": {
+    "description": "Minimal TauDEM names only — same as mesh but documents TauDEM provenance",
+    "outlet_sentinel": -9999,
+    "layers": {
+      "catchment_area": {
+        "catchment_id": "DN"
+      },
+      "flowpath": {
+        "flowpath_id": "LINKNO",
+        "lower_catchment_id": "DSLINKNO"
+      }
+    }
+  }
+}
