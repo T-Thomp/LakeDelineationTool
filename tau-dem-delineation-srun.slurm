@@ -1,11 +1,11 @@
 #!/bin/bash
 # =============================================================================
-# TauDEM South Saskatchewan Basin Delineation Pipeline
+# TauDEM Reservoir Basin Delineation Pipeline
 # =============================================================================
 #
 # Submit with:  sbatch tau-dem-delineation-srun.slurm
 #
-# This job builds a stream network and watershed delineation for the Bow-Bassano
+# This job builds a stream network and watershed delineation for a selected
 # DEM, with special handling for instream reservoirs (lakes). TauDEM alone
 # cannot pick sensible outlets through flat lake surfaces, so Python scripts
 # edit flow directions and pour points between TauDEM passes.
@@ -13,7 +13,7 @@
 # PIPELINE OVERVIEW
 # -----------------
 #
-#   DEM (bow-bassano-elv.tif)
+#   DEM (DEM.tif)
 #        |
 #        v
 #   [Pass 1] TauDEM -- standard hydrologic conditioning + full network
