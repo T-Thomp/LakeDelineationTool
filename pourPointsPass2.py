@@ -6,6 +6,10 @@ from osgeo import gdal, ogr, osr
 from shapely.geometry import Point
 from scipy.ndimage import binary_erosion
 
+from hy_features.config import hy_features_enabled
+
+ENABLE_HY_FEATURES = False  # overridden by HY_FEATURES_ENABLED env var if set
+
 # Enable GDAL exceptions to catch raster I/O issues cleanly
 gdal.UseExceptions()
 
@@ -314,7 +318,15 @@ def extract_reservoir_io_points(paths):
         lake_pts = gpd.GeoDataFrame(columns=['name', 'point_type', 'geometry'], crs=streams_gdf.crs)
 
     os.makedirs(os.path.dirname(paths["out_lake_nodes"]), exist_ok=True)
+    if hy_features_enabled(default=ENABLE_HY_FEATURES):
+        from hy_features.enrich import enrich_hydro_locations
+
+        lake_pts = enrich_hydro_locations(lake_pts)
     lake_pts.to_file(paths["out_lake_nodes"])
+    if hy_features_enabled(default=ENABLE_HY_FEATURES):
+        from hy_features.export import export_geopackage
+
+        export_geopackage({"hydro_location": lake_pts}, paths["out_lake_nodes"].replace(".shp", ".gpkg"))
     print(f"  -> Successfully saved pure reservoir node intersections to: {paths['out_lake_nodes']}")
 
     # Process Gauges (optional)
@@ -337,7 +349,15 @@ def extract_reservoir_io_points(paths):
     print("\n[5/5] Merging hydrologic layers and creating final master shapefile...")
 
     os.makedirs(os.path.dirname(paths["out"]), exist_ok=True)
+    if hy_features_enabled(default=ENABLE_HY_FEATURES):
+        from hy_features.enrich import enrich_hydro_locations
+
+        export_gdf = enrich_hydro_locations(export_gdf)
     export_gdf.to_file(paths["out"])
+    if hy_features_enabled(default=ENABLE_HY_FEATURES):
+        from hy_features.export import export_geopackage
+
+        export_geopackage({"hydro_location": export_gdf}, paths["out"].replace(".shp", ".gpkg"))
     
     print("\n" + "="*40 + f"\nFINISH: Processing complete.\n" + "="*40)
 

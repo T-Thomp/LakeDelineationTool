@@ -71,6 +71,7 @@ import pandas as pd
 from shapely.geometry import Point
 
 from rasterFlowpathEdit import load_overrides
+from hy_features.config import hy_features_enabled
 
 # ==============================================================================
 # CONFIGURATION
@@ -79,6 +80,7 @@ GAUGE_SEARCH_RADIUS = 750       # meters; max distance to count a gauge as "near
 MIN_INTERNAL_STREAM_LEN = 180   # meters; stream-lake overlap length that triggers swallow
 OVERRIDES_CSV = "outlet_overrides.csv"
 OUTPUT_DIR = "merged_basins"
+ENABLE_HY_FEATURES = False      # overridden by HY_FEATURES_ENABLED env var if set
 
 PATHS = {
     "basins": "delineation-product/final-delineated-watersheds.shp",
@@ -737,8 +739,39 @@ def process_reservoir_basins():
     final_geofabric["frac_lake"] = final_geofabric["frac_lake"].fillna(0.0)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    export_shapefile(final_geofabric, f"{OUTPUT_DIR}/reservoirBasins.shp")
-    export_shapefile(streams_dissolved, f"{OUTPUT_DIR}/reservoirStreams.shp")
+
+    waterbodies = None
+    try:
+        waterbodies = gpd.read_file(PATHS["lakes"])
+        if waterbodies.crs != target_crs:
+            waterbodies = waterbodies.to_crs(target_crs)
+    except Exception:
+        pass
+
+    if hy_features_enabled(default=ENABLE_HY_FEATURES):
+        from hy_features.assemble import assemble_full_geofabric, export_full_geofabric
+        from hy_features.export import export_shapefile_legacy
+
+        assembled = assemble_full_geofabric(
+            final_geofabric,
+            streams_dissolved,
+            gauges=gauges,
+            waterbodies=waterbodies,
+        )
+
+        export_full_geofabric(
+            assembled,
+            gpkg_path=f"{OUTPUT_DIR}/geofabric.gpkg",
+            registry_path=f"{OUTPUT_DIR}/catchment_registry.json",
+            metadata_path=f"{OUTPUT_DIR}/hydrographic_network.json",
+            validation_path=f"{OUTPUT_DIR}/hy_features_validation.json",
+        )
+
+        export_shapefile_legacy(assembled["layers"]["catchment_area"], f"{OUTPUT_DIR}/reservoirBasins.shp")
+        export_shapefile_legacy(assembled["layers"]["flowpath"], f"{OUTPUT_DIR}/reservoirStreams.shp")
+    else:
+        export_shapefile(final_geofabric, f"{OUTPUT_DIR}/reservoirBasins.shp")
+        export_shapefile(streams_dissolved, f"{OUTPUT_DIR}/reservoirStreams.shp")
     print("Processing complete.")
 
 

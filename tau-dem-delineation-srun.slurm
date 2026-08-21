@@ -60,6 +60,7 @@
 #       VENV               -- Python venv activate script (geopandas, etc.)
 #       STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
 #       FLOWPATH_NCORES    -- MPI ranks for rasterFlowpathEdit.py
+#       HY_FEATURES_ENABLED -- unset/off by default; export =1 to enable HY geofabric
 #       #SBATCH --account / --ntasks / --mem-per-cpu / --time
 #
 # [ ] filterLakes.py
@@ -156,6 +157,9 @@ STREAM_THRESHOLD=5555
 # Launch with srun --ntasks=N --cpus-per-task=1 (one MPI rank per task).
 # Set lower than SBATCH --ntasks if you want fewer Python ranks than TauDEM cores.
 FLOWPATH_NCORES=16
+
+# HY_Features enrichment + geofabric.gpkg (off by default; uncomment to enable)
+# export HY_FEATURES_ENABLED=1
 
 DEM="$HOME_DIR/dem/Sask-mrdem-30-dtm.tif"
 VENV="/home/$USER/virtual-envs/scienv/bin/activate"
