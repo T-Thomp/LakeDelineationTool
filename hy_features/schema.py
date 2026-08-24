@@ -22,6 +22,7 @@ HY_HYDRO_LOCATION: Final[str] = "HY_HydroLocation"
 HY_HYDROMETRIC_FEATURE: Final[str] = "HY_HydrometricFeature"
 HY_LAKE: Final[str] = "HY_Lake"
 HY_IMPOUNDMENT: Final[str] = "HY_Impoundment"
+HY_RESERVOIR: Final[str] = "HY_Reservoir"
 HY_HYDRO_NEXUS: Final[str] = "HY_HydroNexus"
 HY_HYDROGRAPHIC_NETWORK: Final[str] = "HY_HydrographicNetwork"
 HY_INDIRECT_POSITION: Final[str] = "HY_IndirectPosition"
@@ -67,6 +68,13 @@ DISTANCE_FROM_OUTLET_PCT: Final[str] = "distance_from_outlet_pct"
 DRAINAGE_PATTERN_COL: Final[str] = "drainage_pattern"
 HYF_TYPE_URI: Final[str] = "hyf_type_uri"
 NETWORK_ID: Final[str] = "network_id"
+DEFAULT_NETWORK_ID: Final[str] = "study_hydrographic_network"
+CONFORMANCE_PROFILE: Final[str] = "LakeDelineationTool-DendriticGeofabric-1.0"
+
+# GF_Feature / HY_HydroFeature metadata
+FEATURE_ID: Final[str] = "feature_id"
+FEATURE_NAME: Final[str] = "feature_name"
+REALIZED_NEXUS_ID: Final[str] = "realized_nexus_id"
 
 # Legacy TauDEM / MESH column names (kept as optional aliases)
 LEGACY_BASIN_ID: Final[str] = "DN"
@@ -77,10 +85,15 @@ LEGACY_IS_LAKE: Final[str] = "is_lake"
 LEGACY_LAKE_AREA: Final[str] = "lake_area"
 LEGACY_GAUGE_IDS: Final[str] = "STATION_NU"
 
-# HydroLAKES source columns
+# HydroLAKES source columns (Lake_type: 1=lake, 2=reservoir, 3=lake control)
 HYLAKES_ID: Final[str] = "Hylak_id"
 HYLAKES_LAKE_TYPE: Final[str] = "Lake_type"
+HYLAKES_LAKE_NAME: Final[str] = "Lake_name"
 HYLAKES_NATURAL_LAKE: Final[int] = 1
+HYLAKES_RESERVOIR: Final[int] = 2
+HYLAKES_LAKE_CONTROL: Final[int] = 3
+LAKE_TYPE: Final[str] = "lake_type"
+LEGACY_LAKE_TYPE: Final[str] = "Lake_type"
 
 # Annex B.1 — hydroLocationType vocabulary (subset used by this workflow)
 HYDRO_LOC_POUR_POINT: Final[str] = "pour point"
@@ -138,14 +151,15 @@ def hyf_type_uri(short_code: str) -> str:
     return f"{HYF_NS}{short_code}"
 
 
-def classify_waterbody(lake_type: int | float | None, is_lake_catchment: bool = False) -> str:
-    """Map HydroLAKES Lake_type to HY_Lake / HY_Impoundment / HY_Reservoir."""
-    if is_lake_catchment:
-        return HY_RESERVOIR
+def classify_waterbody(lake_type: int | float | None) -> str:
+    """Map HydroLAKES ``Lake_type`` to ``HY_Lake`` / ``HY_Impoundment`` (``HY_WaterBody`` subtypes)."""
     try:
         lt = int(lake_type)
     except (TypeError, ValueError):
         return HY_LAKE
-    if lt == HYLAKES_NATURAL_LAKE:
-        return HY_LAKE
-    return HY_IMPOUNDMENT
+    if lt in (HYLAKES_RESERVOIR, HYLAKES_LAKE_CONTROL):
+        return HY_IMPOUNDMENT
+    return HY_LAKE
+
+
+WATERBODY_HYF_TYPES: Final[frozenset[str]] = frozenset({HY_LAKE, HY_IMPOUNDMENT})

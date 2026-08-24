@@ -337,8 +337,7 @@ def export_hy_features_geofabric(
         assembled,
         gpkg_path=gpkg_path,
         registry_path=registry_path,
-        metadata_path=str(gpkg_path).replace(".gpkg", "_network.json"),
-        validation_path=str(gpkg_path).replace(".gpkg", "_validation.json"),
+        metadata_path=registry_path.replace("catchment_registry.json", "hydrographic_network.json"),
     )
 
 def add_gauge_info_to_basins(input_path, gauge_path, output_path):

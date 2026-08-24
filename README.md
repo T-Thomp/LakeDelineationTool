@@ -472,24 +472,21 @@ Contains the cleaned geofabric:
 - **`geofabric.gpkg`** — full HY_Features GeoPackage (`catchment_area`, `flowpath`, `hydro_nexus`, `waterbody`, `hydrometric_feature`, `hydro_location`)
 - **`catchment_registry.json`** — catchment identity ↔ realization links
 - **`hydrographic_network.json`** — dendritic catchment table + network metadata
-- **`hy_features_validation.json`** — conformance inspection report
 - Optional aggregated watershed products
 
 ---
 
 # OGC HY_Features alignment
 
-HY_Features enrichment is **off by default**. Enable it for `geofabric.gpkg`, HY columns, and validation JSON:
+HY_Features enrichment is **off by default**. Enable it for `geofabric.gpkg`, HY columns, and JSON sidecars:
 
 ```bash
 export HY_FEATURES_ENABLED=1   # or set ENABLE_HY_FEATURES = True in a script
 ```
 
-When enabled, outputs implement the [OGC HY_Features conceptual model (14-111r6)](https://docs.ogc.org/is/14-111r6/14-111r6.html) as an **implementation schema** with automated validation. Mandatory associations include outflow/inflow nexus IDs, river referencing on gauges, and waterbody network links.
+When enabled, outputs implement the [OGC HY_Features conceptual model (14-111r6)](https://docs.ogc.org/is/14-111r6/14-111r6.html) as an **implementation schema** under profile **`LakeDelineationTool-DendriticGeofabric-1.0`**.
 
-After `cleanGeofabric.py`, confirm `"conformant": true` in `merged_basins/hy_features_validation.json`.
-
-See [`docs/hy_features_mapping.md`](docs/hy_features_mapping.md) for the complete property mapping.
+See [`docs/hy_features_mapping.md`](docs/hy_features_mapping.md) and [`docs/hy_features_implementation_conventions.md`](docs/hy_features_implementation_conventions.md).
 
 ## Downstream model remapping
 

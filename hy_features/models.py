@@ -6,6 +6,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def _json_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("", "nan", "none"):
+        return None
+    return value
+
+
 @dataclass
 class Catchment:
     """HY_DendriticCatchment — holistic catchment identity."""
@@ -97,7 +105,17 @@ class CatchmentRegistry:
 
     def to_full_payload(self) -> dict[str, Any]:
         return {
-            "catchments": {k: v.__dict__ for k, v in self.catchments.items()},
+            "catchments": {
+                k: {
+                    "code": v.code,
+                    "hyf_type": v.hyf_type,
+                    "outflow_nexus_id": v.outflow_nexus_id,
+                    "inflow_nexus_id": _json_value(v.inflow_nexus_id),
+                    "lower_catchment_id": _json_value(v.lower_catchment_id),
+                    "waterbody_id": _json_value(v.waterbody_id),
+                }
+                for k, v in self.catchments.items()
+            },
             "realizations": self.to_records(),
         }
 
@@ -107,8 +125,8 @@ class CatchmentRegistry:
                 "catchment_id": e.catchment_id,
                 "realization_type": e.realization_type,
                 "feature_id": e.feature_id,
-                "waterbody_id": e.waterbody_id or "",
-                "notes": e.notes,
+                "waterbody_id": _json_value(e.waterbody_id),
+                "notes": _json_value(e.notes) or "",
             }
             for e in self.entries
         ]

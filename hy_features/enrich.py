@@ -16,8 +16,9 @@ from hy_features.schema import (
     HY_FLOWPATH,
     HY_HYDRO_LOCATION,
     HY_HYDROMETRIC_FEATURE,
-    HY_RESERVOIR,
     IS_LAKE_CATCHMENT,
+    LAKE_TYPE,
+    LEGACY_LAKE_TYPE,
     LAKE_AREA_M2,
     LEGACY_BASIN_ID,
     LEGACY_FLOWPATH_ID,
@@ -34,6 +35,25 @@ from hy_features.schema import (
     WATERBODY_ID,
     classify_waterbody,
 )
+
+
+def _lake_type_from_row(row: pd.Series) -> int | None:
+    """Read HydroLAKES Lake_type from basin row (canonical or legacy column)."""
+    for col in (LAKE_TYPE, LEGACY_LAKE_TYPE):
+        if col in row.index:
+            try:
+                val = int(row[col])
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                return val
+    return None
+
+
+def _waterbody_class_for_catchment(row: pd.Series) -> str:
+    if not row.get(IS_LAKE_CATCHMENT, 0):
+        return ""
+    return classify_waterbody(_lake_type_from_row(row))
 
 
 def enrich_catchment_areas(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -57,12 +77,7 @@ def enrich_catchment_areas(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         out[WATERBODY_ID] = out[lake_id_col].apply(
             lambda x: "" if pd.isna(x) or int(x) < 0 else str(int(x))
         )
-        out[WATERBODY_CLASS] = out.apply(
-            lambda row: classify_waterbody(None, is_lake_catchment=bool(row.get(IS_LAKE_CATCHMENT, 0)))
-            if row.get(IS_LAKE_CATCHMENT, 0)
-            else "",
-            axis=1,
-        )
+        out[WATERBODY_CLASS] = out.apply(_waterbody_class_for_catchment, axis=1)
     else:
         out[WATERBODY_ID] = ""
         out[WATERBODY_CLASS] = ""
@@ -103,7 +118,7 @@ def enrich_flowpaths(gdf: gpd.GeoDataFrame, outlet_sentinel: int = -9999) -> gpd
 
 def enrich_waterbodies(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Add HY_Features columns to HydroLAKES polygons."""
-    from hy_features.schema import HYLAKES_ID, HYLAKES_LAKE_TYPE
+    from hy_features.schema import FEATURE_NAME, HYLAKES_ID, HYLAKES_LAKE_NAME, HYLAKES_LAKE_TYPE
 
     out = gdf.copy()
     if HYLAKES_ID in out.columns:
@@ -118,6 +133,12 @@ def enrich_waterbodies(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         out[WATERBODY_CLASS] = HY_LAKE
 
     out[HYF_TYPE] = out[WATERBODY_CLASS]
+
+    if HYLAKES_LAKE_NAME in out.columns:
+        out[FEATURE_NAME] = out[HYLAKES_LAKE_NAME].fillna("").astype(str)
+    elif FEATURE_NAME not in out.columns:
+        out[FEATURE_NAME] = ""
+
     return out
 
 
@@ -126,6 +147,8 @@ def enrich_hydro_locations(
     point_type_col: str = "point_type",
 ) -> gpd.GeoDataFrame:
     """Add HY_Features columns to pour-point / nexus point layers."""
+    from hy_features.stamp import assign_hydro_location_nexus_ids
+
     out = gdf.copy()
     out[HYF_TYPE] = HY_HYDRO_LOCATION
 
@@ -141,7 +164,7 @@ def enrich_hydro_locations(
             lambda x: "" if pd.isna(x) or int(x) < 0 else str(int(x))
         )
 
-    return out
+    return assign_hydro_location_nexus_ids(out)
 
 
 def enrich_hydrometric_features(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -195,7 +218,8 @@ def build_catchment_registry_from_geofabric(
 
         registry.add(cid, HY_CATCHMENT_AREA, cid, waterbody_id=wb, lower_catchment_id=lower)
         if is_lake and wb:
-            registry.add(cid, HY_RESERVOIR, wb, waterbody_id=wb, notes="merged reservoir catchment")
+            wb_class = classify_waterbody(_lake_type_from_row(row))
+            registry.add(cid, wb_class, wb, waterbody_id=wb, notes="merged lake catchment")
 
     for _, row in streams.iterrows():
         fid = str(row[link_col])

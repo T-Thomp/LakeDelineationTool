@@ -675,6 +675,7 @@ def process_reservoir_basins():
         catchment_results.append({
             "DN": int(winner_id),
             "lake_id": l_id,
+            "lake_type": int(pd.to_numeric(lake_polys.iloc[0]["Lake_type"], errors="coerce") or 1),
             "geometry": merged_geom,
             "is_lake": 1,
             # Shapefile DBF fields are limited to 10 characters
@@ -735,6 +736,12 @@ def process_reservoir_basins():
     )
     final_geofabric["is_lake"] = final_geofabric["is_lake"].fillna(0).astype(int)
     final_geofabric["lake_id"] = final_geofabric["lake_id"].fillna(-1).astype(int)
+    if "lake_type" not in final_geofabric.columns:
+        final_geofabric["lake_type"] = -1
+    else:
+        final_geofabric["lake_type"] = (
+            pd.to_numeric(final_geofabric["lake_type"], errors="coerce").fillna(-1).astype(int)
+        )
     final_geofabric["lake_area"] = final_geofabric["lake_area"].fillna(0.0)
     final_geofabric["frac_lake"] = final_geofabric["frac_lake"].fillna(0.0)
 
@@ -764,7 +771,6 @@ def process_reservoir_basins():
             gpkg_path=f"{OUTPUT_DIR}/geofabric.gpkg",
             registry_path=f"{OUTPUT_DIR}/catchment_registry.json",
             metadata_path=f"{OUTPUT_DIR}/hydrographic_network.json",
-            validation_path=f"{OUTPUT_DIR}/hy_features_validation.json",
         )
 
         export_shapefile_legacy(assembled["layers"]["catchment_area"], f"{OUTPUT_DIR}/reservoirBasins.shp")

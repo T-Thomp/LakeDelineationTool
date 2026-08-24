@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/T-Thomp/LakeDelineationTool/hy_features/implementation_schema.json",
+  "title": "Lake Delineation Tool HY_Features Implementation Schema",
+  "description": "Machine-readable implementation schema for OGC Annex A.2 profile LakeDelineationTool-DendriticGeofabric-1.0. Human-readable mapping: docs/hy_features_mapping.md",
+  "profile": "LakeDelineationTool-DendriticGeofabric-1.0",
+  "standard": "OGC 14-111r6 — WaterML 2 Part 3 HY_Features",
+  "standard_uri": "https://docs.ogc.org/is/14-111r6/14-111r6.html",
+  "uml_uri": "https://docs.ogc.org/is/14-111r6/uml/",
+  "definitions_server": "https://www.opengis.net/def/appschema/hy_features/hyf/",
+  "conformance_class": "/conf/hy_features_conceptual_model/mapping",
+  "requirements_class": "/req/hy_features_conceptual_model",
+  "encoding": {
+    "primary": "OGC GeoPackage 1.0+",
+    "metadata": "JSON (UTF-8)",
+    "default_network_id": "study_hydrographic_network",
+    "outlet_sentinel": -9999
+  },
+  "products": {
+    "geofabric.gpkg": {
+      "description": "Multi-layer GeoPackage; canonical spatial product",
+      "required_layers": ["catchment_area", "flowpath", "hydro_nexus"],
+      "optional_layers": ["waterbody", "hydrometric_feature", "hydro_location"]
+    },
+    "hydrographic_network.json": {
+      "hy_feature_type": "HY_HydrographicNetwork",
+      "root_keys": ["hydrographic_network", "dendritic_catchment"]
+    },
+    "catchment_registry.json": {
+      "root_keys": ["catchments", "realizations"]
+    }
+  },
+  "geopackage_layers": {
+    "catchment_area": {
+      "required_in_profile": true,
+      "hy_feature_types": ["HY_CatchmentArea"],
+      "geometry_type": "Polygon",
+      "columns": [
+        { "name": "feature_id", "type": "string", "required": true, "hy_property": "GF_Feature.identifier", "notes": "Pattern ca_{catchment_id}" },
+        { "name": "network_id", "type": "string", "required": true, "hy_property": "hydrographicNetwork" },
+        { "name": "hyf_type", "type": "string", "required": true, "allowed_values": ["HY_CatchmentArea"] },
+        { "name": "hyf_type_uri", "type": "string", "required": true, "format": "uri" },
+        { "name": "catchment_id", "type": "string", "required": true, "hy_property": "code" },
+        { "name": "realizes_catchment", "type": "string", "required": true, "hy_property": "realizedCatchment", "constraint": "equals catchment_id" },
+        { "name": "outflow_nexus_id", "type": "string", "required": true, "hy_property": "outflow" },
+        { "name": "inflow_nexus_id", "type": "string", "required": false, "nillable": true, "hy_property": "inflow" },
+        { "name": "upper_catchment_id", "type": "string", "required": false, "nillable": true, "hy_property": "upperCatchment" },
+        { "name": "is_lake_catchment", "type": "integer", "required": false, "notes": "TauDEM routing flag only" },
+        { "name": "lake_type", "type": "integer", "required": false, "notes": "HydroLAKES Lake_type when merged" },
+        { "name": "waterbody_id", "type": "string", "required": false, "nillable": true, "hy_property": "networkWaterBody" },
+        { "name": "waterbody_class", "type": "string", "required": false, "nillable": true, "allowed_values": ["HY_Lake", "HY_Impoundment", ""] },
+        { "name": "lake_area_m2", "type": "number", "required": false },
+        { "name": "frac_lake", "type": "number", "required": false },
+        { "name": "station_code", "type": "string", "required": false },
+        { "name": "geometry", "type": "geometry", "geometry_type": "Polygon", "required": true, "hy_property": "shape" }
+      ]
+    },
+    "flowpath": {
+      "required_in_profile": true,
+      "hy_feature_types": ["HY_FlowPath"],
+      "geometry_type": "LineString",
+      "columns": [
+        { "name": "feature_id", "type": "string", "required": true, "notes": "Pattern fp_{flowpath_id}" },
+        { "name": "network_id", "type": "string", "required": true },
+        { "name": "hyf_type", "type": "string", "required": true, "allowed_values": ["HY_FlowPath"] },
+        { "name": "hyf_type_uri", "type": "string", "required": true, "format": "uri" },
+        { "name": "flowpath_id", "type": "string", "required": true },
+        { "name": "catchment_id", "type": "string", "required": true, "hy_property": "realizedCatchment.code", "notes": "Equals flowpath_id in dendritic TauDEM network" },
+        { "name": "realizes_catchment", "type": "string", "required": true, "hy_property": "realizedCatchment" },
+        { "name": "lower_catchment_id", "type": "string", "required": true, "nillable": true, "hy_property": "lowerCatchment" },
+        { "name": "outflow_nexus_id", "type": "string", "required": true, "hy_property": "outflow" },
+        { "name": "inflow_nexus_id", "type": "string", "required": false, "nillable": true, "hy_property": "inflow" },
+        { "name": "upper_catchment_id", "type": "string", "required": false, "nillable": true, "hy_property": "upperCatchment" },
+        { "name": "drainage_pattern", "type": "string", "required": true, "allowed_values": ["dendritic"] },
+        { "name": "geometry", "type": "geometry", "geometry_type": "LineString", "required": true, "hy_property": "shape" }
+      ]
+    },
+    "hydro_nexus": {
+      "required_in_profile": true,
+      "hy_feature_types": ["HY_HydroNexus", "HY_HydroLocation"],
+      "geometry_type": "Point",
+      "columns": [
+        { "name": "feature_id", "type": "string", "required": true, "notes": "Equals nexus_id for HY_HydroNexus rows" },
+        { "name": "network_id", "type": "string", "required": true },
+        { "name": "nexus_id", "type": "string", "required": true },
+        { "name": "realized_nexus_id", "type": "string", "required": false, "hy_property": "realizedNexus" },
+        { "name": "hyf_type", "type": "string", "required": true, "allowed_values": ["HY_HydroNexus", "HY_HydroLocation"] },
+        { "name": "hyf_type_uri", "type": "string", "required": true, "format": "uri" },
+        { "name": "contributing_catchment_id", "type": "string", "required": true, "hy_property": "contributingCatchment" },
+        { "name": "receiving_catchment_id", "type": "string", "required": true, "nillable": true, "hy_property": "receivingCatchment" },
+        { "name": "realizes_catchment", "type": "string", "required": false, "hy_property": "realizedCatchment" },
+        { "name": "hydro_loc_type", "type": "string", "required": false, "hy_property": "hydroLocationType" },
+        { "name": "geometry", "type": "geometry", "geometry_type": "Point", "required": true, "hy_property": "shape" }
+      ]
+    },
+    "waterbody": {
+      "required_in_profile": false,
+      "hy_feature_types": ["HY_Lake", "HY_Impoundment"],
+      "geometry_type": "Polygon",
+      "columns": [
+        { "name": "feature_id", "type": "string", "required": true, "notes": "Pattern wb_{waterbody_id}" },
+        { "name": "network_id", "type": "string", "required": true },
+        { "name": "waterbody_id", "type": "string", "required": true },
+        { "name": "feature_name", "type": "string", "required": false, "hy_property": "name", "source": "HydroLAKES Lake_name" },
+        { "name": "waterbody_class", "type": "string", "required": true },
+        { "name": "hyf_type", "type": "string", "required": true, "allowed_values": ["HY_Lake", "HY_Impoundment"] },
+        { "name": "hyf_type_uri", "type": "string", "required": true, "format": "uri" },
+        { "name": "upstream_waterbody_id", "type": "string", "required": false, "nillable": true, "hy_property": "upstreamWaterBody" },
+        { "name": "downstream_waterbody_id", "type": "string", "required": false, "nillable": true, "hy_property": "downstreamWaterBody" },
+        { "name": "geometry", "type": "geometry", "geometry_type": "Polygon", "required": true, "hy_property": "shape" }
+      ]
+    },
+    "hydrometric_feature": {
+      "required_in_profile": false,
+      "hy_feature_types": ["HY_HydrometricFeature"],
+      "geometry_type": "Point",
+      "columns": [
+        { "name": "feature_id", "type": "string", "required": true, "notes": "Pattern hm_{station_code}" },
+        { "name": "network_id", "type": "string", "required": true },
+        { "name": "station_code", "type": "string", "required": true },
+        { "name": "hyf_type", "type": "string", "required": true, "allowed_values": ["HY_HydrometricFeature"] },
+        { "name": "hyf_type_uri", "type": "string", "required": true, "format": "uri" },
+        { "name": "hydro_loc_type", "type": "string", "required": true, "allowed_values": ["hydrometric station"] },
+        { "name": "catchment_id", "type": "string", "required": false },
+        { "name": "host_flowpath_id", "type": "string", "required": true, "hy_property": "positionOnRiver.linearElement" },
+        { "name": "linear_element_id", "type": "string", "required": true, "hy_feature_type": "HY_IndirectPosition" },
+        { "name": "reference_nexus_id", "type": "string", "required": true, "hy_feature_type": "HY_IndirectPosition" },
+        { "name": "distance_from_outlet_m", "type": "number", "required": true },
+        { "name": "distance_from_outlet_pct", "type": "number", "required": true },
+        { "name": "geometry", "type": "geometry", "geometry_type": "Point", "required": true, "hy_property": "shape" }
+      ]
+    },
+    "hydro_location": {
+      "required_in_profile": false,
+      "hy_feature_types": ["HY_HydroLocation"],
+      "geometry_type": "Point",
+      "columns": [
+        { "name": "feature_id", "type": "string", "required": true, "notes": "Pattern hl_{nexus_id}" },
+        { "name": "network_id", "type": "string", "required": true },
+        { "name": "nexus_id", "type": "string", "required": true },
+        { "name": "realized_nexus_id", "type": "string", "required": true, "hy_property": "realizedNexus" },
+        { "name": "hyf_type", "type": "string", "required": true, "allowed_values": ["HY_HydroLocation"] },
+        { "name": "hyf_type_uri", "type": "string", "required": true, "format": "uri" },
+        { "name": "hydro_loc_type", "type": "string", "required": true },
+        { "name": "waterbody_id", "type": "string", "required": false, "nillable": true },
+        { "name": "geometry", "type": "geometry", "geometry_type": "Point", "required": true, "hy_property": "shape" }
+      ]
+    }
+  },
+  "json_sidecars": {
+    "dendritic_catchment": {
+      "hy_feature_type": "HY_DendriticCatchment",
+      "location": "hydrographic_network.json → dendritic_catchment[]",
+      "fields": {
+        "catchment_id": { "type": "string", "hy_property": "code" },
+        "hyf_type": { "const": "HY_DendriticCatchment" },
+        "hyf_type_uri": { "type": "string", "format": "uri" },
+        "outflow_nexus_id": { "type": "string", "hy_property": "outflow" },
+        "inflow_nexus_id": { "type": "string", "nillable": true, "hy_property": "inflow" },
+        "lower_catchment_id": { "type": "string", "nillable": true, "hy_property": "lowerCatchment" },
+        "upper_catchment_id": { "type": "string", "nillable": true, "hy_property": "upperCatchment" },
+        "waterbody_id": { "type": "string", "nillable": true },
+        "drainage_pattern": { "const": "dendritic" }
+      }
+    },
+    "hydrographic_network": {
+      "hy_feature_type": "HY_HydrographicNetwork",
+      "location": "hydrographic_network.json → hydrographic_network",
+      "fields": {
+        "network_id": { "type": "string" },
+        "hyf_type": { "const": "HY_HydrographicNetwork" },
+        "hyf_type_uri": { "type": "string", "format": "uri" },
+        "drainage_pattern": { "const": "dendritic" },
+        "flowpath_members": { "type": "array", "items": "string" },
+        "waterbody_members": { "type": "array", "items": "string" },
+        "flowpath_count": { "type": "integer" },
+        "waterbody_count": { "type": "integer" }
+      }
+    },
+    "catchment_registry": {
+      "location": "catchment_registry.json",
+      "catchments": {
+        "description": "Map catchment_id → holistic catchment record",
+        "fields": ["code", "hyf_type", "outflow_nexus_id", "inflow_nexus_id", "lower_catchment_id", "waterbody_id"]
+      },
+      "realizations": {
+        "description": "List of catchment ↔ realization links",
+        "fields": ["catchment_id", "realization_type", "feature_id", "waterbody_id", "notes"]
+      }
+    }
+  },
+  "enumerations": {
+    "hydrolakes_lake_type_to_hyf_type": {
+      "1": "HY_Lake",
+      "2": "HY_Impoundment",
+      "3": "HY_Impoundment"
+    },
+    "hydro_location_type_annex_b1": [
+      "confluence",
+      "catchment outlet",
+      "hydrometric station",
+      "pour point"
+    ],
+    "pour_point_type_mapping": {
+      "inflow": "confluence",
+      "outflow": "catchment outlet",
+      "gauge": "hydrometric station"
+    },
+    "drainage_pattern": "dendritic"
+  },
+  "identity_rules": {
+    "outflow_nexus_id_template": "nx_out_{catchment_id}",
+    "feature_id_prefixes": {
+      "catchment_area": "ca_",
+      "flowpath": "fp_",
+      "hydro_nexus": "",
+      "waterbody": "wb_",
+      "hydrometric_feature": "hm_",
+      "hydro_location": "hl_"
+    },
+    "hyf_type_uri_template": "https://www.opengis.net/def/appschema/hy_features/hyf/{hyf_type}"
+  }
+}

@@ -25,6 +25,7 @@ from hy_features.schema import (
     HY_DENDRITIC_CATCHMENT,
     HY_FLOWPATH,
     HY_HYDRO_NEXUS,
+    HY_HYDROGRAPHIC_NETWORK,
     INFLOW_NEXUS_ID,
     LEGACY_BASIN_ID,
     LEGACY_FLOWPATH_ID,
@@ -32,7 +33,9 @@ from hy_features.schema import (
     LINEAR_ELEMENT_ID,
     LOWER_CATCHMENT_ID,
     NEXUS_ID,
+    NETWORK_ID,
     OUTFLOW_NEXUS_ID,
+    REALIZED_NEXUS_ID,
     REALIZES_CATCHMENT,
     RECEIVING_CATCHMENT_ID,
     REFERENCE_NEXUS_ID,
@@ -309,11 +312,13 @@ def link_waterbody_network(
     waterbodies: gpd.GeoDataFrame,
     basins: gpd.GeoDataFrame,
     streams: gpd.GeoDataFrame,
+    outlet_sentinel: int = -9999,
 ) -> gpd.GeoDataFrame:
     """
     Add upstreamWaterBody / downstreamWaterBody associations (Section 7.4.2).
 
-    Lakes linked when consecutive reservoir catchments share a flowpath chain.
+    Walks the dendritic catchment graph so non-lake catchments between lakes
+    do not break upstream/downstream water-body links.
     """
     from hy_features.schema import HYLAKES_ID, IS_LAKE_CATCHMENT, LEGACY_IS_LAKE, LEGACY_LAKE_ID
 
@@ -326,32 +331,67 @@ def link_waterbody_network(
     lake_col = WATERBODY_ID if WATERBODY_ID in basins.columns else LEGACY_LAKE_ID
     is_lake_col = IS_LAKE_CATCHMENT if IS_LAKE_CATCHMENT in basins.columns else LEGACY_IS_LAKE
     link_col = _link_col(streams)
-    down_col = _raw_down_col(streams)
 
     lake_basins = basins[pd.to_numeric(basins[is_lake_col], errors="coerce").fillna(0) > 0].copy()
     if lake_basins.empty:
         return out
 
     catchment_to_wb: dict[str, str] = {}
+    wb_to_catchment: dict[str, str] = {}
     for _, row in lake_basins.iterrows():
         wb = str(row.get(lake_col, row.get(WATERBODY_ID, "")))
         if wb and wb not in ("-1", "nan", ""):
-            catchment_to_wb[str(row[basin_col])] = wb
+            cid = str(row[basin_col])
+            catchment_to_wb[cid] = wb
+            wb_to_catchment[wb] = cid
 
-    down_map = {
-        str(row[link_col]): str(row[down_col])
-        for _, row in streams.iterrows()
-    }
+    lower_map: dict[str, str] = {}
+    for _, row in streams.iterrows():
+        fid = str(row[link_col])
+        lower = str(row.get(LOWER_CATCHMENT_ID, ""))
+        if not lower or lower in ("nan", ""):
+            raw = row.get(_raw_down_col(streams))
+            try:
+                raw_int = int(raw)
+                lower = "" if raw_int <= 0 or raw_int == outlet_sentinel else str(raw_int)
+            except (TypeError, ValueError):
+                lower = ""
+        lower_map[fid] = lower
+
+    upstream_map = build_upstream_map(streams, outlet_sentinel)
+
+    def _downstream_waterbody(start_cid: str) -> str:
+        cid = lower_map.get(start_cid, "")
+        visited: set[str] = set()
+        while cid and cid not in visited:
+            visited.add(cid)
+            if cid in catchment_to_wb:
+                return catchment_to_wb[cid]
+            cid = lower_map.get(cid, "")
+        return ""
+
+    def _upstream_waterbody(start_cid: str) -> str:
+        visited: set[str] = set()
+        stack = list(upstream_map.get(start_cid, []))
+        while stack:
+            cid = stack.pop()
+            if cid in visited:
+                continue
+            visited.add(cid)
+            if cid in catchment_to_wb:
+                return catchment_to_wb[cid]
+            stack.extend(upstream_map.get(cid, []))
+        return ""
 
     wb_downstream: dict[str, str] = {}
-    for cid, wb in catchment_to_wb.items():
-        lower = down_map.get(cid, "")
-        if lower in catchment_to_wb:
-            wb_downstream[wb] = catchment_to_wb[lower]
-
     wb_upstream: dict[str, str] = {}
-    for downstream_wb, upstream_wb in wb_downstream.items():
-        wb_upstream[downstream_wb] = upstream_wb
+    for cid, wb in catchment_to_wb.items():
+        down_wb = _downstream_waterbody(cid)
+        if down_wb:
+            wb_downstream[wb] = down_wb
+        up_wb = _upstream_waterbody(cid)
+        if up_wb:
+            wb_upstream[wb] = up_wb
 
     for idx, row in out.iterrows():
         wb_id = str(row[wb_col])
@@ -366,6 +406,25 @@ def link_waterbody_network(
     return out
 
 
+def filter_placed_hydrometric(
+    hydrometric: gpd.GeoDataFrame | None,
+) -> tuple[gpd.GeoDataFrame | None, int]:
+    """
+    Keep only gauges with a complete positionOnRiver (host reach assigned).
+
+    Unplaced gauges are omitted from ``hydrometric_feature`` export so mandatory
+    HY_IndirectPosition associations are never empty on exported features.
+    """
+    if hydrometric is None or hydrometric.empty:
+        return hydrometric, 0
+    mask = hydrometric[HOST_FLOWPATH_ID].astype(str).str.len() > 0
+    placed = hydrometric[mask].copy()
+    skipped = int((~mask).sum())
+    if placed.empty:
+        return None, skipped
+    return placed, skipped
+
+
 def merge_hydro_locations_into_nexus(
     nexus_gdf: gpd.GeoDataFrame,
     hydro_locations: gpd.GeoDataFrame | None,
@@ -377,13 +436,16 @@ def merge_hydro_locations_into_nexus(
     from hy_features.schema import HY_HYDRO_LOCATION
 
     extra = hydro_locations.copy()
-    if NEXUS_ID not in extra.columns:
+    if NEXUS_ID not in extra.columns or extra[NEXUS_ID].astype(str).str.len().eq(0).all():
         if "name" in extra.columns:
-            extra[NEXUS_ID] = extra["name"].astype(str)
+            extra[NEXUS_ID] = "nx_loc_" + extra["name"].astype(str)
         elif WATERBODY_ID in extra.columns:
             extra[NEXUS_ID] = "nx_loc_" + extra[WATERBODY_ID].astype(str) + "_" + extra.index.astype(str)
         else:
             extra[NEXUS_ID] = "nx_loc_" + extra.index.astype(str)
+
+    if REALIZED_NEXUS_ID not in extra.columns:
+        extra[REALIZED_NEXUS_ID] = extra[NEXUS_ID].astype(str)
 
     extra[HYF_TYPE] = HY_HYDRO_LOCATION
     extra[HYF_TYPE_URI] = hyf_type_uri(HY_HYDRO_LOCATION)
@@ -453,13 +515,19 @@ def build_hydrographic_network_metadata(
     streams: gpd.GeoDataFrame,
     waterbodies: gpd.GeoDataFrame | None,
     network_id: str = "study_hydrographic_network",
+    basins: gpd.GeoDataFrame | None = None,
 ) -> dict:
     """HY_HydrographicNetwork metadata record (Section 7.4.2)."""
     link_col = _link_col(streams)
     flowpath_ids = streams[link_col].astype(str).tolist()
-    wb_ids = []
+    wb_ids: set[str] = set()
     if waterbodies is not None and WATERBODY_ID in waterbodies.columns:
-        wb_ids = waterbodies[WATERBODY_ID].astype(str).tolist()
+        wb_ids.update(waterbodies[WATERBODY_ID].astype(str).tolist())
+    if basins is not None and WATERBODY_ID in basins.columns:
+        for wb in basins[WATERBODY_ID].astype(str):
+            if wb and wb not in ("-1", "nan", ""):
+                wb_ids.add(wb)
+    wb_list = sorted(wb_ids)
 
     return {
         NETWORK_ID: network_id,
@@ -467,7 +535,7 @@ def build_hydrographic_network_metadata(
         "hyf_type_uri": hyf_type_uri(HY_HYDROGRAPHIC_NETWORK),
         "drainage_pattern": DRAINAGE_PATTERN,
         "flowpath_members": flowpath_ids,
-        "waterbody_members": wb_ids,
+        "waterbody_members": wb_list,
         "flowpath_count": len(flowpath_ids),
-        "waterbody_count": len(wb_ids),
+        "waterbody_count": len(wb_list),
     }
