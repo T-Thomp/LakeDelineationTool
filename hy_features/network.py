@@ -62,14 +62,6 @@ def _raw_down_col(streams: gpd.GeoDataFrame) -> str:
     return LOWER_CATCHMENT_ID
 
 
-def outflow_nexus_id_for(catchment_id: str) -> str:
-    return f"nx_out_{catchment_id}"
-
-
-def inflow_nexus_id_for(catchment_id: str) -> str:
-    return f"nx_in_{catchment_id}"
-
-
 def _endpoint_points(geom) -> tuple[Point | None, Point | None]:
     """Return upstream (first) and downstream (last) points of a line."""
     if geom is None or geom.is_empty:

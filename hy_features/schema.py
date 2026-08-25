@@ -151,6 +151,16 @@ def hyf_type_uri(short_code: str) -> str:
     return f"{HYF_NS}{short_code}"
 
 
+def outflow_nexus_id_for(catchment_id: str) -> str:
+    """Standard outflow nexus id for a catchment/reach code (``nx_out_{id}``)."""
+    return f"nx_out_{catchment_id}"
+
+
+def inflow_nexus_id_for(catchment_id: str) -> str:
+    """Standard inflow nexus id template (``nx_in_{id}``); reserved for future use."""
+    return f"nx_in_{catchment_id}"
+
+
 def classify_waterbody(lake_type: int | float | None) -> str:
     """Map HydroLAKES ``Lake_type`` to ``HY_Lake`` / ``HY_Impoundment`` (``HY_WaterBody`` subtypes)."""
     try:
