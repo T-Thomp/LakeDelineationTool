@@ -4,7 +4,7 @@ Aggregate small sub-basins and stream reaches for TauDEM / cleanGeofabric output
 Expected inputs (defaults match cleanGeofabric.py outputs):
   merged_basins/reservoirBasins_final.shp
   merged_basins/reservoirStreams_final.shp
-"""
+
 
 from __future__ import annotations
 
@@ -40,9 +40,18 @@ LAKE_ID = LEGACY_LAKE_ID
 LAKE_AREA = LEGACY_LAKE_AREA
 FRAC_LAKE_AREA = FRAC_LAKE
 
-# Basin areas (km² after conversion; see AREA_SCALE)
-UNIT_AREA: Optional[str] = None  # local sub-basin area; None -> polygon area
-UP_AREA = "DSContArea"           # cumulative drainage area at pour point
+# Basin areas — see module docstring "Area columns"
+#
+# UNIT_AREA: optional shapefile column for *local* subbasin area (one polygon only).
+#   None (default) — compute from basin polygon geometry (recommended for this pipeline).
+#   "SomeCol"      — read from basins, or from rivers if joined by DN/LINKNO.
+#   Values are multiplied by AREA_SCALE (1e-6) so m² fields become km² for MIN_SUB_AREA.
+#   After aggregation, summed local areas are written as unit_area_km2 (or UNIT_AREA name).
+#
+# UP_AREA (DSContArea): TauDEM *cumulative* drainage area at each pour point (m² on disk).
+#   Not used for the "too small to keep" test — only for outlet / mask logic.
+UNIT_AREA: Optional[str] = None
+UP_AREA = "DSContArea"
 
 # River hydraulics
 SLOPE = "Slope"
@@ -68,7 +77,7 @@ INPUT_RIVERS = "merged_basins/reservoirStreams_final.shp"
 OUTPUT_BASINS = "final_basin/aggregated_basins.shp"
 OUTPUT_RIVERS = "final_basin/aggregated_rivers.shp"
 
-MIN_SUB_AREA = 100.0          # km²
+MIN_SUB_AREA = 100.0          # km² — merge subbasins whose local area (_unitarea) is below this
 MIN_RIV_SLOPE = 0.0000001     # minimum accepted river slope (WATFLOOD manual)
 MIN_RIV_LENGTH = 1.0          # km
 
@@ -230,6 +239,7 @@ def prepare_input_tables(
     suffixes=("", "_riv"),
   )
 
+  # Local subbasin area (km²) used for MIN_SUB_AREA merge decisions.
   if UNIT_AREA and UNIT_AREA in basin.columns:
     basin["_unitarea"] = _area_km2(basin[UNIT_AREA], AREA_SCALE)
   elif UNIT_AREA and UNIT_AREA in river.columns:
@@ -237,6 +247,7 @@ def prepare_input_tables(
   else:
     basin["_unitarea"] = basin.geometry.area * AREA_SCALE
 
+  # Cumulative upstream area at pour point (TauDEM DSContArea); separate from local area.
   if UP_AREA in basin.columns:
     basin["_uparea"] = _area_km2(basin[UP_AREA], AREA_SCALE)
   else:

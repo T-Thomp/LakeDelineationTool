@@ -21,8 +21,8 @@
 #        v
 #   [Python] filterLakes.py      -- clip HydroLAKES reservoirs to basin
 #            getGauges.py        -- find stream gauges inside basin
-#            rasterFlowpathEdit.py -- fix flow dirs inside each lake
-#                                   (writes fdr_centerline_all.tif)
+#            rasterFlowpathEdit.py -- fix flow dirs inside each lake (MPI-parallel;
+#                                   writes fdr_centerline_all.tif; see FLOWPATH_NCORES)
 #        v
 #   [Pass 2] TauDEM -- re-run network using corrected lake flow directions
 #        |
@@ -55,11 +55,12 @@
 # (this slurm cd's there). Relative paths below are from HOME_DIR.
 #
 # [ ] tau-dem-delineation-srun.slurm  (this file)
+#       module restore scimods  -- TauDEM MPI + GDAL (see SOFTWARE REQUIREMENTS)
 #       HOME_DIR           -- project root on the cluster
 #       DEM                -- input elevation GeoTIFF
-#       VENV               -- Python venv activate script (geopandas, etc.)
+#       VENV               -- Python venv activate (pip install -r requirements.txt)
 #       STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
-#       FLOWPATH_NCORES    -- MPI ranks for rasterFlowpathEdit.py
+#       FLOWPATH_NCORES    -- MPI worker ranks for rasterFlowpathEdit.py (see §0)
 #       HY_FEATURES_ENABLED -- unset/off by default; export =1 to enable HY geofabric
 #       #SBATCH --account / --ntasks / --mem-per-cpu / --time
 #
@@ -74,13 +75,15 @@
 #       Pass-1 watersheds under delineation-product/
 #       output             -- points/gauges_in_basin.shp
 #
-# [ ] rasterFlowpathEdit.py  (defaults near __main__ / argparse)
+# [ ] rasterFlowpathEdit.py  (defaults in __main__ / --ncores)
+#       Requires Pass 1 + filterLakes + getGauges first (see §2 below).
 #       FDR / SRC / AD8 / watershed rasters under taudem-interim-files/d8/
 #       streams            -- delineation-product/original-delineated-streams.shp
 #       lakes / gauges     -- lakes/filtered_lakes.shp, points/gauges_in_basin.shp
-#       outlet_overrides.csv
+#       outlet_overrides.csv (optional manual lake outlets)
 #       outputs            -- taudem-interim-files/d8/fdr_centerline_all.tif
 #                             points/selected_outlets.shp
+#       Launch             -- MUST use srun/mpirun (mpi4py); see FLOWPATH_NCORES
 #
 # [ ] pourPointsPass2.py  (paths dict in __main__)
 #       intermediate streams/watersheds under delineation-product/ and d8/
@@ -110,6 +113,24 @@
 #       HydroLAKES polys   -- for filterLakes.py
 #       Hydat.sqlite3      -- for getGauges.py
 #       outlet_overrides.csv -- optional manual lake-outlet overrides
+#
+# SOFTWARE REQUIREMENTS (modules + Python venv)
+# ---------------------------------------------
+# See README.md "Software requirements" for full detail and pip install steps.
+#
+# HPC modules (this script: module restore scimods):
+#   TauDEM MPI  -- pitremove, d8flowdir, aread8, gridnet, threshold, streamnet,
+#                  moveoutletstostreams  (all invoked via srun)
+#   GDAL        -- gdal_polygonize.py
+#   Slurm       -- sbatch / srun (TauDEM + rasterFlowpathEdit MPI)
+#
+# Recreate scimods on a new cluster (GDAL module must match GDAL==3.9.2 in requirements.txt):
+#   module load StdEnv/2023 gdal/3.9.2 taudem/<ver>
+#   module save scimods
+#
+# Python venv (VENV below): pip install -r requirements.txt
+#   GDAL 3.9.2, geopandas 1.0.1, pandas 2.2.3, numpy 1.26.4, scipy 1.15.2,
+#   mpi4py 4.0.0, shapely 2.0.7, fiona 1.10.1, pyogrio 0.10.0, pyproj 3.7.1
 #
 # =============================================================================
 
@@ -141,6 +162,9 @@ echo "$(basename "$0"): Delineation started at $(date)"
 # -----------------------------------------------------------------------------
 # 0. Environment and paths
 # -----------------------------------------------------------------------------
+# Modules: TauDEM (MPI) + GDAL — see header "SOFTWARE REQUIREMENTS".
+# Python:  source VENV before §2–§6 (geopandas, scipy, mpi4py, osgeo/gdal).
+# -----------------------------------------------------------------------------
 module purge
 module restore scimods
 
@@ -154,8 +178,14 @@ OUT_DIR="$HOME_DIR/delineation-product"          # Published products for Python
 STREAM_THRESHOLD=5555
 
 # Worker MPI ranks for rasterFlowpathEdit.py (lake flow-path edits).
-# Launch with srun --ntasks=N --cpus-per-task=1 (one MPI rank per task).
-# Set lower than SBATCH --ntasks if you want fewer Python ranks than TauDEM cores.
+#
+# rasterFlowpathEdit.py uses mpi4py: each rank processes a batch of lakes in
+# parallel (partitioned by estimated lake cell count). Rank 0 builds the output
+# GeoTIFF and merges masked FDR patches from all workers.
+#
+#   FLOWPATH_NCORES  -- active worker count (env + --ncores)
+#   srun --ntasks    -- must be >= FLOWPATH_NCORES (extra ranks stay idle)
+#
 FLOWPATH_NCORES=16
 
 # HY_Features enrichment + geofabric.gpkg (off by default; uncomment to enable)
@@ -187,7 +217,7 @@ log_section "Pass 1: TauDEM base network (no pour points)"
  srun d8flowdir \
     -fel "$INT_DIR/stream-network_elv-fel.tif" \
     -sd8 "$INT_DIR/stream-network_elv-sd8.tif" \
-   -p  "$INT_DIR/stream-network_elv-fdir.tif"
+    -p  "$INT_DIR/stream-network_elv-fdir.tif"
 srun aread8 \
     -p  "$INT_DIR/stream-network_elv-fdir.tif" \
     -ad8 "$INT_DIR/stream-network_elv-ad8.tif" \
@@ -221,12 +251,48 @@ publish_shp "$INT_DIR/original-delineated-watersheds"
 # -----------------------------------------------------------------------------
 # 2. Python -- lake filtering, gauges, and flow-direction correction
 # -----------------------------------------------------------------------------
-# These scripts prepare reservoir-aware inputs for Pass 2:
+# These scripts prepare reservoir-aware inputs for TauDEM Pass 2.
 #
-#   filterLakes.py        -- select HydroLAKES polygons inside the basin
-#   getGauges.py          -- locate stream gauges for outlet ranking
-#   rasterFlowpathEdit.py -- per-lake outlet selection + centerline routing;
-#                            writes INT_DIR/fdr_centerline_all.tif
+#   filterLakes.py        -- select HydroLAKES polygons inside the Pass 1 basin
+#   getGauges.py          -- locate Hydat stream gauges for outlet ranking
+#
+#   rasterFlowpathEdit.py -- rewrite D8 flow directions inside each filtered lake
+#                            so all lake cells drain to one outlet along a
+#                            centerline "spine" (see script header docstring).
+#
+# Why this step exists:
+#   TauDEM Pass 1 leaves ambiguous flow on flat lake surfaces (many boundary
+#   exits). Pass 2 and Pass 3 must use a corrected flow-direction raster or
+#   streamnet will split basins incorrectly through reservoirs.
+#
+# Prerequisites (must exist before rasterFlowpathEdit runs):
+#   taudem-interim-files/d8/stream-network_elv-{fdir,src,ad8}.tif
+#   taudem-interim-files/d8/original-delineated-watersheds.tif
+#   delineation-product/original-delineated-streams.shp
+#   lakes/filtered_lakes.shp          (from filterLakes.py)
+#   points/gauges_in_basin.shp        (from getGauges.py; optional but recommended)
+#   outlet_overrides.csv              (optional; manual lat/lon per Hylak_id)
+#
+# Outputs consumed by Pass 2 / Pass 3 / pourPointsPass2:
+#   taudem-interim-files/d8/fdr_centerline_all.tif  -- full-domain FDR copy with
+#                                                      lake interiors patched only
+#   points/selected_outlets.shp                     -- chosen outlet per lake
+#
+# MPI launch (required for parallel lake processing):
+#   export FLOWPATH_NCORES=N
+#   srun --ntasks=N --cpus-per-task=1 python3 rasterFlowpathEdit.py --ncores N
+#
+#   --ncores caps active workers at min(N, srun task count). If you omit srun,
+#   mpi4py sees a single rank and runs serially regardless of --ncores.
+#
+# Re-run standalone (from HOME_DIR, after Pass 1 + filterLakes + getGauges):
+#   source "$VENV"
+#   export FLOWPATH_NCORES=16
+#   srun --ntasks=16 --cpus-per-task=1 \
+#       python3 rasterFlowpathEdit.py --ncores 16
+#
+# Serial debug (interactive node, no srun):
+#   python3 rasterFlowpathEdit.py --ncores 1
 # -----------------------------------------------------------------------------
 log_section "Python: lake filtering, gauges, and raster flow-path edits"
 source "$VENV"
@@ -238,7 +304,8 @@ echo " before rasterFlowpathEdit.py $(date)"
 export FLOWPATH_NCORES
 srun --ntasks="${FLOWPATH_NCORES}" --cpus-per-task=1 \
     python3 rasterFlowpathEdit.py --ncores "${FLOWPATH_NCORES}"
-#python3 rasterFlowpathEdit.py --ncores 1
+# Serial fallback (interactive debug on a login/compute node):
+# python3 rasterFlowpathEdit.py --ncores 1
 echo " after rasterFlowpathEdit.py $(date)"
 
 # -----------------------------------------------------------------------------

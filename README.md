@@ -18,6 +18,66 @@ The workflow builds a stream network and watershed delineation for a selected DE
 
 ---
 
+# Software requirements
+
+The pipeline uses **cluster modules** (TauDEM, GDAL) for raster work and a **Python virtual environment** for geoprocessing scripts. On Alliance/Compute Canada systems, `tau-dem-delineation-srun.slurm` restores a saved module stack named `scimods`; recreate or adapt it on other HPC sites.
+
+## HPC modules (TauDEM + GDAL)
+
+Load before Python steps (or save as a module collection, e.g. `module save scimods`):
+
+| Software | Purpose |
+|----------|---------|
+| **TauDEM** (MPI build) | `pitremove`, `d8flowdir`, `aread8`, `gridnet`, `threshold`, `streamnet`, `moveoutletstostreams` |
+| **GDAL** | `gdal_polygonize.py` (watershed raster → polygon shapefile) |
+| **Slurm** | `sbatch`, `srun` — TauDEM and `rasterFlowpathEdit.py` MPI launches |
+
+Example (load **GDAL 3.9.x** to match `GDAL==3.9.2` in `requirements.txt`; check `module spider taudem`, `module spider gdal`):
+
+```bash
+module load StdEnv/2023
+module load gdal/3.9.2
+module load taudem/2023.03.30   # or your site’s TauDEM MPI module name
+module save scimods
+```
+
+TauDEM Pass 1–3 invoke MPI tools via `srun` with `#SBATCH --ntasks=250`. `rasterFlowpathEdit.py` uses a **separate** smaller `srun` launch (`FLOWPATH_NCORES`).
+
+## Python virtual environment
+
+Pinned package list: [`requirements.txt`](requirements.txt) (pipeline packages only; versions from tested scienv). Create once, then set `VENV` in the slurm script to the `activate` path:
+
+```bash
+module load python/3.11   # or your cluster default
+module load gdal/3.9.2    # must match GDAL==3.9.2 in requirements.txt
+python -m venv ~/virtual-envs/scienv
+source ~/virtual-envs/scienv/bin/activate
+pip install -U pip setuptools
+pip install -r requirements.txt
+```
+
+### Key pinned versions (pipeline)
+
+| Package | Version | Used by |
+|---------|---------|---------|
+| **GDAL** | 3.9.2 | `osgeo` raster I/O (`rasterFlowpathEdit.py`, `pourPointsPass2.py`) |
+| **geopandas** | 1.0.1 | Vector scripts; shapefile / GeoPackage I/O |
+| **pandas** | 2.2.3 | Attribute tables, registry JSON |
+| **numpy** | 1.26.4 | Raster arrays, basin metrics |
+| **scipy** | 1.15.2 | `ndimage` in `rasterFlowpathEdit.py`, `pourPointsPass2.py` |
+| **shapely** | 2.0.7 | Geometry ops |
+| **fiona** | 1.10.1 | Shapefile driver (geopandas) |
+| **pyogrio** | 0.10.0 | GeoPackage / fast vector I/O (geopandas) |
+| **pyproj** | 3.7.1 | CRS transforms (geopandas) |
+| **mpi4py** | 4.0.0 | Parallel lakes in `rasterFlowpathEdit.py` |
+| **pytest** | 8.3.4 | `tests/test_hy_features_topology.py` (optional) |
+
+Stdlib only (no pip): `sqlite3` in `getGauges.py`, `hy_features/` JSON export.
+
+HY_Features assembly (`hy_features/`) uses the geopandas stack above; no additional packages.
+
+---
+
 # Pipeline
 
 ```text
@@ -270,13 +330,13 @@ merged_basins/
 
 ### `basinAggregation.py` *(Optional)*
 
-Aggregates small upstream subbasins into larger watershed units.
+Aggregates small upstream subbasins into larger watershed units. The merge threshold **`MIN_SUB_AREA`** (default 100 km²) is applied to **local** subbasin area — the size of each catchment polygon alone — not cumulative upstream drainage.
 
-Default aggregation threshold:
-
-```text
-100 km²
-```
+| Setting | Default | Role |
+|---------|---------|------|
+| **`UNIT_AREA`** | `None` | Column name for local area; `None` uses polygon geometry |
+| **`UP_AREA`** | `DSContArea` | TauDEM cumulative area at pour point (outlet masking) |
+| **`MIN_SUB_AREA`** | 100 km² | Subbasins with local area below this merge downstream |
 
 Outputs aggregated basin and river shapefiles.
 
@@ -303,9 +363,11 @@ Update:
 
 - `HOME_DIR`
 - `DEM`
-- `VENV`
+- `VENV` — path to activated venv (`pip install -r requirements.txt`; see **Software requirements**)
 - `STREAM_THRESHOLD`
 - `FLOWPATH_NCORES`
+
+Ensure `module restore scimods` loads **TauDEM** and **GDAL** (or edit module loads in §0).
 
 Also verify:
 
@@ -430,7 +492,9 @@ Update:
 
 Review:
 
-- `MIN_SUB_AREA`
+- `UNIT_AREA` — local subbasin area column (`None` = from polygon; see script docstring)
+- `UP_AREA` — cumulative drainage column (default `DSContArea`)
+- `MIN_SUB_AREA` — merge threshold in km² applied to **local** area
 - `MIN_RIV_SLOPE`
 - `MIN_RIV_LENGTH`
 
