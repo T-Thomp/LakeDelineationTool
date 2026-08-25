@@ -45,16 +45,7 @@ TauDEM Pass 1–3 invoke MPI tools via `srun` with `#SBATCH --ntasks=250`. `rast
 
 ## Python virtual environment
 
-Pinned package list: [`requirements.txt`](requirements.txt) (pipeline packages only; versions from tested scienv). Create once, then set `VENV` in the slurm script to the `activate` path:
-
-```bash
-module load python/3.11   # or your cluster default
-module load gdal/3.9.2    # must match GDAL==3.9.2 in requirements.txt
-python -m venv ~/virtual-envs/scienv
-source ~/virtual-envs/scienv/bin/activate
-pip install -U pip setuptools
-pip install -r requirements.txt
-```
+Pinned package list: [`requirements.txt`](requirements.txt) 
 
 ### Key pinned versions (pipeline)
 
