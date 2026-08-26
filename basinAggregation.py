@@ -117,6 +117,26 @@ def _basin_attr_cols(basin: gpd.GeoDataFrame) -> list[str]:
   return [c for c in candidates if c in basin.columns]
 
 
+def _one_row_per_agg(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  cols: list[str],
+) -> pd.DataFrame:
+  """
+  One attribute row per aggregate id.
+
+  Prefer the pour-point row (DN == agg); fall back to any row in the group when
+  the survivor id is not present as a basin DN (common after headwater merges).
+  """
+  available = ["agg"] + [c for c in cols if c in basin.columns and c != "agg"]
+  pour = basin.loc[basin[id_col] == basin["agg"], available].drop_duplicates(subset=["agg"])
+  missing = set(basin["agg"].unique()) - set(pour["agg"])
+  if missing:
+    fallback = basin.loc[basin["agg"].isin(missing), available].drop_duplicates(subset=["agg"])
+    pour = pd.concat([pour, fallback], ignore_index=True)
+  return pour
+
+
 def _is_outlet_id(down_id: object, outlet_value: int) -> bool:
   """Return True for outlet sentinels (configured value, or legacy <= 0)."""
   try:
@@ -240,6 +260,12 @@ def prepare_input_tables(
     how="left",
     suffixes=("", "_riv"),
   )
+  if NEXT_DOWN_ID in basin.columns:
+    basin[NEXT_DOWN_ID] = (
+      pd.to_numeric(basin[NEXT_DOWN_ID], errors="coerce")
+      .fillna(OUTLET_VALUE)
+      .astype(int)
+    )
 
   # Local subbasin area (km²) used for MIN_SUB_AREA merge decisions.
   if UNIT_AREA and UNIT_AREA in basin.columns:
@@ -412,21 +438,15 @@ def basin_aggregation(
   basin = _remap_aggdown_to_survivors(
     basin, id_col=id_col, outlet_value=outlet_value
   )
-  pour_down = basin.loc[basin[id_col] == basin["agg"], ["agg", "aggdown"]]
+  pour_down = _one_row_per_agg(basin, id_col, ["aggdown"])
   basin = basin.drop(columns=["aggdown"]).merge(pour_down, on="agg", how="left")
 
-  agg_basin = basin.dissolve(by="agg", aggfunc={"_unitarea": "sum"}, as_index=False).rename(
-    columns={"agg": id_col}
-  )
+  attr_cols = ["aggdown", "_uparea"] + _basin_attr_cols(basin)
+  pour_attrs = _one_row_per_agg(basin, id_col, attr_cols)
 
-  # Carry pour-point attributes; object id remains BASIN_ID
-  keep_cols = [id_col, "aggdown", "_uparea"] + _basin_attr_cols(basin)
-  keep_cols = list(dict.fromkeys(keep_cols))
-  agg_basin = agg_basin.merge(
-    basin[keep_cols].copy(),
-    on=id_col,
-    how="left",
-  ).rename(columns={"aggdown": down_col})
+  agg_basin = basin.dissolve(by="agg", aggfunc={"_unitarea": "sum"}, as_index=False)
+  agg_basin = agg_basin.merge(pour_attrs, on="agg", how="left")
+  agg_basin = agg_basin.rename(columns={"agg": id_col, "aggdown": down_col})
 
   if id_col == riv_id_col:
     agg_river = river.merge(basin[[id_col, "agg"]].copy(), on=riv_id_col, how="left")
@@ -487,9 +507,17 @@ def basin_aggregation(
   agg_river = agg_river.drop(columns=drop_riv, errors="ignore")
 
   agg_basin[id_col] = agg_basin[id_col].astype("int64")
-  agg_basin[down_col] = agg_basin[down_col].astype("int64")
+  agg_basin[down_col] = (
+    pd.to_numeric(agg_basin[down_col], errors="coerce")
+    .fillna(outlet_value)
+    .astype("int64")
+  )
   agg_river[riv_id_col] = agg_river[riv_id_col].astype("int64")
-  agg_river[down_col] = agg_river[down_col].astype("int64")
+  agg_river[down_col] = (
+    pd.to_numeric(agg_river[down_col], errors="coerce")
+    .fillna(outlet_value)
+    .astype("int64")
+  )
 
   # Basin object ids (DN) match river LINKNO values after aggregation; expose a
   # single LINKNO key on both layers for MESH / topology tools.
