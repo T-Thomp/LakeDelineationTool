@@ -24,7 +24,7 @@ The pipeline uses a **self-compiled TauDEM MPI build**, the cluster **GDAL modul
 
 ## TauDEM (self-built MPI)
 
-Download and compile [TauDEM](https://github.com/dtar/TauDEM) with MPI enabled (not a cluster module). 
+Download and compile [TauDEM](https://github.com/dtarb/taudem) with MPI enabled (not a cluster module). 
 
 ## HPC modules (GDAL)
 
