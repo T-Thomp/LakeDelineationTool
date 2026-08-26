@@ -303,7 +303,9 @@ def export_hy_features_geofabric(
 
     gauges = None
     try:
-        gauges = gpd.read_file(gauges_path)
+        from hy_features.export import strip_point_join_artifacts
+
+        gauges = strip_point_join_artifacts(gpd.read_file(gauges_path))
     except Exception as exc:
         print(f"No gauge layer: {exc}")
 
@@ -340,18 +342,33 @@ def export_hy_features_geofabric(
         metadata_path=registry_path.replace("catchment_registry.json", "hydrographic_network.json"),
     )
 
+def _gauge_station_column(gauges: gpd.GeoDataFrame) -> str:
+    for col in ("STATION_NU", "STATION_NUMBER", "STATION_NA", "STATION_NAME"):
+        if col in gauges.columns:
+            return col
+    raise ValueError(
+        "Gauge layer needs a station id column "
+        "(STATION_NUMBER, STATION_NU, STATION_NA, or STATION_NAME)."
+    )
+
+
 def add_gauge_info_to_basins(input_path, gauge_path, output_path):
+    from hy_features.export import strip_point_join_artifacts
+
     # 1. Load your data
     basins = gpd.read_file(input_path)
-    gauges = gpd.read_file(gauge_path)
+    gauges = strip_point_join_artifacts(gpd.read_file(gauge_path))
 
     # 2. Align coordinate systems
     if basins.crs != gauges.crs:
         gauges = gauges.to_crs(basins.crs)
 
     # 3. FIX: Strip out all extra columns except geometry and the specific IDs
+    station_col = _gauge_station_column(gauges)
     basins_subset = basins[["DN", "geometry"]]
-    gauges_subset = gauges[["STATION_NU", "geometry"]]
+    gauges_subset = gauges[[station_col, "geometry"]].rename(
+        columns={station_col: "STATION_NU"}
+    )
 
     # 4. Spatial join (only joins 'DN' and 'STATION_NU')
     joined = gpd.sjoin(gauges_subset, basins_subset, how="inner", predicate="within")

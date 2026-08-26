@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import geopandas as gpd
 import pytest
-from shapely.geometry import LineString, Polygon
+from shapely.geometry import LineString, Point, Polygon
 
 from hy_features.assemble import assemble_full_geofabric
 from hy_features.enrich import (
@@ -34,6 +34,7 @@ from hy_features.schema import (
     HY_HYDROMETRIC_FEATURE,
     HY_IMPOUNDMENT,
     HY_LAKE,
+    LINEAR_ELEMENT_ID,
     LOWER_CATCHMENT_ID,
     NEXUS_ID,
     OUTFLOW_NEXUS_ID,
@@ -154,6 +155,29 @@ def test_hydro_nexus_covers_all_flowpaths():
     assert contributing == {"1", "2"}
 
 
+def test_hydro_nexus_at_topologic_outlet_when_line_is_reversed():
+    """TauDEM lines often store the pour point at the first vertex."""
+    from hy_features.network import build_hydro_nexus_layer
+
+    streams = gpd.GeoDataFrame(
+        {
+            "LINKNO": [1, 2],
+            "DSLINKNO": [2, -9999],
+            "Length": [1000.0, 1000.0],
+            "geometry": [
+                LineString([(1.0, 0.5), (0.5, 0.5)]),
+                LineString([(2.0, 0.5), (1.5, 0.5)]),
+            ],
+        },
+        crs="EPSG:3857",
+    )
+    nexus = build_hydro_nexus_layer(streams, outlet_sentinel=-9999)
+    n1 = nexus[nexus[CONTRIBUTING_CATCHMENT_ID] == "1"].iloc[0]
+    n2 = nexus[nexus[CONTRIBUTING_CATCHMENT_ID] == "2"].iloc[0]
+    assert n1.geometry.equals_exact(Point(1.0, 0.5), tolerance=1e-6)
+    assert n2.geometry.equals_exact(Point(2.0, 0.5), tolerance=1e-6)
+
+
 def test_hydrometric_river_referencing():
     basins, streams = _minimal_raw_geofabric()
     gauges = gpd.GeoDataFrame(
@@ -166,9 +190,30 @@ def test_hydrometric_river_referencing():
     assembled = assemble_full_geofabric(basins, streams, gauges=gauges)
     hm = assembled["layers"]["hydrometric_feature"]
     assert hm[HYF_TYPE].iloc[0] == HY_HYDROMETRIC_FEATURE
+    assert hm[CATCHMENT_ID].iloc[0] == "1"
     assert hm[HOST_FLOWPATH_ID].iloc[0] == "1"
+    assert hm[LINEAR_ELEMENT_ID].iloc[0] == "1"
     assert hm[REFERENCE_NEXUS_ID].iloc[0] == "nx_out_1"
     assert float(hm[DISTANCE_FROM_OUTLET_M].iloc[0]) >= 0
+
+
+def test_hydrometric_ids_use_containing_catchment_not_nearest_reach():
+    """host_flowpath_id follows basin catchment_id, not the geometrically nearest link."""
+    basins, streams = _minimal_raw_geofabric()
+    basins = enrich_catchment_areas(basins)
+    streams = enrich_flowpaths(streams, outlet_sentinel=-9999)
+    # Inside basin 2 (DN=2) but much closer to link 1 than link 2.
+    gauge_pt = Point(1.01, 0.5)
+    gauges = gpd.GeoDataFrame(
+        {"STATION_NUMBER": ["05AB002"], "geometry": [gauge_pt]},
+        crs=streams.crs,
+    )
+    placed = assign_hydrometric_positions(
+        enrich_hydrometric_features(gauges), streams, basins=basins,
+    )
+    assert placed[CATCHMENT_ID].iloc[0] == "2"
+    assert placed[HOST_FLOWPATH_ID].iloc[0] == "2"
+    assert placed[LINEAR_ELEMENT_ID].iloc[0] == "2"
 
 
 def test_waterbody_layer():
@@ -273,6 +318,24 @@ def test_unplaced_gauges_omitted_from_hydrometric_layer():
     assembled = assemble_full_geofabric(basins, streams, gauges=gauges)
     assert "hydrometric_feature" not in assembled["layers"]
     assert assembled["hydrometric_skipped"] == 1
+
+
+def test_strip_point_join_artifacts_drops_dn_and_index_right():
+    from hy_features.export import strip_point_join_artifacts
+
+    pts = gpd.GeoDataFrame(
+        {
+            "STATION_NUMBER": ["05AB001"],
+            "DN": [999],
+            "index_right": [0],
+            "geometry": [Point(0.5, 0.5)],
+        },
+        crs="EPSG:3857",
+    )
+    cleaned = strip_point_join_artifacts(pts)
+    assert "DN" not in cleaned.columns
+    assert "index_right" not in cleaned.columns
+    assert cleaned["STATION_NUMBER"].iloc[0] == "05AB001"
 
 
 def test_field_remap_catchment_area():

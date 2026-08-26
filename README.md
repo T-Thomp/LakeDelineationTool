@@ -20,26 +20,28 @@ The workflow builds a stream network and watershed delineation for a selected DE
 
 # Software requirements
 
-The pipeline uses **cluster modules** (TauDEM, GDAL) for raster work and a **Python virtual environment** for geoprocessing scripts. On Alliance/Compute Canada systems, `tau-dem-delineation-srun.slurm` restores a saved module stack named `scimods`; recreate or adapt it on other HPC sites.
+The pipeline uses a **self-compiled TauDEM MPI build**, the cluster **GDAL module** for `gdal_polygonize.py`, and a **Python virtual environment** for geoprocessing scripts. `tau-dem-delineation-srun.slurm` restores a saved module stack named `scimods` (GDAL only); recreate or adapt it on other HPC sites.
 
-## HPC modules (TauDEM + GDAL)
+## TauDEM (self-built MPI)
 
-Load before Python steps (or save as a module collection, e.g. `module save scimods`):
+Download and compile [TauDEM](https://github.com/dtarbot/TauDEM) with MPI enabled (not a cluster module). 
 
-| Software | Purpose |
-|----------|---------|
-| **TauDEM** (MPI build) | `pitremove`, `d8flowdir`, `aread8`, `gridnet`, `threshold`, `streamnet`, `moveoutletstostreams` |
-| **GDAL** | `gdal_polygonize.py` (watershed raster → polygon shapefile) |
-| **Slurm** | `sbatch`, `srun` — TauDEM and `rasterFlowpathEdit.py` MPI launches |
+## HPC modules (GDAL)
 
-Example (load **GDAL 3.9.x** to match `GDAL==3.9.2` in `requirements.txt`; check `module spider taudem`, `module spider gdal`):
+Load before Python steps and before `gdal_polygonize.py` (or save as a module collection, e.g. `module save scimods`):
+
+Example (load **GDAL 3.9.1** to match `GDAL==3.9.1` in `requirements.txt`; check `module spider gdal`):
 
 ```bash
 module load StdEnv/2023
-module load gdal/3.9.2
-module load taudem/2023.03.30   # or your site’s TauDEM MPI module name
+module load gdal/3.9.1
 module save scimods
 ```
+
+| Software | Purpose |
+|----------|---------|
+| **GDAL** | `gdal_polygonize.py` (watershed raster → polygon shapefile); must match `GDAL==3.9.1` in the venv |
+| **Slurm** | `sbatch`, `srun` — TauDEM MPI passes and `rasterFlowpathEdit.py` |
 
 TauDEM Pass 1–3 invoke MPI tools via `srun` with `#SBATCH --ntasks=250`. `rasterFlowpathEdit.py` uses a **separate** smaller `srun` launch (`FLOWPATH_NCORES`).
 
@@ -51,7 +53,7 @@ Pinned package list: [`requirements.txt`](requirements.txt)
 
 | Package | Version | Used by |
 |---------|---------|---------|
-| **GDAL** | 3.9.2 | `osgeo` raster I/O (`rasterFlowpathEdit.py`, `pourPointsPass2.py`) |
+| **GDAL** | 3.9.1 | `osgeo` raster I/O (`rasterFlowpathEdit.py`, `pourPointsPass2.py`) |
 | **geopandas** | 1.0.1 | Vector scripts; shapefile / GeoPackage I/O |
 | **pandas** | 2.2.3 | Attribute tables, registry JSON |
 | **numpy** | 1.26.4 | Raster arrays, basin metrics |
@@ -352,13 +354,14 @@ Before adapting the workflow to another watershed, verify the following settings
 
 Update:
 
+- `TAUDEM_BIN` — directory containing compiled TauDEM MPI binaries
 - `HOME_DIR`
 - `DEM`
 - `VENV` — path to activated venv (`pip install -r requirements.txt`; see **Software requirements**)
 - `STREAM_THRESHOLD`
 - `FLOWPATH_NCORES`
 
-Ensure `module restore scimods` loads **TauDEM** and **GDAL** (or edit module loads in §0).
+Ensure `module restore scimods` loads **GDAL 3.9.1** and that `TAUDEM_BIN` is on `PATH` (see **Software requirements**).
 
 Also verify:
 
@@ -531,7 +534,7 @@ Contains the cleaned geofabric:
 
 ---
 
-# OGC HY_Features alignment
+# OGC HY_Features alignment (in development / work in progress)
 
 HY_Features enrichment is **off by default**. Enable it for `geofabric.gpkg`, HY columns, and JSON sidecars:
 

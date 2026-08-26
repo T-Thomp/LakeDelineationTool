@@ -90,18 +90,22 @@ def clip_gauges_to_basin(
     if gauges.crs != basin_dissolved.crs:
         gauges = gauges.to_crs(basin_dissolved.crs)
 
-    clipped = gpd.sjoin(gauges, basin_dissolved, predicate="within")
+    # clip (not sjoin) so index_right / DN never attach to gauge points
+    clipped = gpd.clip(gauges, basin_dissolved)
     return clipped.to_crs(subbasins.crs)
 
 
 def export_gauges(gauges: gpd.GeoDataFrame) -> None:
     """Write shapefile and optional HY_Features GeoPackage sidecar."""
+    from hy_features.export import export_geopackage, strip_point_join_artifacts
+
     output_shp = PATHS["output_shp"]
     Path(output_shp).parent.mkdir(parents=True, exist_ok=True)
 
+    gauges = strip_point_join_artifacts(gauges)
+
     if hy_features_enabled(default=ENABLE_HY_FEATURES):
         from hy_features.enrich import enrich_hydrometric_features
-        from hy_features.export import export_geopackage
 
         gauges = enrich_hydrometric_features(gauges)
         export_geopackage({"hydrometric_feature": gauges}, PATHS["output_gpkg"])

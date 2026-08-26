@@ -151,7 +151,7 @@ Types `2` and `3` map to **`HY_Impoundment`**, an OGC **`HY_WaterBody` subtype**
 | `contributingCatchment` | `contributing_catchment_id` | Catchment whose outflow this nexus realizes |
 | `receivingCatchment` | `receiving_catchment_id` | Downstream catchment; empty at domain outlet |
 | `realizedCatchment` | `realizes_catchment` | Same as contributing catchment |
-| Geometry | point | Downstream endpoint of host flowpath |
+| Geometry | point | Topologic outflow endpoint (from `DSLINKNO` / upstream links; TauDEM may store pour point at line start) |
 
 When pour points are supplied, additional rows with `hyf_type = HY_HydroLocation` are **appended to this same layer** (see below).
 
@@ -179,13 +179,13 @@ Implements `positionOnRiver` via **`HY_IndirectPosition`** (Section 7.3.3).
 | Feature type | `hyf_type` = `HY_HydrometricFeature` | |
 | Station identifier | `station_code` | `STATION_NUMBER` or `STATION_NU` |
 | `hydroLocationType` | `hydro_loc_type` | `hydrometric station` |
-| Host catchment | `catchment_id` | Basin containing gauge, else host reach id |
-| `positionOnRiver` → linear element | `linear_element_id` | Host `flowpath_id` |
-| `positionOnRiver` → reference nexus | `reference_nexus_id` | Outflow nexus of host reach |
-| `positionOnRiver` → distance | `distance_from_outlet_m`, `distance_from_outlet_pct` | Along-host-reach from outlet |
-| Host reach | `host_flowpath_id` | Nearest flowpath within search radius (default 5 km) |
+| Host catchment | `catchment_id` | Basin polygon containing the gauge (`DN`) |
+| `positionOnRiver` → linear element | `linear_element_id` | Same as `catchment_id` (dendritic: equals `flowpath_id`) |
+| `positionOnRiver` → reference nexus | `reference_nexus_id` | Outflow nexus of host catchment |
+| `positionOnRiver` → distance | `distance_from_outlet_m`, `distance_from_outlet_pct` | Along host flowpath (`catchment_id`) from outlet |
+| Host reach | `host_flowpath_id` | Same as `catchment_id` (not nearest reach) |
 
-**Export policy:** Gauges that cannot be snapped within the search radius are **omitted**
+**Export policy:** Gauges with no containing catchment fall back to the nearest flowpath within the search radius (default 5 km). Gauges that cannot be linked to a catchment flowpath are **omitted**
 from `hydrometric_feature` so every exported row has a complete `positionOnRiver`.
 
 ### HY_WaterBody (`waterbody` layer)

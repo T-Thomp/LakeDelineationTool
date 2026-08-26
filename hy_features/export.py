@@ -10,6 +10,26 @@ import geopandas as gpd
 import pandas as pd
 
 from hy_features.models import CatchmentRegistry
+from hy_features.schema import LEGACY_BASIN_ID
+
+
+def strip_point_join_artifacts(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """
+    Drop spatial-join bookkeeping and basin ids from point layers.
+
+    ``DN`` on gauge/pour-point exports comes from early Pass 1 joins and does not
+    belong on point features; use ``STATION_NUMBER`` / ``station_code`` or the
+    final ``hydrometric_feature`` / ``catchment_id`` in ``geofabric.gpkg``.
+    """
+    drop = {
+        LEGACY_BASIN_ID,
+        "index_right",
+        "index_left",
+    }
+    cols = [c for c in gdf.columns if c in drop or c.startswith("index_")]
+    if not cols:
+        return gdf
+    return gdf.drop(columns=cols)
 
 
 def export_geopackage(

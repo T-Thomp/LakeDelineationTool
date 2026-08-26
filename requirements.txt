@@ -1,7 +1,9 @@
-# Pipeline Python dependencies (versions from tested scienv on Alliance HPC).
-# Load module gdal/3.9.2 before pip install so GDAL matches the cluster library.
+# Pipeline Python dependencies (versions from scienv pip freeze on Alliance HPC).
+# Load module gdal/3.9.1 before pip install so GDAL matches the cluster library.
+# mpi4py is required for rasterFlowpathEdit.py MPI but may not appear in pip freeze;
+# install via pip or the cluster OpenMPI/mpi4py module stack.
 
-GDAL==3.9.2
+GDAL==3.9.1
 geopandas==1.0.1
 pandas==2.2.3
 numpy==1.26.4

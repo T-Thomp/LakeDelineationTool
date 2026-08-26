@@ -569,7 +569,9 @@ def process_reservoir_basins():
     lakes = gpd.read_file(PATHS["lakes"])
     streams = gpd.read_file(PATHS["streams"])
     intersection = gpd.read_file(PATHS["intersection"])
-    gauges = gpd.read_file(PATHS["gauges"])
+    from hy_features.export import strip_point_join_artifacts
+
+    gauges = strip_point_join_artifacts(gpd.read_file(PATHS["gauges"]))
 
     intersection["lake_id"] = parse_lake_id_column(intersection)
 

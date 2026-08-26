@@ -758,7 +758,9 @@ def load_gauges(gauges_vector_path, raster_proj):
     """Load stream gauges for outlet ranking, or an empty frame if the file is missing."""
     if not os.path.exists(gauges_vector_path):
         return gpd.GeoDataFrame(geometry=[], crs=raster_proj)
-    return gpd.read_file(gauges_vector_path).to_crs(raster_proj)
+    from hy_features.export import strip_point_join_artifacts
+
+    return strip_point_join_artifacts(gpd.read_file(gauges_vector_path)).to_crs(raster_proj)
 
 
 def resolve_worker_count(requested_ncores, comm):

@@ -55,7 +55,8 @@
 # (this slurm cd's there). Relative paths below are from HOME_DIR.
 #
 # [ ] tau-dem-delineation-srun.slurm  (this file)
-#       module restore scimods  -- TauDEM MPI + GDAL (see SOFTWARE REQUIREMENTS)
+#       module restore scimods  -- GDAL (see SOFTWARE REQUIREMENTS)
+#       TAUDEM_BIN         -- compiled TauDEM MPI bin/ (pitremove, d8flowdir, …)
 #       HOME_DIR           -- project root on the cluster
 #       DEM                -- input elevation GeoTIFF
 #       VENV               -- Python venv activate (pip install -r requirements.txt)
@@ -119,19 +120,19 @@
 # See README.md "Software requirements" for full detail and pip install steps.
 #
 # HPC modules (this script: module restore scimods):
-#   TauDEM MPI  -- pitremove, d8flowdir, aread8, gridnet, threshold, streamnet,
-#                  moveoutletstostreams  (all invoked via srun)
-#   GDAL        -- gdal_polygonize.py
-#   Slurm       -- sbatch / srun (TauDEM + rasterFlowpathEdit MPI)
+#   GDAL        -- gdal_polygonize.py (must match GDAL==3.9.1 in requirements.txt)
+#   Slurm       -- sbatch / srun (self-built TauDEM MPI + rasterFlowpathEdit MPI)
 #
-# Recreate scimods on a new cluster (GDAL module must match GDAL==3.9.2 in requirements.txt):
-#   module load StdEnv/2023 gdal/3.9.2 taudem/<ver>
+# TauDEM (not a cluster module): compile with MPI; set TAUDEM_BIN in §0.
+#
+# Recreate scimods on a new cluster:
+#   module load StdEnv/2023 gdal/3.9.1
 #   module save scimods
 #
 # Python venv (VENV below): pip install -r requirements.txt
-#   GDAL 3.9.2, geopandas 1.0.1, pandas 2.2.3, numpy 1.26.4, scipy 1.15.2,
-#   mpi4py 4.0.0, shapely 2.0.7, fiona 1.10.1, pyogrio 0.10.0, pyproj 3.7.1
-#
+#   GDAL 3.9.1, geopandas 1.0.1, pandas 2.2.3, numpy 1.26.4, scipy 1.15.2,
+#   mpi4py 4.0.0 (rasterFlowpathEdit MPI; pip or site module), shapely 2.0.7,
+#   fiona 1.10.1, pyogrio 0.10.0, pyproj 3.7.1
 # =============================================================================
 
 #SBATCH --account=rrg-alpie
@@ -162,7 +163,8 @@ echo "$(basename "$0"): Delineation started at $(date)"
 # -----------------------------------------------------------------------------
 # 0. Environment and paths
 # -----------------------------------------------------------------------------
-# Modules: TauDEM (MPI) + GDAL — see header "SOFTWARE REQUIREMENTS".
+# Modules: GDAL only — see header "SOFTWARE REQUIREMENTS".
+# TauDEM:  self-built MPI binaries on PATH via TAUDEM_BIN.
 # Python:  source VENV before §2–§6 (geopandas, scipy, mpi4py, osgeo/gdal).
 # -----------------------------------------------------------------------------
 module purge

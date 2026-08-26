@@ -21,7 +21,9 @@ def load_gauges(gauges_path, target_crs):
             "skipping gauge pour points."
         )
         return gpd.GeoDataFrame(columns=['name', 'point_type', 'geometry'], crs=target_crs)
-    return gpd.read_file(gauges_path)
+    from hy_features.export import strip_point_join_artifacts
+
+    return strip_point_join_artifacts(gpd.read_file(gauges_path))
 
 
 def build_vector_lookup_tables(streams_path):
@@ -318,11 +320,13 @@ def extract_reservoir_io_points(paths):
         lake_pts = gpd.GeoDataFrame(columns=['name', 'point_type', 'geometry'], crs=streams_gdf.crs)
 
     os.makedirs(os.path.dirname(paths["out_lake_nodes"]), exist_ok=True)
+    from hy_features.export import strip_point_join_artifacts
+
     if hy_features_enabled(default=ENABLE_HY_FEATURES):
         from hy_features.enrich import enrich_hydro_locations
 
         lake_pts = enrich_hydro_locations(lake_pts)
-    lake_pts.to_file(paths["out_lake_nodes"])
+    strip_point_join_artifacts(lake_pts).to_file(paths["out_lake_nodes"])
     if hy_features_enabled(default=ENABLE_HY_FEATURES):
         from hy_features.export import export_geopackage
 
@@ -353,7 +357,7 @@ def extract_reservoir_io_points(paths):
         from hy_features.enrich import enrich_hydro_locations
 
         export_gdf = enrich_hydro_locations(export_gdf)
-    export_gdf.to_file(paths["out"])
+    strip_point_join_artifacts(export_gdf).to_file(paths["out"])
     if hy_features_enabled(default=ENABLE_HY_FEATURES):
         from hy_features.export import export_geopackage
 

@@ -62,21 +62,96 @@ def _raw_down_col(streams: gpd.GeoDataFrame) -> str:
     return LOWER_CATCHMENT_ID
 
 
-def _endpoint_points(geom) -> tuple[Point | None, Point | None]:
-    """Return upstream (first) and downstream (last) points of a line."""
+def _as_linestring(geom) -> LineString | None:
+    """Normalize a flowpath geometry to a single LineString."""
     if geom is None or geom.is_empty:
-        return None, None
+        return None
     if geom.geom_type == "MultiLineString":
         lines = [part for part in geom.geoms if part.length > 0]
         if not lines:
-            return None, None
-        geom = LineString([c for line in lines for c in line.coords])
-    if geom.geom_type != "LineString":
-        return None, None
-    coords = list(geom.coords)
-    if len(coords) < 2:
-        return None, None
+            return None
+        return LineString([c for line in lines for c in line.coords])
+    if geom.geom_type == "LineString":
+        return geom
+    return None
+
+
+def _line_endpoints(line: LineString) -> tuple[Point, Point]:
+    coords = list(line.coords)
     return Point(coords[0]), Point(coords[-1])
+
+
+def _parse_downstream_id(down_val: object, outlet_sentinel: int) -> int | None:
+    try:
+        down_int = int(down_val)
+    except (TypeError, ValueError):
+        return None
+    if down_int <= 0 or down_int == outlet_sentinel:
+        return None
+    return down_int
+
+
+def _flowpath_row(
+    streams_indexed: gpd.GeoDataFrame,
+    flowpath_id: object,
+) -> pd.Series | None:
+    """Look up a flowpath row by id (string or int index)."""
+    for key in (flowpath_id, str(flowpath_id)):
+        if key in streams_indexed.index:
+            return streams_indexed.loc[key]
+    try:
+        numeric = int(flowpath_id)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if numeric in streams_indexed.index:
+        return streams_indexed.loc[numeric]
+    return None
+
+
+def _outlet_point_for_reach(
+    row: pd.Series,
+    streams_indexed: gpd.GeoDataFrame,
+    upstream_map: dict[str, list[str]],
+    link_col: str,
+    down_col: str,
+    outlet_sentinel: int,
+) -> Point | None:
+    """
+    Locate the catchment outflow (downstream end) of a reach.
+
+    TauDEM ``stream_net`` lines store the pour point at ``coords[0]`` (downstream).
+    Prefer ``DSLINKNO`` / upstream topology when available so nexus placement stays
+    correct if a reach was reversed during post-processing; otherwise use ``coords[0]``.
+    """
+    line = _as_linestring(row.geometry)
+    if line is None:
+        return None
+    end_a, end_b = _line_endpoints(line)  # end_a = coords[0], TauDEM downstream / pour point
+    link_id = str(row[link_col])
+
+    lower_int = _parse_downstream_id(row[down_col], outlet_sentinel)
+    if lower_int is not None:
+        down_row = _flowpath_row(streams_indexed, lower_int)
+        if down_row is not None and down_row.geometry is not None:
+            down_geom = down_row.geometry
+            return end_a if end_a.distance(down_geom) <= end_b.distance(down_geom) else end_b
+
+    upstream_ids = upstream_map.get(link_id, [])
+    if upstream_ids:
+        inflow_a = float("inf")
+        inflow_b = float("inf")
+        for up_id in upstream_ids:
+            up_row = _flowpath_row(streams_indexed, up_id)
+            if up_row is None or up_row.geometry is None:
+                continue
+            up_geom = up_row.geometry
+            inflow_a = min(inflow_a, end_a.distance(up_geom))
+            inflow_b = min(inflow_b, end_b.distance(up_geom))
+        if inflow_a < float("inf") or inflow_b < float("inf"):
+            return end_b if inflow_a <= inflow_b else end_a
+
+    # Single-segment / unresolved topology: TauDEM pour point at line start
+    return end_a
 
 
 def build_upstream_map(streams: gpd.GeoDataFrame, outlet_sentinel: int) -> dict[str, list[str]]:
@@ -110,22 +185,23 @@ def build_hydro_nexus_layer(
     link_col = _link_col(streams)
     down_col = _raw_down_col(streams)
     crs = streams.crs
+    streams_indexed = streams.set_index(link_col, drop=False)
+    upstream_map = build_upstream_map(streams, outlet_sentinel)
     records: list[dict] = []
 
     for _, row in streams.iterrows():
         cid = str(row[link_col])
-        _, ds_pt = _endpoint_points(row.geometry)
+        ds_pt = _outlet_point_for_reach(
+            row, streams_indexed, upstream_map, link_col, down_col, outlet_sentinel,
+        )
         if ds_pt is None:
             continue
 
         lower = row[down_col]
         receiving = ""
-        try:
-            lower_int = int(lower)
-            if lower_int > 0 and lower_int != outlet_sentinel:
-                receiving = str(lower_int)
-        except (TypeError, ValueError):
-            pass
+        lower_int = _parse_downstream_id(lower, outlet_sentinel)
+        if lower_int is not None:
+            receiving = str(lower_int)
 
         records.append({
             NEXUS_ID: outflow_nexus_id_for(cid),
@@ -212,15 +288,20 @@ def link_flowpath_nexuses(
     return out
 
 
-def _project_distance_from_outlet_m(line: LineString, point: Point) -> tuple[float, float]:
-    """Distance in map units from point to downstream end, and fraction of length."""
-    if line is None or line.is_empty or point is None:
+def _project_distance_from_outlet_m(
+    line: LineString,
+    point: Point,
+    outlet_pt: Point,
+) -> tuple[float, float]:
+    """Distance along the reach from the topologic outlet to ``point``."""
+    if line is None or line.is_empty or point is None or outlet_pt is None:
         return 0.0, 0.0
     total = line.length
     if total <= 0:
         return 0.0, 0.0
-    dist_along = line.project(point)
-    dist_from_outlet = max(0.0, total - dist_along)
+    outlet_dist = line.project(outlet_pt)
+    point_dist = line.project(point)
+    dist_from_outlet = abs(point_dist - outlet_dist)
     pct = dist_from_outlet / total
     return dist_from_outlet, pct
 
@@ -234,14 +315,19 @@ def assign_hydrometric_positions(
     """
     HY_HydrometricFeature.positionOnRiver via HY_IndirectPosition (Section 7.3.3).
 
-    Snaps each gauge to the nearest flowpath and records distance from the
-    catchment outflow nexus along the linear element.
+    Uses the containing catchment id (TauDEM ``DN``) for ``catchment_id``,
+    ``host_flowpath_id``, and ``linear_element_id``. In this dendritic fabric each
+    catchment is realized by the flowpath with the same id. Distance along the
+    reach is measured on that host flowpath after projecting the gauge onto it.
     """
     from hy_features.schema import HY_HYDROMETRIC_FEATURE
 
     out = gauges.copy()
     link_col = _link_col(streams)
+    down_col = _raw_down_col(streams)
+    outlet_sentinel = -9999
     streams_indexed = streams.set_index(link_col, drop=False)
+    upstream_map = build_upstream_map(streams, outlet_sentinel)
 
     out[HOST_FLOWPATH_ID] = ""
     out[CATCHMENT_ID] = ""
@@ -260,42 +346,52 @@ def assign_hydrometric_positions(
         if pt is None or pt.is_empty:
             continue
 
-        best_fid = None
-        best_dist = float("inf")
-        best_snap = None
+        catchment_id: str | None = None
+        if basin_col and basins is not None:
+            joined = basins[basins.geometry.contains(pt)]
+            if not joined.empty:
+                catchment_id = str(joined.iloc[0][basin_col])
 
+        nearest_fid: str | None = None
+        nearest_dist = float("inf")
         for _, reach in streams.iterrows():
             geom = reach.geometry
             if geom is None or geom.is_empty:
                 continue
             snap_dist = pt.distance(geom)
-            if snap_dist < best_dist:
-                best_dist = snap_dist
-                best_fid = str(reach[link_col])
-                best_snap = geom.interpolate(geom.project(pt))
+            if snap_dist < nearest_dist:
+                nearest_dist = snap_dist
+                nearest_fid = str(reach[link_col])
 
-        if best_fid is None or best_dist > search_radius_m:
+        if catchment_id is None:
+            if nearest_fid is None or nearest_dist > search_radius_m:
+                continue
+            catchment_id = nearest_fid
+
+        reach = _flowpath_row(streams_indexed, catchment_id)
+        if reach is None:
             continue
 
-        reach = streams_indexed.loc[best_fid]
-        line = reach.geometry
-        if line.geom_type == "MultiLineString":
-            line = max(line.geoms, key=lambda g: g.length)
+        line = _as_linestring(reach.geometry)
+        if line is None:
+            continue
 
-        dist_m, dist_pct = _project_distance_from_outlet_m(line, best_snap)
+        outlet_pt = _outlet_point_for_reach(
+            reach, streams_indexed, upstream_map, link_col, down_col, outlet_sentinel,
+        )
+        if outlet_pt is None:
+            continue
 
-        out.at[idx, HOST_FLOWPATH_ID] = best_fid
-        out.at[idx, CATCHMENT_ID] = best_fid
-        out.at[idx, LINEAR_ELEMENT_ID] = best_fid
-        out.at[idx, REFERENCE_NEXUS_ID] = outflow_nexus_id_for(best_fid)
+        snap = line.interpolate(line.project(pt))
+        dist_m, dist_pct = _project_distance_from_outlet_m(line, snap, outlet_pt)
+
+        cid = str(catchment_id)
+        out.at[idx, CATCHMENT_ID] = cid
+        out.at[idx, HOST_FLOWPATH_ID] = cid
+        out.at[idx, LINEAR_ELEMENT_ID] = cid
+        out.at[idx, REFERENCE_NEXUS_ID] = outflow_nexus_id_for(cid)
         out.at[idx, DISTANCE_FROM_OUTLET_M] = round(dist_m, 3)
         out.at[idx, DISTANCE_FROM_OUTLET_PCT] = round(dist_pct, 6)
-
-        if basin_col and basins is not None:
-            if gauge.geometry is not None:
-                joined = basins[basins.geometry.contains(gauge.geometry)]
-                if not joined.empty:
-                    out.at[idx, CATCHMENT_ID] = str(joined.iloc[0][basin_col])
 
     return out
 
