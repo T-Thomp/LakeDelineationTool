@@ -173,7 +173,7 @@ echo "$(basename "$0"): Delineation started at $(date)"
 module purge
 module restore scimods
 
-# export PATH="$HOME/taudem-build/taudem:$PATH"   # either uncomment the PATH or set path is .bashrc file
+# export PATH="$HOME/taudem-build/taudem:$PATH"   # Set taudem:PATH here or set it in .bashrc file
 
 HOME_DIR="/home/$USER/projects/rrg-alpie/tylerrt/southSaskDelineation"
 INT_DIR="$HOME_DIR/taudem-interim-files/d8"      # Pass 1 & 2 interim rasters/shapefiles
