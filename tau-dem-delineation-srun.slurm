@@ -55,8 +55,8 @@
 # (this slurm cd's there). Relative paths below are from HOME_DIR.
 #
 # [ ] tau-dem-delineation-srun.slurm  (this file)
-#       module restore scimods  -- GDAL (see SOFTWARE REQUIREMENTS)
-#       TAUDEM_BIN         -- compiled TauDEM MPI bin/ (pitremove, d8flowdir, …)
+#       module restore scimods  -- GDAL + mpi4py (see SOFTWARE REQUIREMENTS)
+#       PATH to TauDEM     -- export PATH="$HOME/taudem-build/taudem:$PATH" (§0)
 #       HOME_DIR           -- project root on the cluster
 #       DEM                -- input elevation GeoTIFF
 #       VENV               -- Python venv activate (pip install -r requirements.txt)
@@ -117,22 +117,25 @@
 #
 # SOFTWARE REQUIREMENTS (modules + Python venv)
 # ---------------------------------------------
-# See README.md "Software requirements" for full detail and pip install steps.
+# See README.md "Software requirements". Steps below are for Alliance FIR; adapt on other sites.
 #
-# HPC modules (this script: module restore scimods):
+# HPC modules (this script: module restore scimods) — FIR-tested:
 #   GDAL        -- gdal_polygonize.py (must match GDAL==3.9.1 in requirements.txt)
+#   mpi4py      -- rasterFlowpathEdit.py MPI (FIR: module load only; not in requirements.txt)
 #   Slurm       -- sbatch / srun (self-built TauDEM MPI + rasterFlowpathEdit MPI)
 #
-# TauDEM (not a cluster module): compile with MPI; set TAUDEM_BIN in §0.
+# TauDEM (not a cluster module): compile with MPI; add install dir to PATH in §0.
 #
-# Recreate scimods on a new cluster:
-#   module load StdEnv/2023 gdal/3.9.1
+# Recreate scimods on Alliance FIR:
+#   module load StdEnv/2023 gdal/3.9.1 mpi4py/4.0.0
 #   module save scimods
 #
-# Python venv (VENV below): pip install -r requirements.txt
+# Other clusters / local: use site module loads or pip install mpi4py; match GDAL to requirements.txt.
+#
+# Python venv (VENV below): load modules, activate venv, pip install -r requirements.txt
 #   GDAL 3.9.1, geopandas 1.0.1, pandas 2.2.3, numpy 1.26.4, scipy 1.15.2,
-#   mpi4py 4.0.0 (rasterFlowpathEdit MPI; pip or site module), shapely 2.0.7,
-#   fiona 1.10.1, pyogrio 0.10.0, pyproj 3.7.1
+#   shapely 2.0.7, fiona 1.10.1, pyogrio 0.10.0, pyproj 3.7.1
+#   mpi4py — FIR: module load mpi4py/4.0.0 only
 # =============================================================================
 
 #SBATCH --account=rrg-alpie
@@ -163,12 +166,14 @@ echo "$(basename "$0"): Delineation started at $(date)"
 # -----------------------------------------------------------------------------
 # 0. Environment and paths
 # -----------------------------------------------------------------------------
-# Modules: GDAL only — see header "SOFTWARE REQUIREMENTS".
-# TauDEM:  self-built MPI binaries on PATH via TAUDEM_BIN.
+# Modules: GDAL + mpi4py — see header "SOFTWARE REQUIREMENTS".
+# TauDEM:  self-built MPI binaries; add compiled install dir to PATH below.
 # Python:  source VENV before §2–§6 (geopandas, scipy, mpi4py, osgeo/gdal).
 # -----------------------------------------------------------------------------
 module purge
 module restore scimods
+
+# export PATH="$HOME/taudem-build/taudem:$PATH"   # either uncomment the PATH or set path is .bashrc file
 
 HOME_DIR="/home/$USER/projects/rrg-alpie/tylerrt/southSaskDelineation"
 INT_DIR="$HOME_DIR/taudem-interim-files/d8"      # Pass 1 & 2 interim rasters/shapefiles

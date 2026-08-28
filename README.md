@@ -20,34 +20,63 @@ The workflow builds a stream network and watershed delineation for a selected DE
 
 # Software requirements
 
-The pipeline uses a **self-compiled TauDEM MPI build**, the cluster **GDAL module** for `gdal_polygonize.py`, and a **Python virtual environment** for geoprocessing scripts. `tau-dem-delineation-srun.slurm` restores a saved module stack named `scimods` (GDAL only); recreate or adapt it on other HPC sites.
+The pipeline uses a **self-compiled TauDEM MPI build**, a **Python virtual environment** ([`requirements.txt`](requirements.txt)), and **MPI + GDAL** for raster work. Setup below is **tested on Alliance FIR**; other clusters, workstations, or conda environments may need different module names, GDAL linkage, or a `pip install mpi4py` instead of a cluster module.
 
 ## TauDEM (self-built MPI)
 
-Download and compile [TauDEM](https://github.com/dtarb/taudem) with MPI enabled (not a cluster module). 
+Download and compile [TauDEM](https://github.com/dtarb/taudem) with MPI enabled (not a cluster module).
 
-## HPC modules (GDAL)
+In `tau-dem-delineation-srun.slurm`, point `PATH` at your build:
 
-Load before Python steps and before `gdal_polygonize.py` (or save as a module collection, e.g. `module save scimods`):
+```bash
+export PATH="$HOME/taudem-build/taudem:$PATH"   # edit: your compiled TauDEM install
+```
 
-Example (load **GDAL 3.9.1** to match `GDAL==3.9.1` in `requirements.txt`; check `module spider gdal`):
+## Alliance FIR (tested setup)
+
+On FIR, load HPC modules **before** activating the venv. **`mpi4py` is not in `requirements.txt`** — use the cluster module only ([Alliance mpi4py docs](https://docs.alliancecan.ca/wiki/MPI4py)). Do not `pip install mpi4py` on FIR.
 
 ```bash
 module load StdEnv/2023
 module load gdal/3.9.1
-module save scimods
+module load mpi4py/4.0.0
+module save scimods    # optional; restored by tau-dem-delineation-srun.slurm
 ```
 
-| Software | Purpose |
-|----------|---------|
-| **GDAL** | `gdal_polygonize.py` (watershed raster → polygon shapefile); must match `GDAL==3.9.1` in the venv |
+| Software | Purpose (FIR) |
+|----------|----------------|
+| **GDAL 3.9.1** | `gdal_polygonize.py`; pip `GDAL==3.9.1` must match the loaded module |
+| **mpi4py 4.0.0** | `rasterFlowpathEdit.py` MPI — module load only |
 | **Slurm** | `sbatch`, `srun` — TauDEM MPI passes and `rasterFlowpathEdit.py` |
 
 TauDEM Pass 1–3 invoke MPI tools via `srun` with `#SBATCH --ntasks=250`. `rasterFlowpathEdit.py` uses a **separate** smaller `srun` launch (`FLOWPATH_NCORES`).
 
-## Python virtual environment
+### Python venv (FIR)
 
-Pinned package list: [`requirements.txt`](requirements.txt) 
+```bash
+module load StdEnv/2023 gdal/3.9.1 mpi4py/4.0.0
+
+python -m venv ~/virtual-envs/scienv
+source ~/virtual-envs/scienv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+If `import mpi4py` fails, deactivate, load `mpi4py/4.0.0`, and re-activate the venv.
+
+Day-to-day: `module restore scimods` then `source ~/virtual-envs/scienv/bin/activate`.
+
+## Other HPC sites or local setups
+
+Module names and versions differ by cluster (`module spider gdal`, `module spider mpi4py`). On systems **without** an Alliance-style mpi4py module, install MPI Python bindings yourself, for example:
+
+```bash
+pip install mpi4py==4.0.0   # after loading your site MPI compiler/module stack
+```
+
+Similarly, load or install a **GDAL build that matches** `GDAL==3.9.1` in `requirements.txt` before `pip install GDAL`, or adjust the pin to your system GDAL. Conda/mamba users may prefer `conda-forge` for `gdal`, `geopandas`, and `mpi4py` instead of the venv + module workflow above.
+
+Adapt `module restore scimods` in `tau-dem-delineation-srun.slurm` to your site’s module loads, or replace with explicit `module load` lines.
 
 ### Key pinned versions (pipeline)
 
@@ -62,8 +91,9 @@ Pinned package list: [`requirements.txt`](requirements.txt)
 | **fiona** | 1.10.1 | Shapefile driver (geopandas) |
 | **pyogrio** | 0.10.0 | GeoPackage / fast vector I/O (geopandas) |
 | **pyproj** | 3.7.1 | CRS transforms (geopandas) |
-| **mpi4py** | 4.0.0 | Parallel lakes in `rasterFlowpathEdit.py` |
 | **pytest** | 8.3.4 | `tests/test_hy_features_topology.py` (optional) |
+
+**mpi4py 4.0.0** — required by `rasterFlowpathEdit.py`. On **FIR**: `module load mpi4py/4.0.0` (not pip). Elsewhere: `pip install mpi4py` or your site’s equivalent.
 
 Stdlib only (no pip): `sqlite3` in `getGauges.py`, `hy_features/` JSON export.
 
@@ -354,14 +384,14 @@ Before adapting the workflow to another watershed, verify the following settings
 
 Update:
 
-- `TAUDEM_BIN` — directory containing compiled TauDEM MPI binaries
+- `export PATH=...` — directory containing compiled TauDEM MPI binaries (see **Software requirements**)
 - `HOME_DIR`
 - `DEM`
 - `VENV` — path to activated venv (`pip install -r requirements.txt`; see **Software requirements**)
 - `STREAM_THRESHOLD`
 - `FLOWPATH_NCORES`
 
-Ensure `module restore scimods` loads **GDAL 3.9.1** and that `TAUDEM_BIN` is on `PATH` (see **Software requirements**).
+Ensure `module restore scimods` matches your cluster setup (FIR: **GDAL 3.9.1** + **mpi4py 4.0.0** modules) and that compiled TauDEM is on `PATH`.
 
 Also verify:
 
