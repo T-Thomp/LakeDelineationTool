@@ -48,7 +48,7 @@ FRAC_LAKE_AREA = FRAC_LAKE
 #   None (default) — compute from basin polygon geometry (recommended for this pipeline).
 #   "SomeCol"      — read from basins, or from rivers if joined by DN/LINKNO.
 #   Values are multiplied by AREA_SCALE (1e-6) so m² fields become km² for MIN_SUB_AREA.
-#   After aggregation, summed local areas are written as unit_area_km2 (or UNIT_AREA name).
+#   After aggregation, summed local areas are written as area_km2 (or UNIT_AREA name).
 #
 # UP_AREA (DSContArea): TauDEM *cumulative* drainage area at each pour point (m² on disk).
 #   Not used for the "too small to keep" test — only for outlet / mask logic.
@@ -492,7 +492,7 @@ def basin_aggregation(
     extra_river_cols.append(HILLSLOPE)
   agg_river = agg_river.merge(river[extra_river_cols].copy(), on=riv_id_col, how="left")
 
-  unit_out = UNIT_AREA or "unit_area_km2"
+  unit_out = UNIT_AREA or "area_km2"
   agg_basin = agg_basin.rename(columns={"_unitarea": unit_out, "_uparea": UP_AREA})
   if UNIT_AREA and AREA_SCALE != 1.0:
     agg_basin[unit_out] = agg_basin[unit_out] / AREA_SCALE
@@ -565,9 +565,11 @@ def run_aggregation(
   os.makedirs(os.path.dirname(output_rivers_path) or ".", exist_ok=True)
 
   print(f"Writing aggregated basins ({len(agg_basins)} features): {output_basins_path}")
-  agg_basins.to_file(output_basins_path, driver="ESRI Shapefile")
+  from hy_features.export import export_shapefile_legacy
+
+  export_shapefile_legacy(agg_basins, output_basins_path)
   print(f"Writing aggregated rivers ({len(agg_rivers)} features): {output_rivers_path}")
-  agg_rivers.to_file(output_rivers_path, driver="ESRI Shapefile")
+  export_shapefile_legacy(agg_rivers, output_rivers_path)
 
   return agg_basins, agg_rivers
 

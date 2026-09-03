@@ -320,13 +320,13 @@ def extract_reservoir_io_points(paths):
         lake_pts = gpd.GeoDataFrame(columns=['name', 'point_type', 'geometry'], crs=streams_gdf.crs)
 
     os.makedirs(os.path.dirname(paths["out_lake_nodes"]), exist_ok=True)
-    from hy_features.export import strip_point_join_artifacts
+    from hy_features.export import export_shapefile_legacy, strip_point_join_artifacts
 
     if hy_features_enabled(default=ENABLE_HY_FEATURES):
         from hy_features.enrich import enrich_hydro_locations
 
         lake_pts = enrich_hydro_locations(lake_pts)
-    strip_point_join_artifacts(lake_pts).to_file(paths["out_lake_nodes"])
+    export_shapefile_legacy(strip_point_join_artifacts(lake_pts), paths["out_lake_nodes"])
     if hy_features_enabled(default=ENABLE_HY_FEATURES):
         from hy_features.export import export_geopackage
 
@@ -337,7 +337,12 @@ def extract_reservoir_io_points(paths):
     if gauges.empty:
         export_gdf = lake_pts
     else:
-        gauge_col = 'STATION_NA' if 'STATION_NA' in gauges.columns else 'STATION_NAME'
+        for col in ("STATION_NO", "STATION_NU", "STATION_NUMBER", "STATION_NM", "STATION_NA", "STATION_NAME"):
+            if col in gauges.columns:
+                gauge_col = col
+                break
+        else:
+            gauge_col = "STATION_NAME"
         gauge_pts = gauges.rename(columns={gauge_col: 'name'}).copy()
         gauge_pts['point_type'] = 'gauge'
         gauge_pts = gauge_pts[['name', 'point_type', 'geometry']]
@@ -357,7 +362,7 @@ def extract_reservoir_io_points(paths):
         from hy_features.enrich import enrich_hydro_locations
 
         export_gdf = enrich_hydro_locations(export_gdf)
-    strip_point_join_artifacts(export_gdf).to_file(paths["out"])
+    export_shapefile_legacy(strip_point_join_artifacts(export_gdf), paths["out"])
     if hy_features_enabled(default=ENABLE_HY_FEATURES):
         from hy_features.export import export_geopackage
 

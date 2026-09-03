@@ -61,7 +61,9 @@ def bypass_phantom_streams(streams_path, basins_path, output_path):
     print(f"Phantom segments remaining: {len(phantom_map)}")
 
     if len(phantom_map) == 0:
-        streams.to_file(output_path, driver="ESRI Shapefile")
+        from hy_features.export import export_shapefile_legacy
+
+        export_shapefile_legacy(streams, output_path)
         return
 
     # Use a dictionary of lookups for faster access during the merge loop
@@ -217,43 +219,15 @@ def bypass_phantom_streams(streams_path, basins_path, output_path):
 
     # Reset index back to normal before saving
     cleaned = cleaned.reset_index(drop=True)
-
-    # ---------------------------------------------------------------
-    # Fiona schema export
-    # ---------------------------------------------------------------
-    schema = None
-    try:
-        # Avoid direct call to gpd.io.file.infer_schema if it throws errors in newer versions
-        from geopandas.io.file import infer_schema
-        schema = infer_schema(cleaned)
-        
-        for col in ["DSContArea", "USContArea", "Length", "strmDrop"]:
-            if col in schema["properties"]:
-                schema["properties"][col] = "float:24.6"
-    except Exception as schema_err:
-        print(f"Could not construct custom fiona schema: {schema_err}. Defaulting to automated schema export.")
-
     cleaned.set_crs(original_crs, allow_override=True, inplace=True)
 
     # ---------------------------------------------------------------
     # Write shapefile
     # ---------------------------------------------------------------
+    from hy_features.export import export_shapefile_legacy
 
-    try:
-        write_kwargs = {"driver": "ESRI Shapefile"}
-        if schema is not None:
-            write_kwargs["schema"] = schema
-            write_kwargs["engine"] = "fiona"
-        cleaned.to_file(output_path, **write_kwargs)
-        print(f"Cleaned network successfully saved to: {output_path}")
-    except Exception as e:
-        print(f"Export failed: {e}. Attempting string fallback...")
-        # Fallback to string types if the DBF driver complains about numbers
-        for col in numeric_fields:
-            if col in cleaned.columns: 
-                cleaned[col] = cleaned[col].astype(str)
-        cleaned.to_file(output_path, driver="ESRI Shapefile")
-    
+    export_shapefile_legacy(cleaned, output_path)
+    print(f"Cleaned network successfully saved to: {output_path}")
     print(f"Final stream segments written: {len(cleaned)}")
     print(f"Removed phantom segments: {len(phantom_map)}")
 
@@ -278,7 +252,9 @@ def dissolve_split_basins(input_path, output_path):
 
     # 3. Restore coordinate metadata and save standard export
     dissolved_basins.set_crs(original_crs, allow_override=True, inplace=True)
-    dissolved_basins.to_file(output_path, driver="ESRI Shapefile")
+    from hy_features.export import export_shapefile_legacy
+
+    export_shapefile_legacy(dissolved_basins, output_path)
     print(f"Successfully saved dissolved basins to {output_path}")
 
 
@@ -343,12 +319,12 @@ def export_hy_features_geofabric(
     )
 
 def _gauge_station_column(gauges: gpd.GeoDataFrame) -> str:
-    for col in ("STATION_NU", "STATION_NUMBER", "STATION_NA", "STATION_NAME"):
+    for col in ("STATION_NO", "STATION_NU", "STATION_NUMBER", "STATION_NM", "STATION_NA", "STATION_NAME"):
         if col in gauges.columns:
             return col
     raise ValueError(
         "Gauge layer needs a station id column "
-        "(STATION_NUMBER, STATION_NU, STATION_NA, or STATION_NAME)."
+        "(STATION_NO, STATION_NUMBER, STATION_NU, STATION_NM, STATION_NA, or STATION_NAME)."
     )
 
 
@@ -384,10 +360,9 @@ def add_gauge_info_to_basins(input_path, gauge_path, output_path):
     # 7. Fill basins without stations with an empty string
     basins["STATION_NU"] = basins["STATION_NU"].fillna("")
 
-    # 8. Save output
-    # Note: QGIS labels features by the first string field (STATION_NU). DN stays
-    # the real basin ID — set Layer Properties → Display → Display Name = DN.
-    basins.to_file(output_path, driver="ESRI Shapefile")
+    from hy_features.export import export_shapefile_legacy
+
+    export_shapefile_legacy(basins, output_path)
     
 # --- Execution ---
 if __name__ == "__main__":

@@ -12,6 +12,17 @@ import pandas as pd
 from hy_features.models import CatchmentRegistry
 from hy_features.schema import LEGACY_BASIN_ID
 
+# ESRI Shapefile limits: 10-character column names; narrow default DBF numeric width.
+SHAPEFILE_COLUMN_RENAMES: dict[str, str] = {
+    "STATION_NUMBER": "STATION_NO",
+    "STATION_NAME": "STATION_NM",
+    "unit_area_km2": "area_km2",
+    "lake_area_m2": "lake_area",
+}
+
+# TauDEM cumulative/local areas in m² can exceed 1e10.
+WIDE_AREA_FLOAT_COLS = frozenset({"DSContArea", "USContArea", "lake_area", "lake_area_m2"})
+
 
 def strip_point_join_artifacts(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
@@ -30,6 +41,18 @@ def strip_point_join_artifacts(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     if not cols:
         return gdf
     return gdf.drop(columns=cols)
+
+
+def rename_shapefile_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Rename columns to ≤10-character shapefile-safe names before export."""
+    renames = {k: v for k, v in SHAPEFILE_COLUMN_RENAMES.items() if k in gdf.columns}
+    if not renames:
+        return gdf
+    out = gdf.copy()
+    for old, new in renames.items():
+        if new in out.columns and new != old:
+            out = out.drop(columns=[new])
+    return out.rename(columns=renames)
 
 
 def export_geopackage(
@@ -59,11 +82,11 @@ def export_registry_json(registry: CatchmentRegistry, output_path: str | Path) -
 
 def export_shapefile_legacy(gdf: gpd.GeoDataFrame, filename: str | Path) -> None:
     """
-    Write shapefile with numeric formatting compatible with TauDEM/MESH tools.
+    Write shapefile with short column names and wide DBF floats (Fiona schema).
 
-    Mirrors combiningBasins.export_shapefile behavior for float/int columns.
+    Compatible with TauDEM/MESH tools (DSContArea, LINKNO, etc.).
     """
-    export_gdf = gdf.copy()
+    export_gdf = rename_shapefile_columns(gdf.copy())
     float_cols = export_gdf.select_dtypes(include=["float64", "float32"]).columns
     for col in float_cols:
         if col != "Slope":
@@ -81,9 +104,12 @@ def export_shapefile_legacy(gdf: gpd.GeoDataFrame, filename: str | Path) -> None
     try:
         schema = gpd.io.file.infer_schema(export_gdf)
         for col in float_cols:
-            if col in schema["properties"] and col != "Slope":
-                width = "float:24.1" if col in ("lake_area", "lake_area_m2") else "float:24.3"
-                schema["properties"][col] = width
+            if col not in schema["properties"] or col == "Slope":
+                continue
+            if col in WIDE_AREA_FLOAT_COLS:
+                schema["properties"][col] = "float:24.1"
+            else:
+                schema["properties"][col] = "float:24.3"
         export_gdf.to_file(filename, driver="ESRI Shapefile", schema=schema, engine="fiona")
     except Exception as exc:
         print(f"Fiona export failed for {filename}, attempting fallback. Error: {exc}")

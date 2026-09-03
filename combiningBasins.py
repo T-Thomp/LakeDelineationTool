@@ -503,48 +503,10 @@ def apply_lake_metrics(streams_dissolved, lake_metrics):
 # E. EXPORT
 # ==============================================================================
 def export_shapefile(gdf, filename):
-    """
-    Write a shapefile with type-aware numeric formatting.
+    """Write a shapefile with short column names and wide DBF numeric fields."""
+    from hy_features.export import export_shapefile_legacy
 
-    Float columns are rounded to 3 decimal places (Slope is left unrounded).
-    Integer columns are preserved as ints. Wide float fields use float:24.3
-    in the Fiona schema to avoid DBF truncation. Falls back to string columns
-    if the schema export fails.
-    """
-    export_gdf = gdf.copy()
-
-    float_cols = export_gdf.select_dtypes(include=["float64", "float32"]).columns
-    for col in float_cols:
-        if col != "Slope":
-            export_gdf[col] = pd.to_numeric(export_gdf[col], errors="coerce").fillna(0.0).round(3)
-
-    if "Slope" in export_gdf.columns:
-        export_gdf["Slope"] = pd.to_numeric(export_gdf["Slope"], errors="coerce").fillna(0.0)
-
-    int_cols = export_gdf.select_dtypes(include=["int64", "int32"]).columns
-    for col in int_cols:
-        export_gdf[col] = export_gdf[col].fillna(-1).astype(int)
-
-    schema = gpd.io.file.infer_schema(export_gdf)
-    for col in float_cols:
-        if col not in schema["properties"]:
-            continue
-        if col == "Slope":
-            continue
-        # lake_area in m² can be >1e10 for large lakes; keep a wide DBF float
-        if col == "lake_area":
-            schema["properties"][col] = "float:24.1"
-        else:
-            schema["properties"][col] = "float:24.3"
-
-    try:
-        export_gdf.to_file(filename, driver="ESRI Shapefile", schema=schema, engine="fiona")
-    except Exception as exc:
-        print(f"Fiona export failed for {filename}, attempting fallback. Error: {exc}")
-        for col in list(float_cols) + list(int_cols):
-            if col in export_gdf.columns:
-                export_gdf[col] = export_gdf[col].astype(str)
-        export_gdf.to_file(filename, driver="ESRI Shapefile")
+    export_shapefile_legacy(gdf, filename)
 
 
 # ==============================================================================

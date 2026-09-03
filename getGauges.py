@@ -97,7 +97,7 @@ def clip_gauges_to_basin(
 
 def export_gauges(gauges: gpd.GeoDataFrame) -> None:
     """Write shapefile and optional HY_Features GeoPackage sidecar."""
-    from hy_features.export import export_geopackage, strip_point_join_artifacts
+    from hy_features.export import export_geopackage, export_shapefile_legacy, strip_point_join_artifacts
 
     output_shp = PATHS["output_shp"]
     Path(output_shp).parent.mkdir(parents=True, exist_ok=True)
@@ -110,7 +110,7 @@ def export_gauges(gauges: gpd.GeoDataFrame) -> None:
         gauges = enrich_hydrometric_features(gauges)
         export_geopackage({"hydrometric_feature": gauges}, PATHS["output_gpkg"])
 
-    gauges.to_file(output_shp)
+    export_shapefile_legacy(gauges, output_shp)
     print(f"Saved {len(gauges)} gauges to {output_shp}")
 
 

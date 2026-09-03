@@ -204,6 +204,10 @@ VENV="/home/$USER/virtual-envs/scienv/bin/activate"
 mkdir -p "$INT_DIR" "$FINAL_DIR" "$OUT_DIR" "$HOME_DIR/points"
 cd "$HOME_DIR" || exit 1
 
+# Modules first, then venv (mpi4py module must be loaded before activate on FIR).
+# numpy/scipy/geopandas come from the venv only — not from module load.
+source "$VENV"
+
 # -----------------------------------------------------------------------------
 # 1. TauDEM Pass 1 -- base hydrology and unconstrained network
 # -----------------------------------------------------------------------------
@@ -302,7 +306,6 @@ publish_shp "$INT_DIR/original-delineated-watersheds"
 #   python3 rasterFlowpathEdit.py --ncores 1
 # -----------------------------------------------------------------------------
 log_section "Python: lake filtering, gauges, and raster flow-path edits"
-source "$VENV"
 
 python3 filterLakes.py
 python3 getGauges.py
