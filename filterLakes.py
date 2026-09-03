@@ -10,14 +10,14 @@ filters and an exact spatial intersect.
 
 Inputs
 ------
-  delineation-product/original-delineated-watersheds.shp  (Pass 1 basins)
-  delineation-product/original-delineated-streams.shp     (Pass 1 streams, CRS)
+  outputs/interim/taudem_d8/original-delineated-watersheds.shp  (Pass 1 basins)
+  outputs/interim/taudem_d8/original-delineated-streams.shp     (Pass 1 streams, CRS)
   HydroLAKES_polys_v10.shp                                 (global lake polygons)
 
 Outputs
 -------
-  lakes/filtered_lakes.shp
-  lakes/filtered_lakes.gpkg  (optional, when HY_Features enabled)
+  outputs/prep/lakes.shp
+  outputs/prep/lakes.gpkg  (optional, when HY_Features enabled)
 """
 
 from __future__ import annotations
@@ -27,16 +27,23 @@ from pathlib import Path
 import geopandas as gpd
 
 from hy_features.config import hy_features_enabled
+from pipeline_paths import (
+    PASS1_BASINS,
+    PASS1_STREAMS,
+    PREP_LAKES,
+    PREP_LAKES_GPKG,
+    ensure_output_dirs,
+)
 
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
 PATHS = {
-    "basins": "delineation-product/original-delineated-watersheds.shp",
-    "streams": "delineation-product/original-delineated-streams.shp",
+    "basins": str(PASS1_BASINS),
+    "streams": str(PASS1_STREAMS),
     "hydrolakes": "~/bow-bassano/delineation-product/hydrolakes/HydroLAKES_polys_v10.shp",
-    "output_shp": "lakes/filtered_lakes.shp",
-    "output_gpkg": "lakes/filtered_lakes.gpkg",
+    "output_shp": str(PREP_LAKES),
+    "output_gpkg": str(PREP_LAKES_GPKG),
 }
 
 MIN_AREA_SQKM = 5.0  # keep lakes larger than this (sq km), or any managed reservoir
@@ -87,9 +94,9 @@ def clip_lakes_to_basin(lakes: gpd.GeoDataFrame, basin_geom, target_crs) -> gpd.
     return lakes[lakes.geometry.intersects(basin_geom)].copy()
 
 
-def export_filtered_lakes(lakes: gpd.GeoDataFrame) -> None:
+def export_filtered_lakes(lakes: gpd.GeoDataFrame, paths: dict[str, str]) -> None:
     """Write shapefile and optional HY_Features GeoPackage sidecar."""
-    output_shp = PATHS["output_shp"]
+    output_shp = paths["output_shp"]
     Path(output_shp).parent.mkdir(parents=True, exist_ok=True)
 
     if hy_features_enabled(default=ENABLE_HY_FEATURES):
@@ -97,7 +104,7 @@ def export_filtered_lakes(lakes: gpd.GeoDataFrame) -> None:
         from hy_features.export import export_geopackage
 
         lakes = enrich_waterbodies(lakes)
-        export_geopackage({"waterbody": lakes}, PATHS["output_gpkg"])
+        export_geopackage({"waterbody": lakes}, paths["output_gpkg"])
 
     print(f"Saving {len(lakes)} filtered lakes to {output_shp}...")
     lakes.to_file(output_shp)
@@ -110,12 +117,13 @@ def filter_lakes_to_basin(
     """Run the full HydroLAKES filter workflow."""
     paths = paths or PATHS
     min_area_sqkm = MIN_AREA_SQKM if min_area_sqkm is None else min_area_sqkm
+    ensure_output_dirs()
 
     _, basin_geom, bbox, stream_crs = load_basin_mask(paths["basins"], paths["streams"])
     lakes = load_hydrolakes_in_bbox(paths["hydrolakes"], bbox)
     lakes = filter_lakes_by_attributes(lakes, min_area_sqkm)
     lakes_in_basin = clip_lakes_to_basin(lakes, basin_geom, stream_crs)
-    export_filtered_lakes(lakes_in_basin)
+    export_filtered_lakes(lakes_in_basin, paths)
     print("Process complete!")
     return lakes_in_basin
 

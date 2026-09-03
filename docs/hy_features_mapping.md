@@ -32,13 +32,13 @@ from hy_features.assemble import assemble_full_geofabric, export_full_geofabric
 | Script | When assembly runs | Optional inputs |
 |--------|-------------------|-----------------|
 | `combiningBasins.py` | After reservoir merge | Gauges, HydroLAKES polygons |
-| `cleanGeofabric.py` | After phantom-stream cleanup | Gauges, HydroLAKES, pour points (`pourPointsFinal.shp`) |
+| `cleanGeofabric.py` | After phantom-stream cleanup | Gauges, HydroLAKES, pour points (`outputs/final/pour_points.shp`) |
 
 `pourPointsPass2.py`, `filterLakes.py`, and `getGauges.py` only add HY columns or intermediate GeoPackage layers; they do not run full assembly.
 
 ## Output products
 
-All paths below are relative to `merged_basins/` unless noted.
+All paths below are relative to `outputs/working/` unless noted.
 
 | File | HY_Features role | Produced by |
 |------|------------------|-------------|
@@ -224,8 +224,8 @@ The canonical interchange product is `geofabric.gpkg`. Legacy TauDEM / MESH colu
 ```bash
 python remap_fields.py --list-presets
 python remap_fields.py --preset mesh \
-  --basins merged_basins/geofabric.gpkg \
-  --streams merged_basins/geofabric.gpkg \
+  --basins outputs/working/geofabric.gpkg \
+  --streams outputs/working/geofabric.gpkg \
   --drop-metadata \
   --out-dir remapped_products/
 ```

@@ -2,8 +2,8 @@
 Aggregate small sub-basins and stream reaches for TauDEM / cleanGeofabric outputs.
 
 Expected inputs (defaults match cleanGeofabric.py outputs):
-  merged_basins/reservoirBasins_final.shp
-  merged_basins/reservoirStreams_final.shp
+  outputs/final/basins.shp
+  outputs/final/streams.shp
 
 
 """
@@ -16,6 +16,14 @@ from typing import Optional
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+
+from pipeline_paths import (
+    FINAL_BASINS,
+    FINAL_BASINS_AGG,
+    FINAL_STREAMS,
+    FINAL_STREAMS_AGG,
+    ensure_output_dirs,
+)
 
 
 # ==============================================================================
@@ -74,10 +82,10 @@ LENGTH_SCALE = 1e-3              # m -> km for TauDEM Length
 # ==============================================================================
 # INPUT / OUTPUT PATHS AND THRESHOLDS
 # ==============================================================================
-INPUT_BASINS = "merged_basins/reservoirBasins_final.shp"
-INPUT_RIVERS = "merged_basins/reservoirStreams_final.shp"
-OUTPUT_BASINS = "final_basin/aggregated_basins.shp"
-OUTPUT_RIVERS = "final_basin/aggregated_rivers.shp"
+INPUT_BASINS = str(FINAL_BASINS)
+INPUT_RIVERS = str(FINAL_STREAMS)
+OUTPUT_BASINS = str(FINAL_BASINS_AGG)
+OUTPUT_RIVERS = str(FINAL_STREAMS_AGG)
 
 MIN_SUB_AREA = 100.0          # km² — merge subbasins whose local area (_unitarea) is below this
 MIN_RIV_SLOPE = 0.0000001     # minimum accepted river slope (WATFLOOD manual)
@@ -575,4 +583,5 @@ def run_aggregation(
 
 
 if __name__ == "__main__":
+  ensure_output_dirs()
   run_aggregation()

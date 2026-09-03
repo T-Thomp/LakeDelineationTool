@@ -124,7 +124,7 @@ Python preprocessing
 • rasterFlowpathEdit.py
     Correct flow directions through reservoirs
     Outputs:
-        fdr_centerline_all.tif
+        fdr_lakes.tif
 
        │
        ▼
@@ -174,34 +174,16 @@ HOME_DIR/
 ├── dem/
 │   └── Input DEM
 │
-├── taudem-interim-files/
-│   ├── d8/
-│   │   ├── TauDEM rasters
-│   │   ├── Intermediate shapefiles
-│   │   └── fdr_centerline_all.tif
-│   │
-│   └── final/
-│       └── Pass 3 TauDEM outputs
-│
-├── delineation-product/
-│   ├── Final streams
-│   ├── Watersheds
-│   └── Outlets
-│
-├── points/
-│   ├── Gauges
-│   ├── Pour points
-│   └── Reservoir IO nodes
-│
-├── lakes/
-│   └── Filtered HydroLAKES polygons
-│
-├── merged_basins/
-│   ├── Reservoir merged basins
-│   ├── Cleaned geofabric
-│   
-└──final_basins/
-    └── Optional aggregated basins
+└── outputs/
+    ├── interim/
+    │   ├── taudem_d8/       Pass 1–2 TauDEM rasters and vectors
+    │   └── taudem_pass3/    Pass 3 TauDEM outputs
+    ├── prep/                Lakes, gauges, outlet selection, IO nodes
+    ├── working/             Merged geofabric (+ HY sidecars when enabled)
+    └── final/               Deliverables: basins, basins_aggregated, pour_points
+```
+
+See `pipeline_paths.py` for the canonical path constants used by all scripts.
 
 ```
 
@@ -234,8 +216,8 @@ Filters HydroLAKES polygons to include only reservoirs intersecting the study ba
 Produces:
 
 ```text
-lakes/
-└── filtered_lakes.shp
+outputs/prep/
+└── lakes.shp
 ```
 
 ---
@@ -247,8 +229,8 @@ Queries the HYDAT database to identify stream gauges located inside the basin.
 Produces:
 
 ```text
-points/
-└── gauges_in_basin.shp
+outputs/prep/
+└── gauges.shp
 ```
 
 ---
@@ -268,10 +250,10 @@ Uses:
 Produces:
 
 ```text
-taudem-interim-files/d8/
-└── fdr_centerline_all.tif
+outputs/interim/taudem_d8/
+└── fdr_lakes.tif
 
-points/
+outputs/prep/
 └── selected_outlets.shp
 ```
 
@@ -292,8 +274,10 @@ Computes refined pour points located at reservoir inflows and outflows.
 Produces:
 
 ```text
-points/
-├── pourPointsFinal.shp
+outputs/final/
+└── pour_points.shp
+
+outputs/prep/
 └── reservoir_io_nodes.shp
 ```
 
@@ -303,11 +287,7 @@ points/
 
 TauDEM performs a final watershed delineation using the refined pour points.
 
-Outputs are copied into:
-
-```text
-delineation-product/
-```
+Pass 3 vectors are written once under `outputs/interim/taudem_pass3/` (no duplicate copies).
 
 ---
 
@@ -317,18 +297,14 @@ delineation-product/
 
 Merges subbasins surrounding reservoirs into unified watershed units.
 
-Inputs include:
-
-- Basins
-- Streams
-- Reservoir polygons
-- Gauges
-- Outlet overrides
+Inputs include Pass 3 basins/streams, lakes, gauges, and snapped outlets.
 
 Outputs:
 
 ```text
-merged_basins/
+outputs/working/
+├── basins_merged.shp
+└── streams_merged.shp
 ```
 
 ---
@@ -344,9 +320,9 @@ Cleans the river network by:
 Outputs:
 
 ```text
-merged_basins/
-├── reservoirBasins_final.shp
-└── reservoirStreams_final.shp
+outputs/final/
+├── basins.shp
+└── streams.shp
 ```
 
 ---
@@ -361,7 +337,13 @@ Aggregates small upstream subbasins into larger watershed units. The merge thres
 | **`UP_AREA`** | `DSContArea` | TauDEM cumulative area at pour point (outlet masking) |
 | **`MIN_SUB_AREA`** | 100 km² | Subbasins with local area below this merge downstream |
 
-Outputs aggregated basin and river shapefiles.
+Outputs:
+
+```text
+outputs/final/
+├── basins_aggregated.shp
+└── streams_aggregated.shp
+```
 
 ---
 
@@ -414,7 +396,7 @@ Update:
 Output:
 
 ```text
-lakes/filtered_lakes.shp
+outputs/prep/lakes.shp
 ```
 
 ---
@@ -429,7 +411,7 @@ Update:
 Output:
 
 ```text
-points/gauges_in_basin.shp
+outputs/prep/gauges.shp
 ```
 
 ---
@@ -450,28 +432,21 @@ Verify:
 Outputs:
 
 ```text
-taudem-interim-files/d8/fdr_centerline_all.tif
-
-points/selected_outlets.shp
+outputs/interim/taudem_d8/fdr_lakes.tif
+outputs/prep/selected_outlets.shp
 ```
 
 ---
 
 ## `pourPointsPass2.py`
 
-Update all path definitions for:
-
-- Streams
-- Watersheds
-- Corrected flow directions
-- Lakes
-- Gauges
+Paths are defined in `pipeline_paths.py` (used by default in `__main__`).
 
 Outputs:
 
 ```text
-points/pourPointsFinal.shp
-points/reservoir_io_nodes.shp
+outputs/final/pour_points.shp
+outputs/prep/reservoir_io_nodes.shp
 ```
 
 ---
@@ -499,9 +474,9 @@ Update:
 Outputs:
 
 ```text
-merged_basins/
-├── reservoirBasins_final.shp
-└── reservoirStreams_final.shp
+outputs/final/
+├── basins.shp
+└── streams.shp
 ```
 
 ---
@@ -541,26 +516,31 @@ Before running the workflow, stage the following datasets:
 
 # Outputs
 
-## `delineation-product/`
+## `outputs/final/` (deliverables)
 
-Contains the final watershed products:
+| File | Description |
+|------|-------------|
+| `basins.shp` | Clean, lake-merged catchments (non-aggregated) |
+| `streams.shp` | Paired stream network |
+| `basins_aggregated.shp` | Optional aggregated catchments (`basinAggregation.py`) |
+| `streams_aggregated.shp` | Optional aggregated streams |
+| `pour_points.shp` | Refined pour points for Pass 3 |
 
-- Watersheds
-- Stream network
-- Snapped outlets
+## `outputs/interim/`
 
----
+TauDEM rasters and pass-specific vectors (single copy — not duplicated elsewhere).
 
-## `merged_basins/`
+## `outputs/working/`
 
-Contains the cleaned geofabric:
+Merged geofabric before final clean, plus HY sidecars when enabled:
 
-- Reservoir-merged basins
-- Cleaned stream network
-- **`geofabric.gpkg`** — full HY_Features GeoPackage (`catchment_area`, `flowpath`, `hydro_nexus`, `waterbody`, `hydrometric_feature`, `hydro_location`)
+- **`geofabric.gpkg`** — full HY_Features GeoPackage
 - **`catchment_registry.json`** — catchment identity ↔ realization links
 - **`hydrographic_network.json`** — dendritic catchment table + network metadata
-- Optional aggregated watershed products
+
+## `outputs/prep/`
+
+Intermediate prep layers: lakes, gauges, selected outlets, reservoir IO nodes.
 
 ---
 
@@ -586,8 +566,8 @@ python remap_fields.py --list-mappings --preset mesh
 
 python remap_fields.py \
   --preset mesh \
-  --basins merged_basins/geofabric.gpkg \
-  --streams merged_basins/geofabric.gpkg \
+  --basins outputs/working/geofabric.gpkg \
+  --streams outputs/working/geofabric.gpkg \
   --drop-metadata \
   --out-dir remapped_products/
 ```
@@ -602,7 +582,7 @@ Add a preset to [`hy_features/model_presets.json`](hy_features/model_presets.jso
 python remap_fields.py \
   --preset my_model \
   --preset-file my_model.json \
-  --streams merged_basins/geofabric.gpkg \
+  --streams outputs/working/geofabric.gpkg \
   --streams-layer flowpath \
   --override lower_catchment_id=DOWN_ID \
   --output remapped_products/streams.shp \

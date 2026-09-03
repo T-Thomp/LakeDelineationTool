@@ -46,21 +46,21 @@ D. STREAM TOPOLOGY REWIRING & HYDROMETRIC AGGREGATION
 E. BASIN FABRIC ASSEMBLY
    Remove swallowed subbasin polygons; append new reservoir catchment polygons
    Merged basin/stream primary ID remains the winning outlet LINKNO (DN / LINKNO)
-   export_shapefile() -> merged_basins/reservoirBasins.shp, reservoirStreams.shp
+   export_shapefile() -> outputs/working/basins_merged.shp, streams_merged.shp
 
 Inputs
 ------
-  delineation-product/final-delineated-watersheds.shp  (TauDEM Pass 3 basins)
-  delineation-product/final-delineated-streams.shp      (TauDEM Pass 3 streams)
-  lakes/filtered_lakes.shp                              (reservoir polygons)
-  taudem-interim-files/final/snapped-outlets.shp        (lake in/outflow points)
-  points/gauges_in_basin.shp
+  outputs/interim/taudem_pass3/final-delineated-watersheds.shp  (TauDEM Pass 3 basins)
+  outputs/interim/taudem_pass3/final-delineated-streams.shp      (TauDEM Pass 3 streams)
+  outputs/prep/lakes.shp                              (reservoir polygons)
+  outputs/interim/taudem_pass3/snapped-outlets.shp        (lake in/outflow points)
+  outputs/prep/gauges.shp
   outlet_overrides.csv (optional; shared with rasterFlowpathEdit.py)
 
 Outputs
 -------
-  merged_basins/reservoirBasins.shp   -> basins with lake units merged in
-  merged_basins/reservoirStreams.shp  -> streams with internal lake links dissolved
+  outputs/working/basins_merged.shp   -> basins with lake units merged in
+  outputs/working/streams_merged.shp  -> streams with internal lake links dissolved
 """
 
 import os
@@ -72,6 +72,19 @@ from shapely.geometry import Point
 
 from rasterFlowpathEdit import load_overrides
 from hy_features.config import hy_features_enabled
+from pipeline_paths import (
+    PATHS as PIPELINE_PATHS,
+    PREP_GAUGES,
+    PREP_LAKES,
+    SNAPPED_OUTLETS,
+    WORKING,
+    WORKING_BASINS_MERGED,
+    WORKING_CATCHMENT_REGISTRY,
+    WORKING_GEOFABRIC_GPKG,
+    WORKING_HYDRO_NETWORK_JSON,
+    WORKING_STREAMS_MERGED,
+    ensure_output_dirs,
+)
 
 # ==============================================================================
 # CONFIGURATION
@@ -79,15 +92,15 @@ from hy_features.config import hy_features_enabled
 GAUGE_SEARCH_RADIUS = 750       # meters; max distance to count a gauge as "nearby"
 MIN_INTERNAL_STREAM_LEN = 180   # meters; stream-lake overlap length that triggers swallow
 OVERRIDES_CSV = "outlet_overrides.csv"
-OUTPUT_DIR = "merged_basins"
+OUTPUT_DIR = str(WORKING)
 ENABLE_HY_FEATURES = False      # overridden by HY_FEATURES_ENABLED env var if set
 
 PATHS = {
-    "basins": "delineation-product/final-delineated-watersheds.shp",
-    "streams": "delineation-product/final-delineated-streams.shp",
-    "lakes": "lakes/filtered_lakes.shp",
-    "intersection": "taudem-interim-files/final/snapped-outlets.shp",
-    "gauges": "points/gauges_in_basin.shp",
+    "basins": PIPELINE_PATHS["pass3_basins"],
+    "streams": PIPELINE_PATHS["pass3_streams"],
+    "lakes": str(PREP_LAKES),
+    "intersection": str(SNAPPED_OUTLETS),
+    "gauges": str(PREP_GAUGES),
 }
 
 
@@ -709,6 +722,7 @@ def process_reservoir_basins():
     final_geofabric["lake_area"] = final_geofabric["lake_area"].fillna(0.0)
     final_geofabric["frac_lake"] = final_geofabric["frac_lake"].fillna(0.0)
 
+    ensure_output_dirs()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     waterbodies = None
@@ -732,16 +746,16 @@ def process_reservoir_basins():
 
         export_full_geofabric(
             assembled,
-            gpkg_path=f"{OUTPUT_DIR}/geofabric.gpkg",
-            registry_path=f"{OUTPUT_DIR}/catchment_registry.json",
-            metadata_path=f"{OUTPUT_DIR}/hydrographic_network.json",
+            gpkg_path=str(WORKING_GEOFABRIC_GPKG),
+            registry_path=str(WORKING_CATCHMENT_REGISTRY),
+            metadata_path=str(WORKING_HYDRO_NETWORK_JSON),
         )
 
-        export_shapefile_legacy(assembled["layers"]["catchment_area"], f"{OUTPUT_DIR}/reservoirBasins.shp")
-        export_shapefile_legacy(assembled["layers"]["flowpath"], f"{OUTPUT_DIR}/reservoirStreams.shp")
+        export_shapefile_legacy(assembled["layers"]["catchment_area"], str(WORKING_BASINS_MERGED))
+        export_shapefile_legacy(assembled["layers"]["flowpath"], str(WORKING_STREAMS_MERGED))
     else:
-        export_shapefile(final_geofabric, f"{OUTPUT_DIR}/reservoirBasins.shp")
-        export_shapefile(streams_dissolved, f"{OUTPUT_DIR}/reservoirStreams.shp")
+        export_shapefile(final_geofabric, str(WORKING_BASINS_MERGED))
+        export_shapefile(streams_dissolved, str(WORKING_STREAMS_MERGED))
     print("Processing complete.")
 
 

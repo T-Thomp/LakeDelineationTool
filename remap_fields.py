@@ -12,15 +12,15 @@ Examples
 
   python remap_fields.py \\
       --preset mesh \\
-      --basins merged_basins/geofabric.gpkg \\
-      --streams merged_basins/geofabric.gpkg \\
+      --basins outputs/working/geofabric.gpkg \\
+      --streams outputs/working/geofabric.gpkg \\
       --drop-metadata \\
       --out-dir remapped_products/
 
   python remap_fields.py \\
       --preset my_model \\
       --preset-file my_model.json \\
-      -i merged_basins/geofabric.gpkg \\
+      -i outputs/working/geofabric.gpkg \\
       -o remapped_products/streams.shp \\
       --layer-kind flowpath \\
       --input-layer flowpath \\

@@ -22,7 +22,7 @@
 #   [Python] filterLakes.py      -- clip HydroLAKES reservoirs to basin
 #            getGauges.py        -- find stream gauges inside basin
 #            rasterFlowpathEdit.py -- fix flow dirs inside each lake (MPI-parallel;
-#                                   writes fdr_centerline_all.tif; see FLOWPATH_NCORES)
+#                                   writes fdr_lakes.tif; see FLOWPATH_NCORES)
 #        v
 #   [Pass 2] TauDEM -- re-run network using corrected lake flow directions
 #        |
@@ -36,18 +36,16 @@
 #            cleanGeofabric.py   -- remove phantom stream links; attach gauges
 #            basinAggregation.py -- (optional) merge small headwater subbasins
 #        v
-#   delineation-product/         -- final streams, watersheds, outlets
-#   merged_basins/               -- reservoir + cleaned (+ optional aggregated) fabric
+#   outputs/final/               -- deliverables: basins, basins_aggregated, pour_points
+#   outputs/working/             -- merged geofabric before final clean (+ HY sidecars)
+#   outputs/prep/                -- lakes, gauges, pour-point prep
+#   outputs/interim/taudem_d8/   -- Pass 1–2 TauDEM rasters and vectors
+#   outputs/interim/taudem_pass3/ -- Pass 3 TauDEM outputs
 #
 # KEY DIRECTORIES (under HOME_DIR)
 # --------------------------------
 #   dem/                         -- input elevation raster
-#   taudem-interim-files/d8/     -- TauDEM rasters + intermediate shapefiles
-#   taudem-interim-files/final/  -- Pass 3 TauDEM outputs
-#   delineation-product/         -- published outputs copied here after each pass
-#   points/                      -- pour point shapefiles produced by Python
-#   lakes/                       -- filtered reservoir polygons (filterLakes.py)
-#   merged_basins/               -- combiningBasins / cleanGeofabric / aggregation outputs
+#   outputs/                     -- all pipeline products (see pipeline_paths.py)
 #
 # SETUP CHECKLIST (paths & knobs to edit when adapting this workflow)
 # --------------------------------------------------------------------
@@ -67,43 +65,44 @@
 #
 # [ ] filterLakes.py
 #       HydroLAKES .shp path (hardcoded near top)
-#       Pass-1 watersheds/streams under delineation-product/
+#       Pass-1 watersheds/streams under outputs/interim/taudem_d8/
 #       MIN_AREA           -- km² lake-size filter
-#       output             -- lakes/filtered_lakes.shp
+#       output             -- outputs/prep/lakes.shp
 #
 # [ ] getGauges.py
 #       Hydat.sqlite3 path (db_path)
-#       Pass-1 watersheds under delineation-product/
-#       output             -- points/gauges_in_basin.shp
+#       Pass-1 watersheds under outputs/interim/taudem_d8/
+#       output             -- outputs/prep/gauges.shp
 #
 # [ ] rasterFlowpathEdit.py  (defaults in __main__ / --ncores)
 #       Requires Pass 1 + filterLakes + getGauges first (see §2 below).
-#       FDR / SRC / AD8 / watershed rasters under taudem-interim-files/d8/
-#       streams            -- delineation-product/original-delineated-streams.shp
-#       lakes / gauges     -- lakes/filtered_lakes.shp, points/gauges_in_basin.shp
+#       FDR / SRC / AD8 / watershed rasters under outputs/interim/taudem_d8/
+#       streams            -- outputs/interim/taudem_d8/original-delineated-streams.shp
+#       lakes / gauges     -- outputs/prep/lakes.shp, outputs/prep/gauges.shp
 #       outlet_overrides.csv (optional manual lake outlets)
-#       outputs            -- taudem-interim-files/d8/fdr_centerline_all.tif
-#                             points/selected_outlets.shp
+#       outputs            -- outputs/interim/taudem_d8/fdr_lakes.tif
+#                             outputs/prep/selected_outlets.shp
 #       Launch             -- MUST use srun/mpirun (mpi4py); see FLOWPATH_NCORES
 #
-# [ ] pourPointsPass2.py  (paths dict in __main__)
-#       intermediate streams/watersheds under delineation-product/ and d8/
-#       fdr_centerline_all.tif, lakes, gauges
-#       outputs            -- points/pourPointsFinal.shp
-#                             points/reservoir_io_nodes.shp
+# [ ] pourPointsPass2.py  (paths from pipeline_paths.py)
+#       intermediate streams/watersheds under outputs/interim/taudem_d8/
+#       fdr_lakes.tif, lakes, gauges
+#       outputs            -- outputs/final/pour_points.shp
+#                             outputs/prep/reservoir_io_nodes.shp
 #
 # [ ] combiningBasins.py
 #       PATHS{}            -- basins, streams, lakes, snapped outlets, gauges
 #       OVERRIDES_CSV      -- outlet_overrides.csv
-#       OUTPUT_DIR         -- merged_basins/
+#       OUTPUT_DIR         -- outputs/working/
 #       GAUGE_SEARCH_RADIUS, MIN_INTERNAL_STREAM_LEN
 #
-# [ ] cleanGeofabric.py  (paths in __main__)
-#       input              -- merged_basins/reservoir{Basins,Streams}.shp
-#       gauges             -- points/gauges_in_basin.shp
-#       output             -- merged_basins/reservoir{Basins,Streams}_final.shp
+# [ ] cleanGeofabric.py  (paths from pipeline_paths.py)
+#       input              -- outputs/working/basins_merged.shp, streams_merged.shp
+#       gauges             -- outputs/prep/gauges.shp
+#       output             -- outputs/final/basins.shp, streams.shp
+#       DELETE_INTERIM_FILES -- export =1 to remove outputs/interim/ after cleanup
 #
-# [ ] basinAggregation.py  (optional; globals at top of file)
+# [ ] basinAggregation.py  (optional; paths from pipeline_paths.py)
 #       INPUT_BASINS / INPUT_RIVERS / OUTPUT_BASINS / OUTPUT_RIVERS
 #       MIN_SUB_AREA       -- km² aggregation threshold (default 100)
 #       MIN_RIV_SLOPE, MIN_RIV_LENGTH
@@ -155,12 +154,6 @@ log_section() {
     echo "=================================================================="
 }
 
-# Copy a TauDEM shapefile set (all sidecar files) into delineation-product/.
-publish_shp() {
-    local prefix="$1"
-    cp "${prefix}".* "$OUT_DIR/"
-}
-
 echo "$(basename "$0"): Delineation started at $(date)"
 
 # -----------------------------------------------------------------------------
@@ -176,9 +169,12 @@ module restore scimods
 # export PATH="$HOME/taudem-build/taudem:$PATH"   # Set taudem:PATH here or set it in .bashrc file
 
 HOME_DIR="/home/$USER/projects/rrg-alpie/tylerrt/southSaskDelineation"
-INT_DIR="$HOME_DIR/taudem-interim-files/d8"      # Pass 1 & 2 interim rasters/shapefiles
-FINAL_DIR="$HOME_DIR/taudem-interim-files/final" # Pass 3 outputs
-OUT_DIR="$HOME_DIR/delineation-product"          # Published products for Python + GIS
+OUTPUT_ROOT="$HOME_DIR/outputs"
+INT_DIR="$OUTPUT_ROOT/interim/taudem_d8"       # Pass 1 & 2 TauDEM rasters/shapefiles
+PASS3_DIR="$OUTPUT_ROOT/interim/taudem_pass3"  # Pass 3 TauDEM outputs
+PREP_DIR="$OUTPUT_ROOT/prep"
+WORKING_DIR="$OUTPUT_ROOT/working"
+FINAL_DIR="$OUTPUT_ROOT/final"                 # Deliverables (basins, pour points)
 
 # Contributing-area threshold for TauDEM stream definition (cell count).
 # Applied identically in all three TauDEM passes.
@@ -198,11 +194,16 @@ FLOWPATH_NCORES=16
 # HY_Features enrichment + geofabric.gpkg (off by default; uncomment to enable)
 # export HY_FEATURES_ENABLED=1
 
+# Remove TauDEM interim rasters/vectors after cleanGeofabric.py (off by default)
+# export DELETE_INTERIM_FILES=1
+
 DEM="$HOME_DIR/dem/Sask-mrdem-30-dtm.tif"
 VENV="/home/$USER/virtual-envs/scienv/bin/activate"
 
-mkdir -p "$INT_DIR" "$FINAL_DIR" "$OUT_DIR" "$HOME_DIR/points"
+mkdir -p "$INT_DIR" "$PASS3_DIR" "$PREP_DIR" "$WORKING_DIR" "$FINAL_DIR"
 cd "$HOME_DIR" || exit 1
+python3 -c "from pipeline_paths import ensure_output_dirs; ensure_output_dirs()"
+FDR_RASTER="$(python3 -c "from pipeline_paths import FDR_CENTERLINE; print(FDR_CENTERLINE)")"
 
 # Modules first, then venv (mpi4py module must be loaded before activate on FIR).
 # numpy/scipy/geopandas come from the venv only — not from module load.
@@ -218,9 +219,8 @@ source "$VENV"
 #   pitremove   -- fill pits/depressions in the DEM
 #   d8flowdir   -- D8 flow direction and slope
 #   aread8      -- upslope contributing area per cell
-#   gridnet     -- stream order on the grid
 #   threshold   -- flag stream source cells above area threshold
-#   streamnet   -- trace streams and delineate all watersheds
+#   streamnet   -- trace streams and delineate all watersheds (-ord writes order raster)
 # -----------------------------------------------------------------------------
 log_section "Pass 1: TauDEM base network (no pour points)"
 
@@ -233,9 +233,6 @@ srun aread8 \
     -p  "$INT_DIR/stream-network_elv-fdir.tif" \
     -ad8 "$INT_DIR/stream-network_elv-ad8.tif" \
     -nc
-srun gridnet \
-    -p    "$INT_DIR/stream-network_elv-fdir.tif" \
-    -gord "$INT_DIR/stream-network_elv-gord.tif"
 srun threshold \
     -ssa    "$INT_DIR/stream-network_elv-ad8.tif" \
     -src    "$INT_DIR/stream-network_elv-src.tif" \
@@ -251,13 +248,11 @@ srun streamnet \
     -net   "$INT_DIR/original-delineated-streams.shp" \
     -w     "$INT_DIR/original-delineated-watersheds.tif"
 
-# Convert watershed raster to polygon shapefile; publish for downstream Python.
+# Convert watershed raster to polygon shapefile for downstream Python.
 gdal_polygonize.py \
     "$INT_DIR/original-delineated-watersheds.tif" \
     "$INT_DIR/original-delineated-watersheds.shp" \
     -overwrite
-publish_shp "$INT_DIR/original-delineated-streams"
-publish_shp "$INT_DIR/original-delineated-watersheds"
 
 # -----------------------------------------------------------------------------
 # 2. Python -- lake filtering, gauges, and flow-direction correction
@@ -277,17 +272,17 @@ publish_shp "$INT_DIR/original-delineated-watersheds"
 #   streamnet will split basins incorrectly through reservoirs.
 #
 # Prerequisites (must exist before rasterFlowpathEdit runs):
-#   taudem-interim-files/d8/stream-network_elv-{fdir,src,ad8}.tif
-#   taudem-interim-files/d8/original-delineated-watersheds.tif
-#   delineation-product/original-delineated-streams.shp
-#   lakes/filtered_lakes.shp          (from filterLakes.py)
-#   points/gauges_in_basin.shp        (from getGauges.py; optional but recommended)
+#   outputs/interim/taudem_d8/stream-network_elv-{fdir,src,ad8}.tif
+#   outputs/interim/taudem_d8/original-delineated-watersheds.tif
+#   outputs/interim/taudem_d8/original-delineated-streams.shp
+#   outputs/prep/lakes.shp          (from filterLakes.py)
+#   outputs/prep/gauges.shp        (from getGauges.py; optional but recommended)
 #   outlet_overrides.csv              (optional; manual lat/lon per Hylak_id)
 #
 # Outputs consumed by Pass 2 / Pass 3 / pourPointsPass2:
-#   taudem-interim-files/d8/fdr_centerline_all.tif  -- full-domain FDR copy with
+#   outputs/interim/taudem_d8/fdr_lakes.tif  -- full-domain FDR copy with
 #                                                      lake interiors patched only
-#   points/selected_outlets.shp                     -- chosen outlet per lake
+#   outputs/prep/selected_outlets.shp                 -- chosen outlet per lake
 #
 # MPI launch (required for parallel lake processing):
 #   export FLOWPATH_NCORES=N
@@ -321,7 +316,7 @@ echo " after rasterFlowpathEdit.py $(date)"
 # -----------------------------------------------------------------------------
 # 3. TauDEM Pass 2 -- network using corrected lake flow directions
 # -----------------------------------------------------------------------------
-# Recomputes area accumulation and stream network using fdr_centerline_all.tif
+# Recomputes area accumulation and stream network using fdr_lakes.tif
 # (lake interiors now drain through a single outlet). Still no pour points --
 # this pass refreshes the network so pourPointsPass2.py can read updated
 # stream/watershed geometry at lake boundaries.
@@ -329,19 +324,16 @@ echo " after rasterFlowpathEdit.py $(date)"
 log_section "Pass 2: TauDEM network with corrected lake flow directions"
 
 srun aread8 \
-    -p  "$INT_DIR/fdr_centerline_all.tif" \
+    -p  "$FDR_RASTER" \
     -ad8 "$INT_DIR/stream-network_elv-ad8.tif" \
     -nc
-srun gridnet \
-    -p    "$INT_DIR/fdr_centerline_all.tif" \
-    -gord "$INT_DIR/stream-network_elv-gord.tif"
 srun threshold \
     -ssa    "$INT_DIR/stream-network_elv-ad8.tif" \
     -src    "$INT_DIR/stream-network_elv-src.tif" \
     -thresh "$STREAM_THRESHOLD"
 srun streamnet \
     -fel   "$INT_DIR/stream-network_elv-fel.tif" \
-    -p     "$INT_DIR/fdr_centerline_all.tif" \
+    -p     "$FDR_RASTER" \
     -ad8   "$INT_DIR/stream-network_elv-ad8.tif" \
     -src   "$INT_DIR/stream-network_elv-src.tif" \
     -ord   "$INT_DIR/stream-network_elv-ord.tif" \
@@ -354,14 +346,12 @@ gdal_polygonize.py \
     "$INT_DIR/intermediate-delineated-watersheds.tif" \
     "$INT_DIR/intermediate-delineated-watersheds.shp" \
     -overwrite
-publish_shp "$INT_DIR/intermediate-delineated-streams"
-publish_shp "$INT_DIR/intermediate-delineated-watersheds"
 
 # -----------------------------------------------------------------------------
 # 4. Python -- refined pour points for final delineation
 # -----------------------------------------------------------------------------
-# Reads Pass 2 outputs and fdr_centerline_all.tif to place pour points at
-# lake inflows/outflows and other key network nodes. Writes pourPointsFinal.shp.
+# Reads Pass 2 outputs and fdr_lakes.tif to place pour points at
+# lake inflows/outflows and other key network nodes. Writes outputs/final/pour_points.shp.
 # -----------------------------------------------------------------------------
 log_section "Python: pour point extraction (pourPointsPass2.py)"
 python3 pourPointsPass2.py
@@ -372,54 +362,52 @@ python3 pourPointsPass2.py
 # Snaps pour points to the nearest stream cell, then delineates only the
 # watersheds draining to those outlets.
 #
-#   moveoutletstostreams -- snap pourPointsFinal.shp to stream network
+#   moveoutletstostreams -- snap pour_points.shp to stream network
 #   streamnet (-o ...)    -- delineate watersheds for snapped outlets only
 # -----------------------------------------------------------------------------
 log_section "Pass 3: TauDEM final delineation at pour points"
 
 srun moveoutletstostreams \
-    -p  "$INT_DIR/fdr_centerline_all.tif" \
+    -p  "$FDR_RASTER" \
     -src "$INT_DIR/stream-network_elv-src.tif" \
-    -o   "$HOME_DIR/points/pourPointsFinal.shp" \
-    -om  "$FINAL_DIR/snapped-outlets.shp" \
+    -o   "$FINAL_DIR/pour_points.shp" \
+    -om  "$PASS3_DIR/snapped-outlets.shp" \
     -md  25
 srun streamnet \
     -fel   "$INT_DIR/stream-network_elv-fel.tif" \
-    -p     "$INT_DIR/fdr_centerline_all.tif" \
+    -p     "$FDR_RASTER" \
     -ad8   "$INT_DIR/stream-network_elv-ad8.tif" \
     -src   "$INT_DIR/stream-network_elv-src.tif" \
     -ord   "$INT_DIR/stream-network_elv-ord.tif" \
-    -o     "$FINAL_DIR/snapped-outlets.shp" \
-    -tree  "$FINAL_DIR/final-network-basin-tree.dat" \
-    -coord "$FINAL_DIR/final-network-basin-coord.dat" \
-    -net   "$FINAL_DIR/final-delineated-streams.shp" \
-    -w     "$FINAL_DIR/final-delineated-watersheds.tif"
+    -o     "$PASS3_DIR/snapped-outlets.shp" \
+    -tree  "$PASS3_DIR/final-network-basin-tree.dat" \
+    -coord "$PASS3_DIR/final-network-basin-coord.dat" \
+    -net   "$PASS3_DIR/final-delineated-streams.shp" \
+    -w     "$PASS3_DIR/final-delineated-watersheds.tif"
 
 gdal_polygonize.py \
-    "$FINAL_DIR/final-delineated-watersheds.tif" \
-    "$FINAL_DIR/final-delineated-watersheds.shp" \
+    "$PASS3_DIR/final-delineated-watersheds.tif" \
+    "$PASS3_DIR/final-delineated-watersheds.shp" \
     -overwrite
-publish_shp "$FINAL_DIR/final-delineated-streams"
-publish_shp "$FINAL_DIR/final-delineated-watersheds"
-publish_shp "$FINAL_DIR/snapped-outlets"
 
 # -----------------------------------------------------------------------------
 # 6. Python -- post-process final geofabric
 # -----------------------------------------------------------------------------
 #   combiningBasins.py   -- merge subbasins split by lakes into unified units;
 #                          writes lake_id / is_lake / lake_area / frac_lake
-#                          -> merged_basins/reservoirBasins.shp
-#                             merged_basins/reservoirStreams.shp
+#                          -> outputs/working/basins_merged.shp
+#                             outputs/working/streams_merged.shp
 #   cleanGeofabric.py    -- dissolve split basins, fix phantom stream links,
 #                          attach STATION_NU gauge IDs
-#                          -> merged_basins/reservoirBasins_final.shp
-#                             merged_basins/reservoirStreams_final.shp
+#                          -> outputs/final/basins.shp
+#                             outputs/final/streams.shp
+#                          optional: DELETE_INTERIM_FILES=1 removes outputs/interim/
 #   basinAggregation.py  -- OPTIONAL: aggregate small headwater subbasins below
 #                          MIN_SUB_AREA (default 100 km²), preserving gauges and
 #                          lake units. Comment out if you want the unaggregated
 #                          cleanGeofabric products only.
-#                          -> merged_basins/aggregated_basins.shp
-#                             merged_basins/aggregated_rivers.shp
+#                          -> outputs/final/basins_aggregated.shp
+#                             outputs/final/streams_aggregated.shp
 # -----------------------------------------------------------------------------
 log_section "Python: basin merging and geofabric cleanup"
 python3 combiningBasins.py

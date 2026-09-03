@@ -7,6 +7,17 @@ from shapely.geometry import Point
 from scipy.ndimage import binary_erosion
 
 from hy_features.config import hy_features_enabled
+from pipeline_paths import (
+    FDR_CENTERLINE,
+    FINAL_POUR_POINTS,
+    PASS2_STREAMS,
+    PASS2_WATERSHEDS_TIF,
+    PREP_GAUGES,
+    PREP_LAKES,
+    PREP_RESERVOIR_IO_NODES,
+    TAUDEM_D8,
+    ensure_output_dirs,
+)
 
 ENABLE_HY_FEATURES = False  # overridden by HY_FEATURES_ENABLED env var if set
 
@@ -375,20 +386,18 @@ def extract_reservoir_io_points(paths):
 # RUNNING THE FUNCTION PART
 # =====================================================================
 if __name__ == "__main__":
-    # Define your local files paths here
+    ensure_output_dirs()
+    d8 = TAUDEM_D8
     input_paths = {
-        "river": "delineation-product/intermediate-delineated-streams.shp",
-        "lakes": "lakes/filtered_lakes.shp",
-        "gauges": "./points/gauges_in_basin.shp",
-        "fdr": "./taudem-interim-files/d8/fdr_centerline_all.tif",
-        "stream": "./taudem-interim-files/d8/stream-network_elv-src.tif",
-        "w_raster": "./taudem-interim-files/d8/intermediate-delineated-watersheds.tif",
-        "fac": "./taudem-interim-files/d8/stream-network_elv-ad8.tif", 
-        
-        # Output locations
-        "out_lake_nodes": "./points/reservoir_io_nodes.shp", 
-        "out": "./points/pourPointsFinal.shp"                  
+        "river": str(PASS2_STREAMS),
+        "lakes": str(PREP_LAKES),
+        "gauges": str(PREP_GAUGES),
+        "fdr": str(FDR_CENTERLINE),
+        "stream": str(d8 / "stream-network_elv-src.tif"),
+        "w_raster": str(PASS2_WATERSHEDS_TIF),
+        "fac": str(d8 / "stream-network_elv-ad8.tif"),
+        "out_lake_nodes": str(PREP_RESERVOIR_IO_NODES),
+        "out": str(FINAL_POUR_POINTS),
     }
-    
-    # Fire off execution
+
     extract_reservoir_io_points(input_paths)

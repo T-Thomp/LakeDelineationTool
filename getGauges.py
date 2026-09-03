@@ -10,13 +10,13 @@ downstream scripts.
 
 Inputs
 ------
-  delineation-product/original-delineated-watersheds.shp  (Pass 1 basins)
+  outputs/interim/taudem_d8/original-delineated-watersheds.shp  (Pass 1 basins)
   Hydat.sqlite3                                           (HYDAT database)
 
 Outputs
 -------
-  points/gauges_in_basin.shp
-  points/gauges_in_basin.gpkg  (optional, when HY_Features enabled)
+  outputs/prep/gauges.shp
+  outputs/prep/gauges.gpkg  (optional, when HY_Features enabled)
 """
 
 from __future__ import annotations
@@ -28,15 +28,16 @@ import geopandas as gpd
 import pandas as pd
 
 from hy_features.config import hy_features_enabled
+from pipeline_paths import PASS1_BASINS, PREP_GAUGES, PREP_GAUGES_GPKG, ensure_output_dirs
 
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
 PATHS = {
-    "basins": "delineation-product/original-delineated-watersheds.shp",
+    "basins": str(PASS1_BASINS),
     "hydat_db": "Hydat.sqlite3",
-    "output_shp": "points/gauges_in_basin.shp",
-    "output_gpkg": "points/gauges_in_basin.gpkg",
+    "output_shp": str(PREP_GAUGES),
+    "output_gpkg": str(PREP_GAUGES_GPKG),
 }
 
 ENABLE_HY_FEATURES = False  # overridden by HY_FEATURES_ENABLED env var if set
@@ -95,11 +96,11 @@ def clip_gauges_to_basin(
     return clipped.to_crs(subbasins.crs)
 
 
-def export_gauges(gauges: gpd.GeoDataFrame) -> None:
+def export_gauges(gauges: gpd.GeoDataFrame, paths: dict[str, str]) -> None:
     """Write shapefile and optional HY_Features GeoPackage sidecar."""
     from hy_features.export import export_geopackage, export_shapefile_legacy, strip_point_join_artifacts
 
-    output_shp = PATHS["output_shp"]
+    output_shp = paths["output_shp"]
     Path(output_shp).parent.mkdir(parents=True, exist_ok=True)
 
     gauges = strip_point_join_artifacts(gauges)
@@ -108,7 +109,7 @@ def export_gauges(gauges: gpd.GeoDataFrame) -> None:
         from hy_features.enrich import enrich_hydrometric_features
 
         gauges = enrich_hydrometric_features(gauges)
-        export_geopackage({"hydrometric_feature": gauges}, PATHS["output_gpkg"])
+        export_geopackage({"hydrometric_feature": gauges}, paths["output_gpkg"])
 
     export_shapefile_legacy(gauges, output_shp)
     print(f"Saved {len(gauges)} gauges to {output_shp}")
@@ -117,11 +118,12 @@ def export_gauges(gauges: gpd.GeoDataFrame) -> None:
 def get_gauges_in_basin(paths: dict[str, str] | None = None) -> gpd.GeoDataFrame:
     """Run the full gauge extraction workflow."""
     paths = paths or PATHS
+    ensure_output_dirs()
 
     subbasins, basin_dissolved = load_basin_layers(paths["basins"])
     gauges = query_active_flow_gauges(paths["hydat_db"])
     gauges_in_basin = clip_gauges_to_basin(gauges, basin_dissolved, subbasins)
-    export_gauges(gauges_in_basin)
+    export_gauges(gauges_in_basin, paths)
 
     print(f"{len(gauges_in_basin)} gauge(s) within the combined basin.")
     return gauges_in_basin

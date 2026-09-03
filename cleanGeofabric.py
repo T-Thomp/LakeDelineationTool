@@ -1,11 +1,27 @@
+import argparse
+
 import geopandas as gpd
 import pandas as pd
 from shapely.ops import linemerge, snap
 from shapely.geometry import MultiLineString
 
 from hy_features.config import hy_features_enabled
+from pipeline_paths import (
+    FINAL_BASINS,
+    FINAL_POUR_POINTS,
+    FINAL_STREAMS,
+    PREP_GAUGES,
+    PREP_LAKES,
+    WORKING_BASINS_MERGED,
+    WORKING_GEOFABRIC_GPKG,
+    WORKING_CATCHMENT_REGISTRY,
+    WORKING_STREAMS_MERGED,
+    delete_interim_outputs,
+    ensure_output_dirs,
+)
 
 ENABLE_HY_FEATURES = False  # overridden by HY_FEATURES_ENABLED env var if set
+DELETE_INTERIM_FILES = False  # overridden by DELETE_INTERIM_FILES env var if set
 
 
 def bypass_phantom_streams(streams_path, basins_path, output_path):
@@ -262,15 +278,20 @@ def export_hy_features_geofabric(
     basins_path: str,
     streams_path: str,
     gauges_path: str,
-    gpkg_path: str = "merged_basins/geofabric.gpkg",
-    registry_path: str = "merged_basins/catchment_registry.json",
-    waterbodies_path: str | None = "lakes/filtered_lakes.shp",
-    hydro_locations_path: str | None = "points/pourPointsFinal.shp",
+    gpkg_path: str | None = None,
+    registry_path: str | None = None,
+    waterbodies_path: str | None = None,
+    hydro_locations_path: str | None = None,
 ) -> None:
     """Assemble and export fully HY_Features-conformant geofabric products."""
     if not hy_features_enabled(default=ENABLE_HY_FEATURES):
         print("HY_Features disabled; skipping geofabric.gpkg assembly.")
         return
+
+    gpkg_path = gpkg_path or str(WORKING_GEOFABRIC_GPKG)
+    registry_path = registry_path or str(WORKING_CATCHMENT_REGISTRY)
+    waterbodies_path = waterbodies_path if waterbodies_path is not None else str(PREP_LAKES)
+    hydro_locations_path = hydro_locations_path if hydro_locations_path is not None else str(FINAL_POUR_POINTS)
 
     from hy_features.assemble import assemble_full_geofabric, export_full_geofabric
 
@@ -363,14 +384,17 @@ def add_gauge_info_to_basins(input_path, gauge_path, output_path):
     from hy_features.export import export_shapefile_legacy
 
     export_shapefile_legacy(basins, output_path)
-    
-# --- Execution ---
-if __name__ == "__main__":
-    input_streams = "merged_basins/reservoirStreams.shp"
-    input_basins = "merged_basins/reservoirBasins.shp"
-    input_gauges = "points/gauges_in_basin.shp"
-    output_streams = "merged_basins/reservoirStreams_final.shp"
-    output_basins = "merged_basins/reservoirBasins_final.shp"
+
+
+def run_clean_geofabric(*, delete_interim: bool | None = None) -> None:
+    """Dissolve basins, clean streams, attach gauges, and optionally remove interim TauDEM files."""
+    ensure_output_dirs()
+
+    input_streams = str(WORKING_STREAMS_MERGED)
+    input_basins = str(WORKING_BASINS_MERGED)
+    input_gauges = str(PREP_GAUGES)
+    output_streams = str(FINAL_STREAMS)
+    output_basins = str(FINAL_BASINS)
 
     dissolve_split_basins(input_basins, output_basins)
     bypass_phantom_streams(input_streams, input_basins, output_streams)
@@ -385,9 +409,38 @@ if __name__ == "__main__":
     if hy_features_enabled(default=ENABLE_HY_FEATURES):
         from hy_features.export import export_shapefile_legacy
 
-        assembled_layers = gpd.read_file("merged_basins/geofabric.gpkg", layer="catchment_area")
-        assembled_streams = gpd.read_file("merged_basins/geofabric.gpkg", layer="flowpath")
+        assembled_layers = gpd.read_file(str(WORKING_GEOFABRIC_GPKG), layer="catchment_area")
+        assembled_streams = gpd.read_file(str(WORKING_GEOFABRIC_GPKG), layer="flowpath")
         export_shapefile_legacy(assembled_layers, output_basins)
         export_shapefile_legacy(assembled_streams, output_streams)
     else:
-        print("HY_Features disabled; using TauDEM-only reservoirBasins_final / reservoirStreams_final shapefiles.")
+        print("HY_Features disabled; using TauDEM-only basins.shp / streams.shp shapefiles.")
+
+    delete_interim_outputs(enabled=delete_interim, default=DELETE_INTERIM_FILES)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Clean geofabric and optionally remove TauDEM interim files.")
+    parser.add_argument(
+        "--delete-interim",
+        action="store_true",
+        help="Remove outputs/interim/ after successful cleanup (also set DELETE_INTERIM_FILES=1)",
+    )
+    parser.add_argument(
+        "--keep-interim",
+        action="store_true",
+        help="Keep interim TauDEM files even when DELETE_INTERIM_FILES=1 is exported",
+    )
+    args = parser.parse_args()
+
+    delete_interim: bool | None = None
+    if args.delete_interim:
+        delete_interim = True
+    elif args.keep_interim:
+        delete_interim = False
+
+    run_clean_geofabric(delete_interim=delete_interim)
+
+
+if __name__ == "__main__":
+    main()

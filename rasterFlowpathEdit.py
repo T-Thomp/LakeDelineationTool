@@ -7,7 +7,7 @@ raster and, for each filtered lake polygon, rewrites flow directions inside
 the lake so that all lake cells drain to a single chosen outlet along a
 natural-looking centerline.
 
-The output raster (fdr_centerline_all.tif) is used as the flow-direction
+The output raster (``fdr_lakes.tif``) is used as the flow-direction
 input for TauDEM Pass 2 and Pass 3 in the SLURM pipeline.
 
 Problem being solved
@@ -36,7 +36,7 @@ Inputs (TauDEM / upstream Python products)
 
 Output
 ------
-  fdr_centerline_all.tif - flow directions with lake interiors re-routed
+  fdr_lakes.tif - flow directions with lake interiors re-routed
 """
 
 import argparse
@@ -50,6 +50,17 @@ from osgeo import gdal, ogr, osr
 from shapely import wkt as shapely_wkt
 from shapely.geometry import Point
 from scipy.ndimage import distance_transform_edt, binary_erosion
+
+from pipeline_paths import (
+    FDR_CENTERLINE,
+    PASS1_STREAMS,
+    PASS1_WATERSHEDS_TIF,
+    PREP_GAUGES,
+    PREP_LAKES,
+    PREP_SELECTED_OUTLETS,
+    TAUDEM_D8,
+    ensure_output_dirs,
+)
 
 gdal.UseExceptions()
 
@@ -1366,18 +1377,20 @@ if __name__ == "__main__":
         ),
     )
     args = parser.parse_args()
+    ensure_output_dirs()
 
+    d8 = TAUDEM_D8
     process_raster_reservoir_routing(
-        fdr_raster_path="./taudem-interim-files/d8/stream-network_elv-fdir.tif",
-        src_raster_path="./taudem-interim-files/d8/stream-network_elv-src.tif",
-        accum_raster_path="./taudem-interim-files/d8/stream-network_elv-ad8.tif",
-        w_raster_path="./taudem-interim-files/d8/original-delineated-watersheds.tif",
-        streams_vector_path="./delineation-product/original-delineated-streams.shp",
-        lakes_vector_path="./lakes/filtered_lakes.shp",
-        gauges_vector_path="./points/gauges_in_basin.shp",
+        fdr_raster_path=str(d8 / "stream-network_elv-fdir.tif"),
+        src_raster_path=str(d8 / "stream-network_elv-src.tif"),
+        accum_raster_path=str(d8 / "stream-network_elv-ad8.tif"),
+        w_raster_path=str(PASS1_WATERSHEDS_TIF),
+        streams_vector_path=str(PASS1_STREAMS),
+        lakes_vector_path=str(PREP_LAKES),
+        gauges_vector_path=str(PREP_GAUGES),
         overrides_csv_path="./outlet_overrides.csv",
-        output_fdr_path="./taudem-interim-files/d8/fdr_centerline_all.tif",
-        output_outlets_path="./points/selected_outlets.shp",
+        output_fdr_path=str(FDR_CENTERLINE),
+        output_outlets_path=str(PREP_SELECTED_OUTLETS),
         gauge_radius_meters=750,
         ncores=args.ncores,
     )
