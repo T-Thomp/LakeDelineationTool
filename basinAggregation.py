@@ -236,6 +236,32 @@ def _validate_topology(
     )
 
 
+def _downstream_basin_ids_of_lakes(
+  basin: gpd.GeoDataFrame,
+  river: gpd.GeoDataFrame,
+  id_col: str,
+  down_col: str,
+  riv_id_col: str,
+  outlet_value: int = OUTLET_VALUE,
+) -> set[int]:
+  """LINKNO/DN ids for basins immediately downstream of a lake outlet link."""
+  lake_ids = set(basin.loc[basin["_lake_cat"] > 0, id_col].astype(int))
+  if not lake_ids:
+    return set()
+
+  protected: set[int] = set()
+  link_series = river[riv_id_col].astype(int)
+  for lake_id in lake_ids:
+    down_rows = river.loc[link_series == lake_id, down_col]
+    if down_rows.empty:
+      continue
+    down_id = down_rows.iloc[0]
+    if _is_outlet_id(down_id, outlet_value):
+      continue
+    protected.add(int(down_id))
+  return protected
+
+
 def prepare_input_tables(
   input_basin: gpd.GeoDataFrame,
   input_river: gpd.GeoDataFrame,
@@ -378,12 +404,16 @@ def basin_aggregation(
   ] = outlet_value
 
   def _drop_small_outlets(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop terminal subbasins too small to keep; lakes always stay in the merge graph."""
     is_outlet = df["aggdown"].map(lambda d: _is_outlet_id(d, outlet_value))
-    return df[~(is_outlet & (df["_uparea"] < min_sub_area) | (df["Mask"] == 3))]
+    return df[(~(is_outlet & (df["_uparea"] < min_sub_area))) | (df["Mask"] == 3)]
 
   agg_basin = basin[["agg", "aggdown", "_unitarea", "_uparea", "Mask"]].copy()
   agg_basin = _drop_small_outlets(agg_basin)
-  lake_subs = basin[basin["Mask"] == 3]["agg"]
+  lake_subs = set(basin.loc[basin["Mask"] == 3, "agg"].astype(int))
+  post_lake_subs = _downstream_basin_ids_of_lakes(
+    basin, river, id_col, down_col, riv_id_col, outlet_value
+  )
   no_subbasin = len(basin)
 
   while True:
@@ -393,9 +423,12 @@ def basin_aggregation(
       & (agg_basin["Mask"] < 2)
     )
     small_subbasin = agg_basin[headwaters]
-    small_subbasin = small_subbasin[~small_subbasin["aggdown"].isin(lake_subs)].sort_values(
-      by="_uparea", ascending=False
-    )
+    small_subbasin = small_subbasin[
+      ~small_subbasin["aggdown"].isin(lake_subs)
+      # Post-lake basins may receive upstream headwaters (aggdown -> them) but must
+      # not themselves be absorbed into a basin further downstream (agg -> blocked).
+      & ~small_subbasin["agg"].isin(post_lake_subs)
+    ].sort_values(by="_uparea", ascending=False)
     if not small_subbasin.empty:
       small_subbasin = small_subbasin.rename(columns={"agg": "aggold", "aggdown": "agg"})
       xx = small_subbasin.merge(agg_basin[["agg", "aggdown"]], on="agg", how="left")

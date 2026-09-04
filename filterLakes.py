@@ -28,6 +28,7 @@ import geopandas as gpd
 
 from hy_features.config import hy_features_enabled
 from pipeline_paths import (
+    INPUT_HYDROLAKES,
     PASS1_BASINS,
     PASS1_STREAMS,
     PREP_LAKES,
@@ -41,7 +42,7 @@ from pipeline_paths import (
 PATHS = {
     "basins": str(PASS1_BASINS),
     "streams": str(PASS1_STREAMS),
-    "hydrolakes": "~/bow-bassano/delineation-product/hydrolakes/HydroLAKES_polys_v10.shp",
+    "hydrolakes": str(INPUT_HYDROLAKES),
     "output_shp": str(PREP_LAKES),
     "output_gpkg": str(PREP_LAKES_GPKG),
 }

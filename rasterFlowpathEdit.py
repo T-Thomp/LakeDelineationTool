@@ -45,12 +45,12 @@ import heapq
 import numpy as np
 import pandas as pd
 import geopandas as gpd
-from mpi4py import MPI
 from osgeo import gdal, ogr, osr
 from shapely import wkt as shapely_wkt
 from shapely.geometry import Point
 from scipy.ndimage import distance_transform_edt, binary_erosion
 
+from outlet_overrides import load_overrides
 from pipeline_paths import (
     FDR_CENTERLINE,
     PASS1_STREAMS,
@@ -754,17 +754,6 @@ def select_outlet_for_lake(
     return select_algorithmic_outlet(surviving_candidates)
 
 
-def load_overrides(overrides_csv_path, raster_proj):
-    """Load optional manual outlet overrides (lat/lon per lake_id) and reproject."""
-    if not os.path.exists(overrides_csv_path):
-        return gpd.GeoDataFrame(columns=['lake_id', 'lat', 'lon', 'geometry'], crs="EPSG:4326")
-
-    overrides_df = pd.read_csv(overrides_csv_path)
-    overrides_df['lake_id'] = overrides_df['lake_id'].astype(str).str.strip()
-    geometry = gpd.points_from_xy(overrides_df['lon'], overrides_df['lat'])
-    return gpd.GeoDataFrame(overrides_df, geometry=geometry, crs="EPSG:4326").to_crs(raster_proj)
-
-
 def load_gauges(gauges_vector_path, raster_proj):
     """Load stream gauges for outlet ranking, or an empty frame if the file is missing."""
     if not os.path.exists(gauges_vector_path):
@@ -1212,6 +1201,8 @@ def process_raster_reservoir_routing(
     The output file is a full copy of the input FDR raster with only lake
     interiors modified. All non-lake cells are untouched.
     """
+    from mpi4py import MPI
+
     if comm is None:
         comm = MPI.COMM_WORLD
 

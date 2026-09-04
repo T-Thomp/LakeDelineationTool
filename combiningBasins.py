@@ -70,7 +70,7 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Point
 
-from rasterFlowpathEdit import load_overrides
+from outlet_overrides import load_overrides
 from hy_features.config import hy_features_enabled
 from pipeline_paths import (
     PATHS as PIPELINE_PATHS,

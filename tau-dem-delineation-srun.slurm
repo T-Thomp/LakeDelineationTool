@@ -52,11 +52,15 @@
 # Work top-to-bottom. Most Python scripts assume you run them from HOME_DIR
 # (this slurm cd's there). Relative paths below are from HOME_DIR.
 #
+# [ ] pipeline_paths.py  (edit USER INPUTS at top of file)
+#       INPUT_DEM          -- study elevation GeoTIFF (relative to HOME_DIR)
+#       INPUT_HYDAT_DB     -- HYDAT SQLite database
+#       INPUT_HYDROLAKES   -- global HydroLAKES polygon shapefile
+#
 # [ ] tau-dem-delineation-srun.slurm  (this file)
 #       module restore scimods  -- GDAL + mpi4py (see SOFTWARE REQUIREMENTS)
 #       PATH to TauDEM     -- export PATH="$HOME/taudem-build/taudem:$PATH" (§0)
 #       HOME_DIR           -- project root on the cluster
-#       DEM                -- input elevation GeoTIFF
 #       VENV               -- Python venv activate (pip install -r requirements.txt)
 #       STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
 #       FLOWPATH_NCORES    -- MPI worker ranks for rasterFlowpathEdit.py (see §0)
@@ -64,13 +68,11 @@
 #       #SBATCH --account / --ntasks / --mem-per-cpu / --time
 #
 # [ ] filterLakes.py
-#       HydroLAKES .shp path (hardcoded near top)
 #       Pass-1 watersheds/streams under outputs/interim/taudem_d8/
 #       MIN_AREA           -- km² lake-size filter
 #       output             -- outputs/prep/lakes.shp
 #
 # [ ] getGauges.py
-#       Hydat.sqlite3 path (db_path)
 #       Pass-1 watersheds under outputs/interim/taudem_d8/
 #       output             -- outputs/prep/gauges.shp
 #
@@ -109,9 +111,9 @@
 #       column-name globals if your attribute table differs from TauDEM
 #
 # [ ] External / one-time inputs to stage before running
-#       dem/*.tif          -- study DEM
-#       HydroLAKES polys   -- for filterLakes.py
-#       Hydat.sqlite3      -- for getGauges.py
+#       INPUT_DEM path     -- in pipeline_paths.py (default under dem/)
+#       INPUT_HYDROLAKES   -- in pipeline_paths.py
+#       INPUT_HYDAT_DB     -- in pipeline_paths.py
 #       outlet_overrides.csv -- optional manual lake-outlet overrides
 #
 # SOFTWARE REQUIREMENTS (modules + Python venv)
@@ -197,11 +199,11 @@ FLOWPATH_NCORES=16
 # Remove TauDEM interim rasters/vectors after cleanGeofabric.py (off by default)
 # export DELETE_INTERIM_FILES=1
 
-DEM="$HOME_DIR/dem/Sask-mrdem-30-dtm.tif"
 VENV="/home/$USER/virtual-envs/scienv/bin/activate"
 
 mkdir -p "$INT_DIR" "$PASS3_DIR" "$PREP_DIR" "$WORKING_DIR" "$FINAL_DIR"
 cd "$HOME_DIR" || exit 1
+DEM="$(python3 -c "from pipeline_paths import INPUT_DEM; print(INPUT_DEM)")"
 python3 -c "from pipeline_paths import ensure_output_dirs; ensure_output_dirs()"
 FDR_RASTER="$(python3 -c "from pipeline_paths import FDR_CENTERLINE; print(FDR_CENTERLINE)")"
 

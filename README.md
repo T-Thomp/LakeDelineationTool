@@ -362,13 +362,24 @@ Before adapting the workflow to another watershed, verify the following settings
 
 ---
 
+## `pipeline_paths.py` (USER INPUTS at top of file)
+
+Edit these first when switching study areas:
+
+- `INPUT_DEM` — elevation GeoTIFF (relative to project root / `HOME_DIR`)
+- `INPUT_HYDAT_DB` — HYDAT SQLite database
+- `INPUT_HYDROLAKES` — global HydroLAKES polygon shapefile
+
+All other scripts and the slurm job read these automatically.
+
+---
+
 ## `tau-dem-delineation-srun.slurm`
 
 Update:
 
 - `export PATH=...` — directory containing compiled TauDEM MPI binaries (see **Software requirements**)
 - `HOME_DIR`
-- `DEM`
 - `VENV` — path to activated venv (`pip install -r requirements.txt`; see **Software requirements**)
 - `STREAM_THRESHOLD`
 - `FLOWPATH_NCORES`
@@ -388,10 +399,9 @@ Also verify:
 
 Update:
 
-- HydroLAKES shapefile path
-- Pass 1 watershed path
-- Stream path
-- `MIN_AREA`
+- `MIN_AREA` (in script; lake-size filter in km²)
+
+Input/output paths come from `pipeline_paths.py`.
 
 Output:
 
@@ -403,10 +413,7 @@ outputs/prep/lakes.shp
 
 ## `getGauges.py`
 
-Update:
-
-- `Hydat.sqlite3`
-- Watershed path
+Input/output paths come from `pipeline_paths.py`.
 
 Output:
 

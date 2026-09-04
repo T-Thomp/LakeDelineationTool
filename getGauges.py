@@ -28,14 +28,14 @@ import geopandas as gpd
 import pandas as pd
 
 from hy_features.config import hy_features_enabled
-from pipeline_paths import PASS1_BASINS, PREP_GAUGES, PREP_GAUGES_GPKG, ensure_output_dirs
+from pipeline_paths import INPUT_HYDAT_DB, PASS1_BASINS, PREP_GAUGES, PREP_GAUGES_GPKG, ensure_output_dirs
 
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
 PATHS = {
     "basins": str(PASS1_BASINS),
-    "hydat_db": "Hydat.sqlite3",
+    "hydat_db": str(INPUT_HYDAT_DB),
     "output_shp": str(PREP_GAUGES),
     "output_gpkg": str(PREP_GAUGES_GPKG),
 }

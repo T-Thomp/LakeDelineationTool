@@ -15,6 +15,9 @@ outputs/
   working/              Merged geofabric before final clean (+ HY sidecars)
   final/                Deliverables: basins, basins_aggregated, pour_points
                           (+ paired stream shapefiles)
+
+Edit USER INPUTS at the top of this file when changing study area:
+  INPUT_DEM, INPUT_HYDAT_DB, INPUT_HYDROLAKES
 """
 
 from __future__ import annotations
@@ -22,6 +25,15 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
+
+# =============================================================================
+# USER INPUTS — edit these when adapting to a new study area
+# =============================================================================
+INPUT_DEM = Path("dem/Sask-mrdem-30-dtm.tif")
+INPUT_HYDAT_DB = Path("Hydat.sqlite3")
+INPUT_HYDROLAKES = Path(
+    "~/bow-bassano/delineation-product/hydrolakes/HydroLAKES_polys_v10.shp"
+)
 
 OUTPUT_ROOT = Path("outputs")
 INTERIM = OUTPUT_ROOT / "interim"
@@ -72,6 +84,9 @@ FINAL_STREAMS_AGG = FINAL / "streams_aggregated.shp"
 FINAL_POUR_POINTS = FINAL / "pour_points.shp"
 
 PATHS: dict[str, str] = {
+    "dem": str(INPUT_DEM),
+    "hydat_db": str(INPUT_HYDAT_DB),
+    "hydrolakes": str(INPUT_HYDROLAKES),
     "pass1_basins": str(PASS1_BASINS),
     "pass1_streams": str(PASS1_STREAMS),
     "pass1_watersheds_tif": str(PASS1_WATERSHEDS_TIF),
