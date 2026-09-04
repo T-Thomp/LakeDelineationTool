@@ -230,7 +230,7 @@ python remap_fields.py --preset mesh \
   --out-dir remapped_products/
 ```
 
-Presets live in [`hy_features/model_presets.json`](../hy_features/model_presets.json). The `mesh` preset maps:
+Presets live in [`code/hy_features/model_presets.json`](../code/hy_features/model_presets.json). The `mesh` preset maps:
 
 | Canonical (GeoPackage) | MESH / WATFLOOD output |
 |------------------------|------------------------|

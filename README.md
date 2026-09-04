@@ -166,10 +166,20 @@ Final Products
 
 # Project Directory Structure
 
-All paths below are relative to `HOME_DIR`.
+Place `Delineation-Workflow.slurm` at your study root. Python scripts live in `code/`; data paths resolve against the slurm script's directory (`LAKE_DELINEATION_ROOT`).
 
 ```text
-HOME_DIR/
+study-root/                          ← DATA_DIR (auto-detected from slurm location)
+│
+├── Delineation-Workflow.slurm
+├── outlet_overrides.csv             optional manual lake outlets
+├── requirements.txt
+│
+├── code/                            ← CODE_DIR
+│   ├── pipeline_paths.py            edit USER INPUTS here
+│   ├── filterLakes.py
+│   ├── hy_features/
+│   └── …
 │
 ├── dem/
 │   └── Input DEM
@@ -183,7 +193,7 @@ HOME_DIR/
     └── final/               Deliverables: basins, basins_aggregated, pour_points
 ```
 
-See `pipeline_paths.py` for the canonical path constants used by all scripts.
+See `code/pipeline_paths.py` for the canonical path constants used by all scripts.
 
 ```
 
@@ -362,15 +372,15 @@ Before adapting the workflow to another watershed, verify the following settings
 
 ---
 
-## `pipeline_paths.py` (USER INPUTS at top of file)
+## `code/pipeline_paths.py` (USER INPUTS at top of file)
 
 Edit these first when switching study areas:
 
-- `INPUT_DEM` — elevation GeoTIFF (under `DATA_DIR/dem/` when using split code/data layout)
-- `INPUT_HYDAT_DB` — HYDAT SQLite database (under `DATA_DIR` by default)
+- `INPUT_DEM` — elevation GeoTIFF (under `dem/` at study root)
+- `INPUT_HYDAT_DB` — HYDAT SQLite database (study root by default)
 - `INPUT_HYDROLAKES` — global HydroLAKES polygon shapefile
 
-Slurm sets `LAKE_DELINEATION_ROOT=$DATA_DIR` so paths resolve against your data directory even when scripts live in `CODE_DIR`.
+Slurm sets `LAKE_DELINEATION_ROOT` to the folder containing `Delineation-Workflow.slurm`, so relative paths resolve against your data directory while scripts run from `code/`.
 
 All other scripts and the slurm job read these automatically.
 
@@ -381,11 +391,11 @@ All other scripts and the slurm job read these automatically.
 Update:
 
 - `export PATH=...` — directory containing compiled TauDEM MPI binaries (see **Software requirements**)
-- `CODE_DIR` — path to your `LakeDelineationTool` git clone (scripts + `pipeline_paths.py`)
-- `DATA_DIR` — study data root (`dem/`, `outputs/`, `Hydat.sqlite3`)
 - `VENV` — path to activated venv (`pip install -r requirements.txt`; see **Software requirements**)
 - `STREAM_THRESHOLD`
 - `FLOWPATH_NCORES`
+
+`DATA_DIR` and `CODE_DIR` are set automatically from the slurm script location (`./` and `./code/`). No manual path edits needed if you use the layout above.
 
 Ensure `module restore scimods` matches your cluster setup (FIR: **GDAL 3.9.1** + **mpi4py 4.0.0** modules) and that compiled TauDEM is on `PATH`.
 
@@ -568,13 +578,13 @@ See [`docs/hy_features_mapping.md`](docs/hy_features_mapping.md) and [`docs/hy_f
 
 ## Downstream model remapping
 
-The canonical product is `geofabric.gpkg`. To export shapefiles for a specific routing model, use [`remap_fields.py`](remap_fields.py):
+The canonical product is `geofabric.gpkg`. To export shapefiles for a specific routing model, use [`code/remap_fields.py`](code/remap_fields.py) from your study root:
 
 ```bash
-python remap_fields.py --list-presets
-python remap_fields.py --list-mappings --preset mesh
+python code/remap_fields.py --list-presets
+python code/remap_fields.py --list-mappings --preset mesh
 
-python remap_fields.py \
+python code/remap_fields.py \
   --preset mesh \
   --basins outputs/working/geofabric.gpkg \
   --streams outputs/working/geofabric.gpkg \
@@ -586,10 +596,10 @@ Writes `remapped_products/basins_mesh.shp` and `streams_mesh.shp` (integer IDs; 
 
 ### Other models
 
-Add a preset to [`hy_features/model_presets.json`](hy_features/model_presets.json) or use `--override`:
+Add a preset to [`code/hy_features/model_presets.json`](code/hy_features/model_presets.json) or use `--override`:
 
 ```bash
-python remap_fields.py \
+python code/remap_fields.py \
   --preset my_model \
   --preset-file my_model.json \
   --streams outputs/working/geofabric.gpkg \

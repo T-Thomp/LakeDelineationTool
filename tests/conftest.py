@@ -1,8 +1,8 @@
-"""Ensure repo root is on sys.path for hy_features imports."""
+"""Ensure code/ is on sys.path for pipeline and hy_features imports."""
 
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+CODE_DIR = Path(__file__).resolve().parents[1] / "code"
+if str(CODE_DIR) not in sys.path:
+    sys.path.insert(0, str(CODE_DIR))

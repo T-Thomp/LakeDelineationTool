@@ -42,17 +42,17 @@
 #   outputs/interim/taudem_d8/   -- Pass 1–2 TauDEM rasters and vectors
 #   outputs/interim/taudem_pass3/ -- Pass 3 TauDEM outputs
 #
-# KEY DIRECTORIES
-# --------------------------------
-#   CODE_DIR                     -- git clone (scripts + pipeline_paths.py)
-#   DATA_DIR                     -- dem/, outputs/, Hydat.sqlite3
+# KEY DIRECTORIES (auto-detected from this script's location)
+# ------------------------------------------------------------
+#   DATA_DIR                     -- folder containing this .slurm file (dem/, outputs/, …)
+#   CODE_DIR                     -- DATA_DIR/code/ (Python scripts + pipeline_paths.py)
 #
 # SETUP CHECKLIST (paths & knobs to edit when adapting this workflow)
 # --------------------------------------------------------------------
 # Work top-to-bottom. Slurm cd's to DATA_DIR; Python runs from CODE_DIR.
 # Relative paths in pipeline_paths.py resolve against DATA_DIR (LAKE_DELINEATION_ROOT).
 #
-# [ ] pipeline_paths.py  (edit USER INPUTS at top of file)
+# [ ] code/pipeline_paths.py  (edit USER INPUTS at top of file)
 #       INPUT_DEM          -- study elevation GeoTIFF (under DATA_DIR/dem/)
 #       INPUT_HYDAT_DB     -- HYDAT SQLite database
 #       INPUT_HYDROLAKES   -- global HydroLAKES polygon shapefile
@@ -60,8 +60,6 @@
 # [ ] Delineation-Workflow.slurm  (this file)
 #       module restore scimods  -- GDAL + mpi4py (see SOFTWARE REQUIREMENTS)
 #       PATH to TauDEM     -- export PATH="$HOME/taudem-build/taudem:$PATH" (§0)
-#       CODE_DIR           -- git clone (Python scripts + pipeline_paths.py)
-#       DATA_DIR           -- study data (dem/, outputs/, Hydat.sqlite3)
 #       VENV               -- Python venv activate (pip install -r requirements.txt)
 #       STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
 #       FLOWPATH_NCORES    -- MPI worker ranks for rasterFlowpathEdit.py (see §0)
@@ -171,10 +169,10 @@ module restore scimods
 
 # export PATH="$HOME/taudem-build/taudem:$PATH"   # Set taudem:PATH here or set it in .bashrc file
 
-# Git repo (Python scripts + pipeline_paths.py)
-CODE_DIR="/project/6102189/tylerrt/LakeDelineationTool"
-# Study data root (DEM, outputs/, Hydat.sqlite3) — was HOME_DIR
-DATA_DIR="/home/$USER/projects/rrg-alpie/tylerrt/southSaskDelineation"
+# Project root = directory containing this slurm script; code/ holds Python scripts.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DATA_DIR="$SCRIPT_DIR"
+CODE_DIR="$SCRIPT_DIR/code"
 
 OUTPUT_ROOT="$DATA_DIR/outputs"
 INT_DIR="$OUTPUT_ROOT/interim/taudem_d8"       # Pass 1 & 2 TauDEM rasters/shapefiles
@@ -213,7 +211,7 @@ cd "$DATA_DIR" || exit 1
 
 if [[ ! -f "${CODE_DIR}/pipeline_paths.py" ]]; then
     echo "ERROR: pipeline_paths.py not found in CODE_DIR=${CODE_DIR}"
-    echo "  git checkout dev && git pull   (in your LakeDelineationTool clone)"
+    echo "  Expected layout: ${DATA_DIR}/code/pipeline_paths.py"
     exit 1
 fi
 

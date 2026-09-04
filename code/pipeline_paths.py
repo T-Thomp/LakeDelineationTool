@@ -31,7 +31,7 @@ from pathlib import Path
 # USER INPUTS — edit these when adapting to a new study area
 # =============================================================================
 # Study data directory: DEM, outputs/, Hydat.sqlite3, etc.
-# Slurm sets LAKE_DELINEATION_ROOT to DATA_DIR when code and data are split.
+# Slurm sets LAKE_DELINEATION_ROOT to the folder containing Delineation-Workflow.slurm.
 PROJECT_ROOT = Path(
     os.environ.get("LAKE_DELINEATION_ROOT", ".")
 ).expanduser().resolve()
