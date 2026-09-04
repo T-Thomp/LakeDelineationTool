@@ -1,7 +1,7 @@
 """
 Find active HYDAT stream-gauge stations inside the study basin.
 
-Called by tau-dem-delineation-srun.slurm after TauDEM Pass 1 and before
+Called by Delineation-Workflow.slurm after TauDEM Pass 1 and before
 rasterFlowpathEdit.py (gauges inform lake outlet ranking).
 
 Queries HYDAT for active stations with discharge (Q) data, spatially filters

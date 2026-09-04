@@ -3,7 +3,7 @@
 # TauDEM Reservoir Basin Delineation Pipeline
 # =============================================================================
 #
-# Submit with:  sbatch tau-dem-delineation-srun.slurm
+# Submit with:  sbatch Delineation-Workflow.slurm
 #
 # This job builds a stream network and watershed delineation for a selected
 # DEM, with special handling for instream reservoirs (lakes). TauDEM alone
@@ -57,7 +57,7 @@
 #       INPUT_HYDAT_DB     -- HYDAT SQLite database
 #       INPUT_HYDROLAKES   -- global HydroLAKES polygon shapefile
 #
-# [ ] tau-dem-delineation-srun.slurm  (this file)
+# [ ] Delineation-Workflow.slurm  (this file)
 #       module restore scimods  -- GDAL + mpi4py (see SOFTWARE REQUIREMENTS)
 #       PATH to TauDEM     -- export PATH="$HOME/taudem-build/taudem:$PATH" (§0)
 #       HOME_DIR           -- project root on the cluster

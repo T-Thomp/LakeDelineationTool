@@ -1,7 +1,7 @@
 """
 Filter HydroLAKES reservoirs to those intersecting the study basin.
 
-Called by tau-dem-delineation-srun.slurm after TauDEM Pass 1 and before
+Called by Delineation-Workflow.slurm after TauDEM Pass 1 and before
 rasterFlowpathEdit.py.
 
 Uses Pass 1 watershed polygons to define the basin mask, streams HydroLAKES

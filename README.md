@@ -11,7 +11,7 @@ Unlike a standard TauDEM workflow, this pipeline performs multiple delineation p
 Submit the workflow using:
 
 ```bash
-sbatch tau-dem-delineation-srun.slurm
+sbatch Delineation-Workflow.slurm
 ```
 
 The workflow builds a stream network and watershed delineation for a selected DEM using three TauDEM passes with Python-based corrections between each pass.
@@ -26,7 +26,7 @@ The pipeline uses a **self-compiled TauDEM MPI build**, a **Python virtual envir
 
 Download and compile [TauDEM](https://github.com/dtarb/taudem) with MPI enabled (not a cluster module).
 
-In `tau-dem-delineation-srun.slurm`, point `PATH` at your build:
+In `Delineation-Workflow.slurm`, point `PATH` at your build:
 
 ```bash
 export PATH="$HOME/taudem-build/taudem:$PATH"   # edit: your compiled TauDEM install
@@ -40,7 +40,7 @@ On FIR, load HPC modules **before** activating the venv. **`mpi4py` is not in `r
 module load StdEnv/2023
 module load gdal/3.9.1
 module load mpi4py/4.0.0
-module save scimods    # optional; restored by tau-dem-delineation-srun.slurm
+module save scimods    # optional; restored by Delineation-Workflow.slurm
 ```
 
 | Software | Purpose (FIR) |
@@ -76,7 +76,7 @@ pip install mpi4py==4.0.0   # after loading your site MPI compiler/module stack
 
 Similarly, load or install a **GDAL build that matches** `GDAL==3.9.1` in `requirements.txt` before `pip install GDAL`, or adjust the pin to your system GDAL. Conda/mamba users may prefer `conda-forge` for `gdal`, `geopandas`, and `mpi4py` instead of the venv + module workflow above.
 
-Adapt `module restore scimods` in `tau-dem-delineation-srun.slurm` to your site’s module loads, or replace with explicit `module load` lines.
+Adapt `module restore scimods` in `Delineation-Workflow.slurm` to your site’s module loads, or replace with explicit `module load` lines.
 
 ### Key pinned versions (pipeline)
 
@@ -374,7 +374,7 @@ All other scripts and the slurm job read these automatically.
 
 ---
 
-## `tau-dem-delineation-srun.slurm`
+## `Delineation-Workflow.slurm`
 
 Update:
 

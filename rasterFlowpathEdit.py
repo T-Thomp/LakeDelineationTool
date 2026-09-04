@@ -1,7 +1,7 @@
 """
 Raster flow-path editor for instream reservoirs.
 
-Called by tau-dem-delineation-srun.slurm after TauDEM Pass 1 and the
+Called by Delineation-Workflow.slurm after TauDEM Pass 1 and the
 filterLakes / getGauges steps. It reads the original TauDEM flow-direction
 raster and, for each filtered lake polygon, rewrites flow directions inside
 the lake so that all lake cells drain to a single chosen outlet along a

@@ -1,7 +1,7 @@
 """
 Merge lake-split subbasins and internal stream links into unified reservoir units.
 
-Called by tau-dem-delineation-srun.slurm after TauDEM Pass 3 and before
+Called by Delineation-Workflow.slurm after TauDEM Pass 3 and before
 cleanGeofabric.py.
 
 Problem being solved
