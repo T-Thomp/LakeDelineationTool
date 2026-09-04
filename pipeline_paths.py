@@ -17,6 +17,7 @@ outputs/
                           (+ paired stream shapefiles)
 
 Edit USER INPUTS at the top of this file when changing study area:
+  PROJECT_ROOT (or set env LAKE_DELINEATION_ROOT in slurm)
   INPUT_DEM, INPUT_HYDAT_DB, INPUT_HYDROLAKES
 """
 
@@ -29,13 +30,19 @@ from pathlib import Path
 # =============================================================================
 # USER INPUTS — edit these when adapting to a new study area
 # =============================================================================
-INPUT_DEM = Path("dem/Sask-mrdem-30-dtm.tif")
-INPUT_HYDAT_DB = Path("Hydat.sqlite3")
+# Study data directory: DEM, outputs/, Hydat.sqlite3, etc.
+# Slurm sets LAKE_DELINEATION_ROOT to DATA_DIR when code and data are split.
+PROJECT_ROOT = Path(
+    os.environ.get("LAKE_DELINEATION_ROOT", ".")
+).expanduser().resolve()
+
+INPUT_DEM = PROJECT_ROOT / "dem/Sask-mrdem-30-dtm.tif"
+INPUT_HYDAT_DB = PROJECT_ROOT / "Hydat.sqlite3"
 INPUT_HYDROLAKES = Path(
     "~/bow-bassano/delineation-product/hydrolakes/HydroLAKES_polys_v10.shp"
-)
+).expanduser()
 
-OUTPUT_ROOT = Path("outputs")
+OUTPUT_ROOT = PROJECT_ROOT / "outputs"
 INTERIM = OUTPUT_ROOT / "interim"
 PREP = OUTPUT_ROOT / "prep"
 WORKING = OUTPUT_ROOT / "working"

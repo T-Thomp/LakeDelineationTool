@@ -366,9 +366,11 @@ Before adapting the workflow to another watershed, verify the following settings
 
 Edit these first when switching study areas:
 
-- `INPUT_DEM` — elevation GeoTIFF (relative to project root / `HOME_DIR`)
-- `INPUT_HYDAT_DB` — HYDAT SQLite database
+- `INPUT_DEM` — elevation GeoTIFF (under `DATA_DIR/dem/` when using split code/data layout)
+- `INPUT_HYDAT_DB` — HYDAT SQLite database (under `DATA_DIR` by default)
 - `INPUT_HYDROLAKES` — global HydroLAKES polygon shapefile
+
+Slurm sets `LAKE_DELINEATION_ROOT=$DATA_DIR` so paths resolve against your data directory even when scripts live in `CODE_DIR`.
 
 All other scripts and the slurm job read these automatically.
 
@@ -379,7 +381,8 @@ All other scripts and the slurm job read these automatically.
 Update:
 
 - `export PATH=...` — directory containing compiled TauDEM MPI binaries (see **Software requirements**)
-- `HOME_DIR`
+- `CODE_DIR` — path to your `LakeDelineationTool` git clone (scripts + `pipeline_paths.py`)
+- `DATA_DIR` — study data root (`dem/`, `outputs/`, `Hydat.sqlite3`)
 - `VENV` — path to activated venv (`pip install -r requirements.txt`; see **Software requirements**)
 - `STREAM_THRESHOLD`
 - `FLOWPATH_NCORES`

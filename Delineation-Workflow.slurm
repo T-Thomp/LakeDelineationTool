@@ -42,25 +42,26 @@
 #   outputs/interim/taudem_d8/   -- Pass 1–2 TauDEM rasters and vectors
 #   outputs/interim/taudem_pass3/ -- Pass 3 TauDEM outputs
 #
-# KEY DIRECTORIES (under HOME_DIR)
+# KEY DIRECTORIES
 # --------------------------------
-#   dem/                         -- input elevation raster
-#   outputs/                     -- all pipeline products (see pipeline_paths.py)
+#   CODE_DIR                     -- git clone (scripts + pipeline_paths.py)
+#   DATA_DIR                     -- dem/, outputs/, Hydat.sqlite3
 #
 # SETUP CHECKLIST (paths & knobs to edit when adapting this workflow)
 # --------------------------------------------------------------------
-# Work top-to-bottom. Most Python scripts assume you run them from HOME_DIR
-# (this slurm cd's there). Relative paths below are from HOME_DIR.
+# Work top-to-bottom. Slurm cd's to DATA_DIR; Python runs from CODE_DIR.
+# Relative paths in pipeline_paths.py resolve against DATA_DIR (LAKE_DELINEATION_ROOT).
 #
 # [ ] pipeline_paths.py  (edit USER INPUTS at top of file)
-#       INPUT_DEM          -- study elevation GeoTIFF (relative to HOME_DIR)
+#       INPUT_DEM          -- study elevation GeoTIFF (under DATA_DIR/dem/)
 #       INPUT_HYDAT_DB     -- HYDAT SQLite database
 #       INPUT_HYDROLAKES   -- global HydroLAKES polygon shapefile
 #
 # [ ] Delineation-Workflow.slurm  (this file)
 #       module restore scimods  -- GDAL + mpi4py (see SOFTWARE REQUIREMENTS)
 #       PATH to TauDEM     -- export PATH="$HOME/taudem-build/taudem:$PATH" (§0)
-#       HOME_DIR           -- project root on the cluster
+#       CODE_DIR           -- git clone (Python scripts + pipeline_paths.py)
+#       DATA_DIR           -- study data (dem/, outputs/, Hydat.sqlite3)
 #       VENV               -- Python venv activate (pip install -r requirements.txt)
 #       STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
 #       FLOWPATH_NCORES    -- MPI worker ranks for rasterFlowpathEdit.py (see §0)
@@ -170,8 +171,12 @@ module restore scimods
 
 # export PATH="$HOME/taudem-build/taudem:$PATH"   # Set taudem:PATH here or set it in .bashrc file
 
-HOME_DIR="/home/$USER/projects/rrg-alpie/tylerrt/southSaskDelineation"
-OUTPUT_ROOT="$HOME_DIR/outputs"
+# Git repo (Python scripts + pipeline_paths.py)
+CODE_DIR="/project/6102189/tylerrt/LakeDelineationTool"
+# Study data root (DEM, outputs/, Hydat.sqlite3) — was HOME_DIR
+DATA_DIR="/home/$USER/projects/rrg-alpie/tylerrt/southSaskDelineation"
+
+OUTPUT_ROOT="$DATA_DIR/outputs"
 INT_DIR="$OUTPUT_ROOT/interim/taudem_d8"       # Pass 1 & 2 TauDEM rasters/shapefiles
 PASS3_DIR="$OUTPUT_ROOT/interim/taudem_pass3"  # Pass 3 TauDEM outputs
 PREP_DIR="$OUTPUT_ROOT/prep"
@@ -202,10 +207,33 @@ FLOWPATH_NCORES=16
 VENV="/home/$USER/virtual-envs/scienv/bin/activate"
 
 mkdir -p "$INT_DIR" "$PASS3_DIR" "$PREP_DIR" "$WORKING_DIR" "$FINAL_DIR"
-cd "$HOME_DIR" || exit 1
-DEM="$(python3 -c "from pipeline_paths import INPUT_DEM; print(INPUT_DEM)")"
-python3 -c "from pipeline_paths import ensure_output_dirs; ensure_output_dirs()"
-FDR_RASTER="$(python3 -c "from pipeline_paths import FDR_CENTERLINE; print(FDR_CENTERLINE)")"
+export LAKE_DELINEATION_ROOT="$DATA_DIR"
+export PYTHONPATH="${CODE_DIR}${PYTHONPATH:+:$PYTHONPATH}"
+cd "$DATA_DIR" || exit 1
+
+if [[ ! -f "${CODE_DIR}/pipeline_paths.py" ]]; then
+    echo "ERROR: pipeline_paths.py not found in CODE_DIR=${CODE_DIR}"
+    echo "  git checkout dev && git pull   (in your LakeDelineationTool clone)"
+    exit 1
+fi
+
+DEM="$(python3 -c "from pipeline_paths import INPUT_DEM; print(INPUT_DEM)" 2>&1)" || {
+    echo "ERROR: failed to load INPUT_DEM from pipeline_paths.py"
+    echo "$DEM"
+    exit 1
+}
+python3 -c "from pipeline_paths import ensure_output_dirs; ensure_output_dirs()" || exit 1
+FDR_RASTER="$(python3 -c "from pipeline_paths import FDR_CENTERLINE; print(FDR_CENTERLINE)" 2>&1)" || {
+    echo "ERROR: failed to load FDR_CENTERLINE from pipeline_paths.py"
+    echo "$FDR_RASTER"
+    exit 1
+}
+if [[ ! -f "$DEM" ]]; then
+    echo "ERROR: DEM not found: $DEM"
+    echo "  Edit INPUT_DEM in ${CODE_DIR}/pipeline_paths.py or stage dem/ under DATA_DIR"
+    exit 1
+fi
+echo "Using DEM: $DEM"
 
 # Modules first, then venv (mpi4py module must be loaded before activate on FIR).
 # numpy/scipy/geopandas come from the venv only — not from module load.
@@ -293,7 +321,7 @@ gdal_polygonize.py \
 #   --ncores caps active workers at min(N, srun task count). If you omit srun,
 #   mpi4py sees a single rank and runs serially regardless of --ncores.
 #
-# Re-run standalone (from HOME_DIR, after Pass 1 + filterLakes + getGauges):
+# Re-run standalone (from DATA_DIR, after Pass 1 + filterLakes + getGauges):
 #   source "$VENV"
 #   export FLOWPATH_NCORES=16
 #   srun --ntasks=16 --cpus-per-task=1 \
@@ -304,13 +332,13 @@ gdal_polygonize.py \
 # -----------------------------------------------------------------------------
 log_section "Python: lake filtering, gauges, and raster flow-path edits"
 
-python3 filterLakes.py
-python3 getGauges.py
+python3 "$CODE_DIR/filterLakes.py"
+python3 "$CODE_DIR/getGauges.py"
 
 echo " before rasterFlowpathEdit.py $(date)"
 export FLOWPATH_NCORES
 srun --ntasks="${FLOWPATH_NCORES}" --cpus-per-task=1 \
-    python3 rasterFlowpathEdit.py --ncores "${FLOWPATH_NCORES}"
+    python3 "$CODE_DIR/rasterFlowpathEdit.py" --ncores "${FLOWPATH_NCORES}"
 # Serial fallback (interactive debug on a login/compute node):
 # python3 rasterFlowpathEdit.py --ncores 1
 echo " after rasterFlowpathEdit.py $(date)"
@@ -356,7 +384,7 @@ gdal_polygonize.py \
 # lake inflows/outflows and other key network nodes. Writes outputs/final/pour_points.shp.
 # -----------------------------------------------------------------------------
 log_section "Python: pour point extraction (pourPointsPass2.py)"
-python3 pourPointsPass2.py
+python3 "$CODE_DIR/pourPointsPass2.py"
 
 # -----------------------------------------------------------------------------
 # 5. TauDEM Pass 3 -- final watershed delineation at pour points
@@ -412,11 +440,11 @@ gdal_polygonize.py \
 #                             outputs/final/streams_aggregated.shp
 # -----------------------------------------------------------------------------
 log_section "Python: basin merging and geofabric cleanup"
-python3 combiningBasins.py
-python3 cleanGeofabric.py
+python3 "$CODE_DIR/combiningBasins.py"
+python3 "$CODE_DIR/cleanGeofabric.py"
 
 log_section "Python: optional basin aggregation (basinAggregation.py)"
-python3 basinAggregation.py
+python3 "$CODE_DIR/basinAggregation.py"
 
 echo ""
 echo "$(basename "$0"): Delineation ended at $(date)"
