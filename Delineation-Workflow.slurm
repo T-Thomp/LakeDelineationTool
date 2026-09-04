@@ -210,7 +210,9 @@ VENV="/home/$USER/virtual-envs/scienv/bin/activate"
 
 mkdir -p "$INT_DIR" "$PASS3_DIR" "$PREP_DIR" "$WORKING_DIR" "$FINAL_DIR"
 export LAKE_DELINEATION_ROOT="$DATA_DIR"
-export PYTHONPATH="${CODE_DIR}${PYTHONPATH:+:$PYTHONPATH}"
+# Drop inherited PYTHONPATH so an old pipeline_paths elsewhere cannot win.
+unset PYTHONPATH
+export PYTHONPATH="$CODE_DIR"
 cd "$DATA_DIR" || exit 1
 
 if [[ ! -f "${CODE_DIR}/pipeline_paths.py" ]]; then
@@ -218,6 +220,23 @@ if [[ ! -f "${CODE_DIR}/pipeline_paths.py" ]]; then
     echo "  Expected layout: ${DATA_DIR}/code/pipeline_paths.py"
     exit 1
 fi
+
+# Avoid stale bytecode from an older pipeline_paths.py (common on NFS).
+rm -rf "${CODE_DIR}/__pycache__"
+
+echo "SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-<unset>}"
+echo "DATA_DIR=${DATA_DIR}"
+echo "CODE_DIR=${CODE_DIR}"
+echo "INPUT lines on disk:"
+grep -n '^INPUT_' "${CODE_DIR}/pipeline_paths.py" || true
+python3 -c "
+import pipeline_paths as pp
+print('pipeline_paths loaded from:', pp.__file__)
+print('PROJECT_ROOT:', pp.PROJECT_ROOT)
+print('INPUT_DEM:', pp.INPUT_DEM)
+print('INPUT_HYDAT_DB:', pp.INPUT_HYDAT_DB)
+print('INPUT_HYDROLAKES:', pp.INPUT_HYDROLAKES)
+"
 
 DEM="$(python3 -c "from pipeline_paths import INPUT_DEM; print(INPUT_DEM)" 2>&1)" || {
     echo "ERROR: failed to load INPUT_DEM from pipeline_paths.py"

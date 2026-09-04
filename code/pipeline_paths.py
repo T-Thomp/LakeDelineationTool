@@ -36,11 +36,20 @@ PROJECT_ROOT = Path(
     os.environ.get("LAKE_DELINEATION_ROOT", ".")
 ).expanduser().resolve()
 
-INPUT_DEM = PROJECT_ROOT / "dem/Sask-mrdem-30-dtm.tif"
-INPUT_HYDAT_DB = PROJECT_ROOT / "Hydat.sqlite3"
-INPUT_HYDROLAKES = Path(
+
+def _study_path(relative_or_absolute: str | Path) -> Path:
+    """Resolve user inputs to absolute paths (follows symlinks)."""
+    path = Path(relative_or_absolute).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
+
+
+INPUT_DEM = _study_path("dem/Sask-mrdem-30-dtm.tif")
+INPUT_HYDAT_DB = _study_path("Hydat.sqlite3")
+INPUT_HYDROLAKES = _study_path(
     "~/bow-bassano/delineation-product/hydrolakes/HydroLAKES_polys_v10.shp"
-).expanduser()
+)
 
 OUTPUT_ROOT = PROJECT_ROOT / "outputs"
 INTERIM = OUTPUT_ROOT / "interim"
