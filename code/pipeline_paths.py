@@ -16,22 +16,19 @@ outputs/
   final/                Deliverables: basins, basins_aggregated, pour_points
                           (+ paired stream shapefiles)
 
-Edit USER INPUTS at the top of this file when changing study area:
-  PROJECT_ROOT (or set env LAKE_DELINEATION_ROOT in slurm)
+Edit study_settings.py at your study root when changing study area:
   INPUT_DEM, INPUT_HYDAT_DB, INPUT_HYDROLAKES
+  (copy from study_settings.example.py)
 """
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 from pathlib import Path
 
-# =============================================================================
-# USER INPUTS — edit these when adapting to a new study area
-# =============================================================================
-# Study data directory: DEM, outputs/, Hydat.sqlite3, etc.
-# Slurm sets LAKE_DELINEATION_ROOT to the folder containing Delineation-Workflow.slurm.
+# Study root: folder where you run sbatch (set by Delineation-Workflow.slurm).
 PROJECT_ROOT = Path(
     os.environ.get("LAKE_DELINEATION_ROOT", ".")
 ).expanduser().resolve()
@@ -45,11 +42,36 @@ def _study_path(relative_or_absolute: str | Path) -> Path:
     return path.resolve()
 
 
-INPUT_DEM = _study_path("dem/Sask-mrdem-30-dtm.tif")
-INPUT_HYDAT_DB = _study_path("Hydat.sqlite3")
-INPUT_HYDROLAKES = _study_path(
-    "~/bow-bassano/delineation-product/hydrolakes/HydroLAKES_polys_v10.shp"
-)
+def _load_study_settings():
+    settings_path = PROJECT_ROOT / "study_settings.py"
+    if not settings_path.is_file():
+        example = PROJECT_ROOT / "study_settings.example.py"
+        raise FileNotFoundError(
+            f"Missing {settings_path}. "
+            f"Copy {example} to study_settings.py and set INPUT_DEM, "
+            "INPUT_HYDAT_DB, and INPUT_HYDROLAKES."
+        )
+
+    spec = importlib.util.spec_from_file_location("study_settings", settings_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load {settings_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    missing = [name for name in ("INPUT_DEM", "INPUT_HYDAT_DB", "INPUT_HYDROLAKES") if not hasattr(module, name)]
+    if missing:
+        raise AttributeError(
+            f"{settings_path} must define: {', '.join(missing)}"
+        )
+    return module
+
+
+_settings = _load_study_settings()
+
+INPUT_DEM = _study_path(_settings.INPUT_DEM)
+INPUT_HYDAT_DB = _study_path(_settings.INPUT_HYDAT_DB)
+INPUT_HYDROLAKES = _study_path(_settings.INPUT_HYDROLAKES)
 
 OUTPUT_ROOT = PROJECT_ROOT / "outputs"
 INTERIM = OUTPUT_ROOT / "interim"

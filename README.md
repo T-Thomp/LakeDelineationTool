@@ -169,16 +169,15 @@ Final Products
 Place `Delineation-Workflow.slurm` at your study root. Python scripts live in `code/`; data paths resolve against the slurm script's directory (`LAKE_DELINEATION_ROOT`).
 
 ```text
-study-root/                          ← DATA_DIR (auto-detected from slurm location)
+study-root/                          ← where you run sbatch
 │
 ├── Delineation-Workflow.slurm
-├── outlet_overrides.csv             optional manual lake outlets
-├── requirements.txt
+├── study_settings.py                ← your paths (copy from study_settings.example.py)
+├── study_settings.example.py
+├── outlet_overrides.csv             optional
 │
-├── code/                            ← CODE_DIR
-│   ├── pipeline_paths.py            edit USER INPUTS here
-│   ├── filterLakes.py
-│   ├── hy_features/
+├── code/                            ← pipeline scripts (do not edit for new studies)
+│   ├── pipeline_paths.py
 │   └── …
 │
 ├── dem/
@@ -193,7 +192,7 @@ study-root/                          ← DATA_DIR (auto-detected from slurm loca
     └── final/               Deliverables: basins, basins_aggregated, pour_points
 ```
 
-See `code/pipeline_paths.py` for the canonical path constants used by all scripts.
+See `study_settings.py` for inputs and `code/pipeline_paths.py` for output layout constants.
 
 ```
 
@@ -372,17 +371,36 @@ Before adapting the workflow to another watershed, verify the following settings
 
 ---
 
-## `code/pipeline_paths.py` (USER INPUTS at top of file)
+## `study_settings.py` (one file to edit per study)
 
-Edit these first when switching study areas:
+```bash
+cp study_settings.example.py study_settings.py
+```
 
-- `INPUT_DEM` — elevation GeoTIFF (under `dem/` at study root)
-- `INPUT_HYDAT_DB` — HYDAT SQLite database (study root by default)
-- `INPUT_HYDROLAKES` — global HydroLAKES polygon shapefile
+Set these three paths (relative to study root or absolute):
 
-Slurm sets `LAKE_DELINEATION_ROOT` to the folder containing `Delineation-Workflow.slurm`, so relative paths resolve against your data directory while scripts run from `code/`.
+- `INPUT_DEM` — elevation GeoTIFF
+- `INPUT_HYDAT_DB` — HYDAT SQLite database
+- `INPUT_HYDROLAKES` — HydroLAKES polygon shapefile
 
-All other scripts and the slurm job read these automatically.
+Example for data in another project folder:
+
+```python
+from pathlib import Path
+
+INPUT_DEM = Path("/project/6102189/m58song/ABLakeDelineation/dem/AB2_mrdem-30-dtm.tif")
+INPUT_HYDAT_DB = Path("/project/6102189/m58song/ABLakeDelineation/Hydat.sqlite3")
+INPUT_HYDROLAKES = Path("/project/6102189/m58song/ABLakeDelineation/hydrolake/HydroLAKES_polys_v10.shp")
+```
+
+Test before submitting:
+
+```bash
+export LAKE_DELINEATION_ROOT="$PWD"
+python3 code/validate_study.py
+```
+
+All pipeline scripts read these via `code/pipeline_paths.py` automatically.
 
 ---
 

@@ -52,10 +52,10 @@
 # Work top-to-bottom. Slurm cd's to DATA_DIR; Python runs from CODE_DIR.
 # Relative paths in pipeline_paths.py resolve against DATA_DIR (LAKE_DELINEATION_ROOT).
 #
-# [ ] code/pipeline_paths.py  (edit USER INPUTS at top of file)
-#       INPUT_DEM          -- study elevation GeoTIFF (under DATA_DIR/dem/)
+# [ ] study_settings.py  (copy from study_settings.example.py; edit at study root)
+#       INPUT_DEM          -- elevation GeoTIFF
 #       INPUT_HYDAT_DB     -- HYDAT SQLite database
-#       INPUT_HYDROLAKES   -- global HydroLAKES polygon shapefile
+#       INPUT_HYDROLAKES   -- HydroLAKES polygon shapefile
 #
 # [ ] Delineation-Workflow.slurm  (this file)
 #       module restore scimods  -- GDAL + mpi4py (see SOFTWARE REQUIREMENTS)
@@ -110,9 +110,9 @@
 #       column-name globals if your attribute table differs from TauDEM
 #
 # [ ] External / one-time inputs to stage before running
-#       INPUT_DEM path     -- in pipeline_paths.py (default under dem/)
-#       INPUT_HYDROLAKES   -- in pipeline_paths.py
-#       INPUT_HYDAT_DB     -- in pipeline_paths.py
+#       INPUT_DEM path     -- in study_settings.py
+#       INPUT_HYDROLAKES   -- in study_settings.py
+#       INPUT_HYDAT_DB     -- in study_settings.py
 #       outlet_overrides.csv -- optional manual lake-outlet overrides
 #
 # SOFTWARE REQUIREMENTS (modules + Python venv)
@@ -210,50 +210,16 @@ VENV="/home/$USER/virtual-envs/scienv/bin/activate"
 
 mkdir -p "$INT_DIR" "$PASS3_DIR" "$PREP_DIR" "$WORKING_DIR" "$FINAL_DIR"
 export LAKE_DELINEATION_ROOT="$DATA_DIR"
-# Drop inherited PYTHONPATH so an old pipeline_paths elsewhere cannot win.
-unset PYTHONPATH
-export PYTHONPATH="$CODE_DIR"
 cd "$DATA_DIR" || exit 1
 
-if [[ ! -f "${CODE_DIR}/pipeline_paths.py" ]]; then
-    echo "ERROR: pipeline_paths.py not found in CODE_DIR=${CODE_DIR}"
-    echo "  Expected layout: ${DATA_DIR}/code/pipeline_paths.py"
+if [[ ! -f "${DATA_DIR}/study_settings.py" ]]; then
+    echo "ERROR: ${DATA_DIR}/study_settings.py not found"
+    echo "  cp study_settings.example.py study_settings.py"
+    echo "  Edit INPUT_DEM, INPUT_HYDAT_DB, and INPUT_HYDROLAKES, then re-submit."
     exit 1
 fi
 
-# Avoid stale bytecode from an older pipeline_paths.py (common on NFS).
-rm -rf "${CODE_DIR}/__pycache__"
-
-echo "SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-<unset>}"
-echo "DATA_DIR=${DATA_DIR}"
-echo "CODE_DIR=${CODE_DIR}"
-echo "INPUT lines on disk:"
-grep -n '^INPUT_' "${CODE_DIR}/pipeline_paths.py" || true
-python3 -c "
-import pipeline_paths as pp
-print('pipeline_paths loaded from:', pp.__file__)
-print('PROJECT_ROOT:', pp.PROJECT_ROOT)
-print('INPUT_DEM:', pp.INPUT_DEM)
-print('INPUT_HYDAT_DB:', pp.INPUT_HYDAT_DB)
-print('INPUT_HYDROLAKES:', pp.INPUT_HYDROLAKES)
-"
-
-DEM="$(python3 -c "from pipeline_paths import INPUT_DEM; print(INPUT_DEM)" 2>&1)" || {
-    echo "ERROR: failed to load INPUT_DEM from pipeline_paths.py"
-    echo "$DEM"
-    exit 1
-}
-python3 -c "from pipeline_paths import ensure_output_dirs; ensure_output_dirs()" || exit 1
-FDR_RASTER="$(python3 -c "from pipeline_paths import FDR_CENTERLINE; print(FDR_CENTERLINE)" 2>&1)" || {
-    echo "ERROR: failed to load FDR_CENTERLINE from pipeline_paths.py"
-    echo "$FDR_RASTER"
-    exit 1
-}
-if [[ ! -f "$DEM" ]]; then
-    echo "ERROR: DEM not found: $DEM"
-    echo "  Edit INPUT_DEM in ${CODE_DIR}/pipeline_paths.py or stage dem/ under DATA_DIR"
-    exit 1
-fi
+eval "$(python3 "$CODE_DIR/validate_study.py" --shell)" || exit 1
 echo "Using DEM: $DEM"
 
 # Modules first, then venv (mpi4py module must be loaded before activate on FIR).
