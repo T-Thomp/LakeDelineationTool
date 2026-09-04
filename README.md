@@ -395,7 +395,12 @@ Update:
 - `STREAM_THRESHOLD`
 - `FLOWPATH_NCORES`
 
-`DATA_DIR` and `CODE_DIR` are set automatically from the slurm script location (`./` and `./code/`). No manual path edits needed if you use the layout above.
+`DATA_DIR` and `CODE_DIR` are set from `SLURM_SUBMIT_DIR` (the folder where you run `sbatch`), not from Slurm’s internal job spool copy. Submit from your study root:
+
+```bash
+cd /path/to/your/study-root
+sbatch Delineation-Workflow.slurm
+```
 
 Ensure `module restore scimods` matches your cluster setup (FIR: **GDAL 3.9.1** + **mpi4py 4.0.0** modules) and that compiled TauDEM is on `PATH`.
 

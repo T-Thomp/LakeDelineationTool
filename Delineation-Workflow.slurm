@@ -44,7 +44,7 @@
 #
 # KEY DIRECTORIES (auto-detected from this script's location)
 # ------------------------------------------------------------
-#   DATA_DIR                     -- folder containing this .slurm file (dem/, outputs/, …)
+#   DATA_DIR                     -- SLURM_SUBMIT_DIR (where you ran sbatch; dem/, outputs/, …)
 #   CODE_DIR                     -- DATA_DIR/code/ (Python scripts + pipeline_paths.py)
 #
 # SETUP CHECKLIST (paths & knobs to edit when adapting this workflow)
@@ -169,10 +169,14 @@ module restore scimods
 
 # export PATH="$HOME/taudem-build/taudem:$PATH"   # Set taudem:PATH here or set it in .bashrc file
 
-# Project root = directory containing this slurm script; code/ holds Python scripts.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="$SCRIPT_DIR"
-CODE_DIR="$SCRIPT_DIR/code"
+# Project root = directory where you ran sbatch (not the read-only job spool copy).
+# Slurm sets SLURM_SUBMIT_DIR; fall back to script location for local/interactive runs.
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    DATA_DIR="$SLURM_SUBMIT_DIR"
+else
+    DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+CODE_DIR="$DATA_DIR/code"
 
 OUTPUT_ROOT="$DATA_DIR/outputs"
 INT_DIR="$OUTPUT_ROOT/interim/taudem_d8"       # Pass 1 & 2 TauDEM rasters/shapefiles
