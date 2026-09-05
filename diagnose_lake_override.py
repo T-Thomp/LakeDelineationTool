@@ -2,7 +2,7 @@
 """
 Temporary diagnostic for lake override windows and FDR burn paths.
 
-Writes a shapefile you can open in QGIS (window bbox, lake, override, outlet,
+Writes a GeoPackage you can open in QGIS (window bbox, lake, override, outlet,
 breakout carve path, and all FDR edit flow segments in the window).
 
 Delete this file when you are done debugging.
@@ -11,7 +11,7 @@ Usage (from study root):
   export LAKE_DELINEATION_ROOT="$PWD"
   python3 diagnose_lake_override.py --lake-id 98207
   python3 diagnose_lake_override.py --all-overrides
-  python3 diagnose_lake_override.py --lake-id 98207 --output outputs/prep/lake_98207_debug.shp
+  python3 diagnose_lake_override.py --lake-id 98207 --output outputs/prep/lake_98207_debug.gpkg
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from shapely.geometry import LineString, Point, Polygon
 
 STUDY_ROOT = Path(os.environ.get("LAKE_DELINEATION_ROOT", ".")).resolve()
 OVERRIDES_CSV = STUDY_ROOT / "outlet_overrides.csv"
-DEFAULT_OUTPUT = STUDY_ROOT / "outputs/prep/lake_override_diagnostic.shp"
+DEFAULT_OUTPUT = STUDY_ROOT / "outputs/prep/lake_override_diagnostic.gpkg"
 
 CODE_DIR = Path(__file__).resolve().parent / "code"
 sys.path.insert(0, str(CODE_DIR) if CODE_DIR.is_dir() else str(Path(__file__).resolve().parent))
@@ -233,6 +233,43 @@ def _process_lake_for_export(
     return features
 
 
+def _write_diagnostic_output(gdf: gpd.GeoDataFrame, output_path: Path) -> None:
+    """Write mixed geometry types (shapefile needs split files; GPKG uses layers)."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = output_path.suffix.lower()
+
+    if suffix == ".shp":
+        base = output_path.with_suffix("")
+        layer_map = {
+            "Point": "points",
+            "LineString": "lines",
+            "Polygon": "polygons",
+            "MultiLineString": "lines",
+            "MultiPolygon": "polygons",
+        }
+        for geom_type, subset in gdf.groupby(gdf.geometry.geom_type):
+            layer_name = layer_map.get(geom_type, geom_type.lower())
+            path = Path(f"{base}_{layer_name}.shp")
+            subset.to_file(path)
+            print(f"Wrote {len(subset)} {geom_type} feature(s) -> {path}")
+        return
+
+    if output_path.exists():
+        output_path.unlink()
+
+    layer_map = {
+        "Point": "points",
+        "LineString": "lines",
+        "Polygon": "polygons",
+        "MultiLineString": "lines",
+        "MultiPolygon": "polygons",
+    }
+    for geom_type, subset in gdf.groupby(gdf.geometry.geom_type):
+        layer = layer_map.get(geom_type, geom_type.lower())
+        subset.to_file(output_path, layer=layer, driver="GPKG")
+        print(f"Wrote {len(subset)} feature(s) to layer '{layer}' in {output_path}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lake-id", action="append", help="Hylak_id (repeatable)")
@@ -313,10 +350,8 @@ def main() -> int:
         return 1
 
     gdf = gpd.GeoDataFrame(all_features, crs=lakes.crs)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    gdf.to_file(args.output)
-    print(f"Wrote {len(gdf)} features -> {args.output}")
-    print("Layers (feat_type): window, lake, override_pt, outlet_pt, breakout_path, fdr_burn")
+    _write_diagnostic_output(gdf, args.output)
+    print("feat_type values: window, lake, override_pt, outlet_pt, breakout_path, fdr_burn")
     print("Delete diagnose_lake_override.py when finished.")
     return 0
 
