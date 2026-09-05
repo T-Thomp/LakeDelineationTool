@@ -219,8 +219,9 @@ if [[ ! -f "${DATA_DIR}/study_settings.py" ]]; then
     exit 1
 fi
 
-eval "$(python3 "$CODE_DIR/validate_study.py" --shell)" || exit 1
-echo "Using DEM: $DEM"
+python3 "$CODE_DIR/validate_study.py" || exit 1
+DEM="$(python3 "$CODE_DIR/validate_study.py" --query dem)"
+FDR_RASTER="$(python3 "$CODE_DIR/validate_study.py" --query fdr)"
 
 # Modules first, then venv (mpi4py module must be loaded before activate on FIR).
 # numpy/scipy/geopandas come from the venv only — not from module load.

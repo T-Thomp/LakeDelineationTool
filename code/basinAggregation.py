@@ -415,8 +415,16 @@ def basin_aggregation(
     basin, river, id_col, down_col, riv_id_col, outlet_value
   )
   no_subbasin = len(basin)
+  max_merge_iters = max(len(basin) * 2, 1000)
+  merge_iter = 0
 
   while True:
+    merge_iter += 1
+    if merge_iter > max_merge_iters:
+      raise RuntimeError(
+        f"Basin merge loop did not converge after {max_merge_iters} iterations. "
+        "Check for topology issues in basins/streams (cycles or bad DSLINKNO)."
+      )
     headwaters = (
       ~agg_basin["agg"].isin(agg_basin["aggdown"])
       & (agg_basin["_unitarea"] < min_sub_area)
@@ -501,8 +509,14 @@ def basin_aggregation(
   agg_river["mask"] = 0
   for agg_id in agg_river["agg"].dropna().unique():
     xx = agg_river.index[agg_river["agg"] == agg_id].tolist()
+    visited_links: set[int] = set()
     while True:
       yy = agg_river.loc[xx, "_uparea"].idxmax()
+      link_id = int(agg_river.loc[yy, riv_id_col])
+      if link_id in visited_links:
+        # Cyclic DSLINKNO chain — stop tracing this aggregate.
+        break
+      visited_links.add(link_id)
       agg_river.at[yy, "mask"] = 1
       downstream = agg_river.index[
         agg_river[down_col] == agg_river.loc[yy, riv_id_col]
