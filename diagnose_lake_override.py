@@ -205,13 +205,13 @@ def _process_lake_for_export(
             updated_fdr[cr, cc] = get_d8_direction(current_node, parent_node)
         breakout = _breakout_line(breakout_path, gt, xoff, yoff)
         if breakout is not None:
-        features.append({
-            "lake_id": lake_id,
-            "feat_type": "breakout_path",
-            "sel_type": sel_type,
-            "carve_ok": carve_ok,
-            "geometry": breakout,
-        })
+            features.append({
+                "lake_id": lake_id,
+                "feat_type": "breakout_path",
+                "sel_type": sel_type,
+                "carve_ok": carve_ok,
+                "geometry": breakout,
+            })
 
     edit_mask = updated_fdr.astype(np.int32) != np.asarray(fdr_win, dtype=np.int32)
     for seg in _fdr_edit_lines(edit_mask, updated_fdr, gt, xoff, yoff):
