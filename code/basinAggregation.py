@@ -22,6 +22,7 @@ from pipeline_paths import (
     FINAL_BASINS_AGG,
     FINAL_STREAMS,
     FINAL_STREAMS_AGG,
+    WORKING,
     ensure_output_dirs,
 )
 
@@ -355,6 +356,107 @@ def prepare_input_tables(
   return basin, river
 
 
+TOPOLOGY_CYCLES_SHP = WORKING / "aggregation_topology_cycles.shp"
+
+
+def _warn_river_cycle(
+    agg_id,
+    cycle_links: list[int],
+    agg_river: gpd.GeoDataFrame,
+    down_col: str,
+    riv_id_col: str,
+) -> list[dict]:
+    """
+    Print a GIS-friendly warning for a cyclic DSLINKNO walk and return shapefile rows.
+
+    Each output row is one stream link in the cycle (use LINKNO / aggregate_id to
+    select in QGIS alongside outputs/final/streams.shp).
+    """
+    cycle_key = " -> ".join(str(link) for link in cycle_links)
+    print("WARNING: cyclic DSLINKNO chain during river main-stem trace")
+    print(f"  aggregate_id (agg): {agg_id}")
+    print(f"  LINKNO cycle: {cycle_key}")
+    print("  Links (select by LINKNO in streams.shp):")
+    features: list[dict] = []
+    for link_no in cycle_links[:-1]:
+        rows = agg_river[agg_river[riv_id_col].astype(int) == int(link_no)]
+        if rows.empty:
+            print(f"    LINKNO {link_no}: (not found in river layer)")
+            continue
+        row = rows.iloc[0]
+        ds_link = int(row[down_col]) if pd.notna(row[down_col]) else OUTLET_VALUE
+        geom = row.geometry
+        if geom is not None and not geom.is_empty:
+            mid = geom.interpolate(0.5, normalized=True)
+            print(
+                f"    LINKNO {link_no} -> DSLINKNO {ds_link}  "
+                f"midpoint ({mid.x:.2f}, {mid.y:.2f})"
+            )
+        else:
+            print(f"    LINKNO {link_no} -> DSLINKNO {ds_link}")
+        features.append({
+            "aggregate_id": int(agg_id) if pd.notna(agg_id) else -1,
+            "link_no": int(link_no),
+            "ds_link_no": ds_link,
+            "cycle_links": cycle_key,
+            "geometry": geom,
+        })
+    print(f"  Cycle links also written to: {TOPOLOGY_CYCLES_SHP}")
+    return features
+
+
+def _mark_river_main_stems(
+    agg_river: gpd.GeoDataFrame,
+    down_col: str,
+    riv_id_col: str,
+) -> tuple[gpd.GeoDataFrame, list[dict]]:
+    """Pick highest-uparea main stem per aggregate; stop and warn on DSLINKNO cycles."""
+    agg_river = agg_river.copy()
+    agg_river["mask"] = 0
+    cycle_features: list[dict] = []
+    reported_cycles: set[tuple[int, ...]] = set()
+
+    for agg_id in agg_river["agg"].dropna().unique():
+        xx = agg_river.index[agg_river["agg"] == agg_id].tolist()
+        visited_order: list[int] = []
+        visited_set: set[int] = set()
+
+        while xx:
+            yy = agg_river.loc[xx, "_uparea"].idxmax()
+            link_id = int(agg_river.loc[yy, riv_id_col])
+            if link_id in visited_set:
+                cycle_start = visited_order.index(link_id)
+                cycle_links = visited_order[cycle_start:] + [link_id]
+                cycle_tuple = tuple(cycle_links)
+                if cycle_tuple not in reported_cycles:
+                    reported_cycles.add(cycle_tuple)
+                    cycle_features.extend(
+                        _warn_river_cycle(
+                            agg_id, cycle_links, agg_river, down_col, riv_id_col
+                        )
+                    )
+                break
+            visited_set.add(link_id)
+            visited_order.append(link_id)
+            agg_river.at[yy, "mask"] = 1
+            downstream = agg_river.index[
+                agg_river[down_col] == agg_river.loc[yy, riv_id_col]
+            ].tolist()
+            if not downstream:
+                break
+            xx = downstream
+
+    return agg_river, cycle_features
+
+
+def _export_topology_cycles(cycle_features: list[dict], crs) -> None:
+    if not cycle_features:
+        return
+    TOPOLOGY_CYCLES_SHP.parent.mkdir(parents=True, exist_ok=True)
+    gpd.GeoDataFrame(cycle_features, crs=crs).to_file(TOPOLOGY_CYCLES_SHP)
+    print(f"Wrote {len(cycle_features)} cycle link feature(s) to {TOPOLOGY_CYCLES_SHP}")
+
+
 # ==============================================================================
 # CORE AGGREGATION (logic preserved from 01-pre-process-geospatial-fabric.ipynb)
 # ==============================================================================
@@ -423,7 +525,9 @@ def basin_aggregation(
     if merge_iter > max_merge_iters:
       raise RuntimeError(
         f"Basin merge loop did not converge after {max_merge_iters} iterations. "
-        "Check for topology issues in basins/streams (cycles or bad DSLINKNO)."
+        "Small subbasins may be oscillating without merging. "
+        "Check DSLINKNO / LINKNO topology in outputs/final/streams.shp "
+        f"(and {TOPOLOGY_CYCLES_SHP} if river cycles were detected)."
       )
     headwaters = (
       ~agg_basin["agg"].isin(agg_basin["aggdown"])
@@ -507,23 +611,8 @@ def basin_aggregation(
       how="left",
     )
   agg_river["mask"] = 0
-  for agg_id in agg_river["agg"].dropna().unique():
-    xx = agg_river.index[agg_river["agg"] == agg_id].tolist()
-    visited_links: set[int] = set()
-    while True:
-      yy = agg_river.loc[xx, "_uparea"].idxmax()
-      link_id = int(agg_river.loc[yy, riv_id_col])
-      if link_id in visited_links:
-        # Cyclic DSLINKNO chain — stop tracing this aggregate.
-        break
-      visited_links.add(link_id)
-      agg_river.at[yy, "mask"] = 1
-      downstream = agg_river.index[
-        agg_river[down_col] == agg_river.loc[yy, riv_id_col]
-      ].tolist()
-      if len(downstream) < 1:
-        break
-      xx = downstream
+  agg_river, cycle_features = _mark_river_main_stems(agg_river, down_col, riv_id_col)
+  _export_topology_cycles(cycle_features, agg_river.crs)
 
   agg_river = agg_river[agg_river["mask"] == 1].copy()
   agg_river["_slope_weighted"] = agg_river[SLOPE] * agg_river["_lengthkm"]
