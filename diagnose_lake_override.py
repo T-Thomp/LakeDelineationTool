@@ -46,7 +46,7 @@ from pipeline_paths import (  # noqa: E402
 from rasterFlowpathEdit import (  # noqa: E402
     D8_OFFSETS,
     _lookup_tables_from_streams_gdf,
-    build_lake_through_stream_wsnos,
+    build_lake_through_stream_linknos,
     filter_upstream_duplicates,
     find_stream_exit_candidates,
     get_d8_direction,
@@ -118,7 +118,7 @@ def _process_lake_for_export(
     lookup_tables,
     gauges,
     overrides_gdf,
-    lake_through_wsnos,
+    lake_through_linknos,
 ) -> list[dict]:
     """Run one lake through outlet selection + routing; return shapefile feature dicts."""
     wsno_to_link, link_to_dout, link_to_accum, link_to_downstream = lookup_tables
@@ -155,8 +155,9 @@ def _process_lake_for_export(
 
     chosen, sel_type, is_carved, breakout_path = select_outlet_for_lake(
         lake_id, surviving, overrides_gdf, boundary_pixels,
-        lake_mask, w_win, w_band, fdr_win, inv_gt, raster_size, cell_size,
-        lake_through_wsnos,
+        lake_mask, fdr_win, src_win, w_win, acc_win, cell_size,
+        wsno_to_link, link_to_downstream, lake_through_linknos,
+        gt, xoff, yoff,
     )
 
     features: list[dict] = [{
@@ -295,7 +296,7 @@ def main() -> int:
 
     lakes = gpd.read_file(PREP_LAKES)
     streams = gpd.read_file(PASS1_STREAMS)
-    lake_through = build_lake_through_stream_wsnos(lakes, streams)
+    lake_through = build_lake_through_stream_linknos(lakes, streams)
     overrides = load_overrides(str(OVERRIDES_CSV), lakes.crs)
     lookup = _lookup_tables_from_streams_gdf(streams)
 
@@ -342,7 +343,7 @@ def main() -> int:
             lookup_tables=lookup,
             gauges=gauges,
             overrides_gdf=overrides,
-            lake_through_wsnos=lake_through,
+            lake_through_linknos=lake_through,
         ))
 
     if not all_features:
