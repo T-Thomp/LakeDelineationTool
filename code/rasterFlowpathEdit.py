@@ -277,22 +277,38 @@ def is_acceptable_outflow_link(
     link_to_downstream,
     acc_win,
     ref_accum,
+    ref_link=-1,
 ):
     """
     True when the traced stream link is an acceptable override outflow.
 
-    Uses the vector graph to reject inflow branches. When the hit link is one of
-    the lake-intersecting links, compares local_accum at the hit cell against the
-    reference accum near the override (same rule as filter_upstream_duplicates).
+    When ref_link is known (from a stream exit near the override), anchor checks
+    on that link: reject inflow-side hits, accept same-link hits with sufficient
+    local_accum, accept downstream hits on the vector graph.
+
+    Without ref_link, fall back to rejecting links upstream of any lake-intersecting
+    link and comparing local_accum on shared through-lake stems.
     """
     if link_no <= 0 or hit_rc is None:
+        return False
+
+    hit_accum = float(acc_win[hit_rc[0], hit_rc[1]])
+
+    if ref_link > 0:
+        if is_link_upstream_of(link_no, ref_link, link_to_downstream):
+            return False
+        if link_no == ref_link:
+            if ref_accum <= 0:
+                return True
+            return hit_accum >= ref_accum
+        if is_link_upstream_of(ref_link, link_no, link_to_downstream):
+            return True
         return False
 
     if link_no in through_linknos:
         if ref_accum <= 0:
             return False
-        hit_accum = float(acc_win[hit_rc[0], hit_rc[1]])
-        return hit_accum > ref_accum
+        return hit_accum >= ref_accum
 
     if not through_linknos:
         return True
@@ -316,6 +332,7 @@ def compute_override_breakout_path(
     link_to_downstream,
     lake_through_linknos,
     ref_accum,
+    ref_link=-1,
     max_steps=OVERRIDE_BREAKOUT_STEPS,
     max_trace_steps=MAX_BREAKOUT_TRACE_STEPS,
 ):
@@ -369,6 +386,10 @@ def compute_override_breakout_path(
             max_trace_steps,
         )
         if hit_link is None:
+            # Flow no longer re-enters the lake but the tip is still off-network;
+            # accept when anchored to a nearby stream exit (same as legacy short breakout).
+            if ref_link > 0:
+                return breakout_path, True, ref_link
             continue
 
         if is_acceptable_outflow_link(
@@ -378,6 +399,7 @@ def compute_override_breakout_path(
             link_to_downstream,
             acc_win,
             ref_accum,
+            ref_link,
         ):
             return breakout_path, True, hit_link
 
@@ -413,6 +435,41 @@ def reference_accum_near_point(acc_win, src_win, point, gt, xoff, yoff):
     if best_rc is None:
         return -1.0
     return float(acc_win[best_rc[0], best_rc[1]])
+
+
+def reference_outflow_for_override(
+    override_pt,
+    surviving_candidates,
+    acc_win,
+    src_win,
+    gt,
+    xoff,
+    yoff,
+    cell_size,
+):
+    """
+    Reference link/accum for override validation.
+
+    Prefer cleaned stream exits near the override (same data as override_snapped).
+    Fall back to the nearest stream cell in the lake window.
+    """
+    snap_threshold = cell_size * 3.0
+    nearby = sorted(
+        (
+            c for c in surviving_candidates
+            if c['point'].distance(override_pt) <= snap_threshold
+        ),
+        key=lambda c: c['point'].distance(override_pt),
+    )
+    if nearby:
+        best = nearby[0]
+        return float(best['local_accum']), int(best['link_no'])
+
+    if surviving_candidates:
+        best = min(surviving_candidates, key=lambda c: c['point'].distance(override_pt))
+        return float(best['local_accum']), int(best['link_no'])
+
+    return reference_accum_near_point(acc_win, src_win, override_pt, gt, xoff, yoff), -1
 
 
 def raster_window_from_bounds(geom_bounds, inv_gt, raster_size):
@@ -754,8 +811,15 @@ def select_outlet_for_lake(
             return None, "skipped_no_boundary", False, []
 
         through_linknos = lake_through_linknos.get(lake_id, set())
-        ref_accum = reference_accum_near_point(
-            acc_win, src_win, override_pt, gt, xoff, yoff,
+        ref_accum, ref_link = reference_outflow_for_override(
+            override_pt,
+            surviving_candidates,
+            acc_win,
+            src_win,
+            gt,
+            xoff,
+            yoff,
+            cell_size,
         )
         closest = min(boundary_pixels, key=lambda item: item['point'].distance(override_pt))
         chosen = {
@@ -775,6 +839,7 @@ def select_outlet_for_lake(
             link_to_downstream,
             through_linknos,
             ref_accum,
+            ref_link,
         )
         if succeeded:
             chosen['link_no'] = hit_link
