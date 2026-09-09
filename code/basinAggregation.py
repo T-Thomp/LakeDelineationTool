@@ -11,7 +11,8 @@ Expected inputs (defaults match cleanGeofabric.py outputs):
 from __future__ import annotations
 
 import os
-from typing import Optional
+from collections import defaultdict
+from typing import Any, Hashable, Optional
 
 import geopandas as gpd
 import numpy as np
@@ -153,6 +154,15 @@ def _is_outlet_id(down_id: object, outlet_value: int) -> bool:
   except (TypeError, ValueError):
     return True
   return down == int(outlet_value) or down <= 0
+
+
+def _is_sentinel_object_id(obj_id: object, outlet_value: int) -> bool:
+  """True if obj_id cannot be a basin/reach identifier (sentinel or negative)."""
+  try:
+    val = int(obj_id)
+  except (TypeError, ValueError):
+    return True
+  return val == int(outlet_value) or val < 0
 
 
 def _remap_aggdown_to_survivors(
@@ -458,6 +468,130 @@ def _export_topology_cycles(cycle_features: list[dict], crs) -> None:
 
 
 # ==============================================================================
+# INDEXED LOOKUPS — same writes as basin.loc[basin[col] == key]
+# ==============================================================================
+def _index_labels_by_value(series: pd.Series) -> dict[Any, list[Hashable]]:
+  out: dict[Any, list[Hashable]] = defaultdict(list)
+  for lab, val in series.items():
+    out[val].append(lab)
+  return out
+
+
+def _index_first_label(series: pd.Series) -> dict[Any, Hashable]:
+  out: dict[Any, Hashable] = {}
+  for lab, val in series.items():
+    if val not in out:
+      out[val] = lab
+  return out
+
+
+def _reassign_aggdown(
+  basin: gpd.GeoDataFrame,
+  aggdown_index: dict[Any, list[Hashable]],
+  labels: list[Hashable],
+  new_val: object,
+) -> None:
+  if not labels:
+    return
+  old_vals = basin.loc[labels, "aggdown"]
+  for lab, old in old_vals.items():
+    bucket = aggdown_index.get(old)
+    if not bucket:
+      continue
+    try:
+      bucket.remove(lab)
+    except ValueError:
+      pass
+    if not bucket:
+      del aggdown_index[old]
+  basin.loc[labels, "aggdown"] = new_val
+  aggdown_index[new_val].extend(labels)
+
+
+def absorb_headwater_groups(
+  basin: gpd.GeoDataFrame,
+  xx_df: pd.DataFrame,
+  outlet_value: int = OUTLET_VALUE,
+) -> gpd.GeoDataFrame:
+  """Same as: loc[agg==aggold, aggdown]=...; loc[agg==aggold, agg]=..."""
+  agg_index = _index_labels_by_value(basin["agg"])
+  for i in range(len(xx_df)):
+    aggold = xx_df["aggold"].iloc[i]
+    new_agg = xx_df["agg"].iloc[i]
+    new_aggdown = xx_df["aggdown"].iloc[i]
+    if pd.isna(new_agg) or _is_sentinel_object_id(new_agg, outlet_value):
+      continue
+    labels = agg_index.get(aggold)
+    if not labels:
+      continue
+    labels = list(labels)
+    basin.loc[labels, "aggdown"] = new_aggdown
+    basin.loc[labels, "agg"] = new_agg
+    if aggold != new_agg:
+      agg_index[new_agg].extend(labels)
+      del agg_index[aggold]
+  return basin
+
+
+def absorb_internal_groups(
+  basin: gpd.GeoDataFrame,
+  small_subbasin: pd.DataFrame,
+  id_col: str,
+  down_col: str,
+  min_sub_area: float,
+) -> gpd.GeoDataFrame:
+  """Same statements and read-after-write order as the original internal-merge loop."""
+  id_first = _index_first_label(basin[id_col])
+  down_index = _index_labels_by_value(basin[down_col])
+  agg_index = _index_labels_by_value(basin["agg"])
+  aggdown_index = _index_labels_by_value(basin["aggdown"])
+
+  for i in range(len(small_subbasin)):
+    cand = small_subbasin["agg"].iloc[i]
+    if cand not in id_first:
+      raise IndexError(
+        f"internal merge: no row with {id_col}=={cand!r} (matches original .index[0] failure)"
+      )
+    xx = id_first[cand]
+    xx_agg = basin.at[xx, "agg"]
+    group_xx = agg_index.get(xx_agg, [])
+    group_area = (
+      float(basin.loc[group_xx, "_unitarea"].sort_index().sum()) if group_xx else 0.0
+    )
+    if group_area >= min_sub_area:
+      continue
+
+    xx_id = basin.at[xx, id_col]
+    xy = down_index.get(xx_id)
+    if not xy:
+      continue
+
+    xz = basin.loc[xy, "_uparea"].idxmax()
+    if not (basin.at[xz, "Mask"] < 2):
+      continue
+
+    xz_agg_before = basin.at[xz, "agg"]
+    zz_labels = list(aggdown_index.get(xz_agg_before, ()))
+    xx_aggdown = basin.at[xx, "aggdown"]
+
+    pos1 = list(agg_index.get(xz_agg_before, ()))
+    if pos1:
+      basin.loc[pos1, "agg"] = xx_agg
+      if xz_agg_before != xx_agg:
+        agg_index[xx_agg].extend(pos1)
+        del agg_index[xz_agg_before]
+
+    xz_agg_after = basin.at[xz, "agg"]
+    pos2 = list(agg_index.get(xz_agg_after, ()))
+    _reassign_aggdown(basin, aggdown_index, pos2, xx_aggdown)
+
+    if zz_labels:
+      _reassign_aggdown(basin, aggdown_index, zz_labels, xx_agg)
+
+  return basin
+
+
+# ==============================================================================
 # CORE AGGREGATION (logic preserved from 01-pre-process-geospatial-fabric.ipynb)
 # ==============================================================================
 def basin_aggregation(
@@ -544,9 +678,7 @@ def basin_aggregation(
     if not small_subbasin.empty:
       small_subbasin = small_subbasin.rename(columns={"agg": "aggold", "aggdown": "agg"})
       xx = small_subbasin.merge(agg_basin[["agg", "aggdown"]], on="agg", how="left")
-      for i in range(len(xx)):
-        basin.loc[basin["agg"] == xx["aggold"].iloc[i], "aggdown"] = xx["aggdown"].iloc[i]
-        basin.loc[basin["agg"] == xx["aggold"].iloc[i], "agg"] = xx["agg"].iloc[i]
+      basin = absorb_headwater_groups(basin, xx, outlet_value=outlet_value)
       agg_basin = basin.drop(columns="geometry").groupby(["agg", "aggdown"], as_index=False).agg(
         {"_unitarea": "sum"}
       )
@@ -562,18 +694,13 @@ def basin_aggregation(
     )
     small_subbasin = agg_basin[condition].sort_values(by="_uparea", ascending=False)
     if not small_subbasin.empty:
-      for i in range(len(small_subbasin)):
-        xx = basin[basin[id_col] == small_subbasin["agg"].iloc[i]].index[0]
-        if basin.loc[basin["agg"] == basin.loc[xx, "agg"], "_unitarea"].sum() < min_sub_area:
-          xy = basin[basin[down_col] == basin.loc[xx, id_col]].index
-          if not xy.empty:
-            xz = basin.loc[xy, "_uparea"].idxmax()
-            if basin.loc[xz, "Mask"] < 2:
-              zz = basin[basin["aggdown"] == basin.loc[xz, "agg"]].index
-              basin.loc[basin["agg"] == basin.loc[xz, "agg"], "agg"] = basin.loc[xx, "agg"]
-              basin.loc[basin["agg"] == basin.loc[xz, "agg"], "aggdown"] = basin.loc[xx, "aggdown"]
-              if not zz.empty:
-                basin.loc[zz, "aggdown"] = basin.loc[xx, "agg"]
+      basin = absorb_internal_groups(
+        basin,
+        small_subbasin,
+        id_col=id_col,
+        down_col=down_col,
+        min_sub_area=min_sub_area,
+      )
       agg_basin = basin.drop(columns="geometry").groupby(["agg", "aggdown"], as_index=False).agg(
         {"_unitarea": "sum"}
       )
@@ -585,6 +712,15 @@ def basin_aggregation(
     if len(agg_basin[agg_basin["_unitarea"] < min_sub_area]) == no_subbasin:
       break
     no_subbasin = len(agg_basin[agg_basin["_unitarea"] < min_sub_area])
+
+  sentinel_group = basin["agg"].map(lambda a: _is_sentinel_object_id(a, outlet_value))
+  if sentinel_group.any():
+    n_split = int(sentinel_group.sum())
+    print(
+      f"Warning: {n_split} unit(s) had aggregate id equal to the outlet "
+      f"sentinel; leaving them unaggregated instead of dissolving as one."
+    )
+    basin.loc[sentinel_group, "agg"] = basin.loc[sentinel_group, id_col]
 
   # Lakes / gauges keep their original downstream ids; remap those onto the
   # surviving aggregate that absorbed each missing target.
@@ -610,10 +746,8 @@ def basin_aggregation(
       right_on=id_col,
       how="left",
     )
-  agg_river["mask"] = 0
   agg_river, cycle_features = _mark_river_main_stems(agg_river, down_col, riv_id_col)
   _export_topology_cycles(cycle_features, agg_river.crs)
-
   agg_river = agg_river[agg_river["mask"] == 1].copy()
   agg_river["_slope_weighted"] = agg_river[SLOPE] * agg_river["_lengthkm"]
 
