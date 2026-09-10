@@ -574,9 +574,13 @@ def build_headwater_absorb_table(
     right_on="agg",
     how="left",
   )
-  return merged.rename(
-    columns={"target_agg": "agg", "new_aggdown": "aggdown"}
-  )[["aggold", "agg", "aggdown"]]
+  return pd.DataFrame(
+    {
+      "aggold": merged["aggold"],
+      "agg": merged["target_agg"],
+      "aggdown": merged["new_aggdown"],
+    }
+  )
 
 
 def absorb_headwater_groups(
