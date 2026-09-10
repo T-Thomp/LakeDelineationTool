@@ -508,6 +508,72 @@ def _reassign_aggdown(
   aggdown_index[new_val].extend(labels)
 
 
+def _current_agg_for_basin_id(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  basin_id: object,
+  survivor_ids: set[int] | None = None,
+) -> int | None:
+  """
+  Aggregate id for the basin whose pour-point id is ``basin_id``.
+
+  When that pour point was already absorbed into a downstream group, returns
+  the surviving ``agg`` (not the original link id). Used so headwater merges
+  still attach after an intermediate confluence basin has been absorbed.
+  """
+  try:
+    bid = int(basin_id)
+  except (TypeError, ValueError):
+    return None
+
+  rows = basin.loc[basin[id_col].astype(int) == bid, "agg"]
+  if not rows.empty:
+    return int(rows.iloc[0])
+
+  if survivor_ids is None:
+    survivor_ids = set(basin["agg"].astype(int).unique())
+  id_to_agg = {
+    int(orig): int(agg)
+    for orig, agg in zip(basin[id_col].to_numpy(), basin["agg"].to_numpy())
+  }
+  down = bid
+  seen: set[int] = set()
+  while down not in survivor_ids:
+    if down not in id_to_agg or down in seen:
+      return None
+    seen.add(down)
+    down = id_to_agg[down]
+  return down
+
+
+def build_headwater_absorb_table(
+  small_subbasin: pd.DataFrame,
+  agg_basin: pd.DataFrame,
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+) -> pd.DataFrame:
+  """
+  Rows for ``absorb_headwater_groups``: map each headwater onto the current
+  survivor aggregate of its immediate downstream basin (not a stale agg id).
+  """
+  if small_subbasin.empty:
+    return pd.DataFrame(columns=["aggold", "agg", "aggdown"])
+
+  survivors = set(agg_basin["agg"].astype(int))
+  hw = small_subbasin.rename(columns={"agg": "aggold"}).copy()
+  hw["target_agg"] = [
+    _current_agg_for_basin_id(basin, id_col, down, survivor_ids=survivors)
+    for down in hw["aggdown"].tolist()
+  ]
+  merged = hw.merge(
+    agg_basin[["agg", "aggdown"]],
+    left_on="target_agg",
+    right_on="agg",
+    how="left",
+  )
+  return merged[["aggold", "target_agg", "aggdown"]].rename(columns={"target_agg": "agg"})
+
+
 def absorb_headwater_groups(
   basin: gpd.GeoDataFrame,
   xx_df: pd.DataFrame,
@@ -676,8 +742,9 @@ def basin_aggregation(
       & ~small_subbasin["agg"].isin(post_lake_subs)
     ].sort_values(by="_uparea", ascending=False)
     if not small_subbasin.empty:
-      small_subbasin = small_subbasin.rename(columns={"agg": "aggold", "aggdown": "agg"})
-      xx = small_subbasin.merge(agg_basin[["agg", "aggdown"]], on="agg", how="left")
+      xx = build_headwater_absorb_table(
+        small_subbasin, agg_basin, basin, id_col=id_col
+      )
       basin = absorb_headwater_groups(basin, xx, outlet_value=outlet_value)
       agg_basin = basin.drop(columns="geometry").groupby(["agg", "aggdown"], as_index=False).agg(
         {"_unitarea": "sum"}
