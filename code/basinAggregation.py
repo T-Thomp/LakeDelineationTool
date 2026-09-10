@@ -508,6 +508,11 @@ def _reassign_aggdown(
   aggdown_index[new_val].extend(labels)
 
 
+def _agg_id_series(series: pd.Series) -> pd.Series:
+  """Nullable integer ids for consistent pandas merges (object vs int64)."""
+  return pd.to_numeric(series, errors="coerce").astype("Int64")
+
+
 def _current_agg_for_basin_id(
   basin: gpd.GeoDataFrame,
   id_col: str,
@@ -561,13 +566,23 @@ def build_headwater_absorb_table(
 
   survivors = set(agg_basin["agg"].astype(int))
   hw = small_subbasin.rename(columns={"agg": "aggold"}).copy()
-  hw["target_agg"] = [
-    _current_agg_for_basin_id(basin, id_col, down, survivor_ids=survivors)
-    for down in hw["aggdown"].tolist()
-  ]
+  hw["target_agg"] = _agg_id_series(
+    pd.Series(
+      [
+        _current_agg_for_basin_id(basin, id_col, down, survivor_ids=survivors)
+        for down in hw["aggdown"].tolist()
+      ],
+      index=hw.index,
+    )
+  )
+  hw["aggold"] = _agg_id_series(hw["aggold"])
   # Headwater ``aggdown`` is the downstream link id; merge target group's ``aggdown``
   # from agg_basin only (avoid pandas _x/_y suffix collision).
   targets = agg_basin[["agg", "aggdown"]].rename(columns={"aggdown": "new_aggdown"})
+  targets["agg"] = _agg_id_series(targets["agg"])
+  hw = hw[hw["target_agg"].notna()]
+  if hw.empty:
+    return pd.DataFrame(columns=["aggold", "agg", "aggdown"])
   merged = hw[["aggold", "target_agg"]].merge(
     targets,
     left_on="target_agg",
@@ -615,6 +630,9 @@ def build_survivor_downstream_absorb_table(
     return pd.DataFrame(columns=["aggold", "agg", "aggdown"])
 
   pending = pd.DataFrame(rows)
+  pending["aggold"] = _agg_id_series(pending["aggold"])
+  pending["target_agg"] = _agg_id_series(pending["target_agg"])
+  targets["agg"] = _agg_id_series(targets["agg"])
   merged = pending.merge(
     targets,
     left_on="target_agg",
