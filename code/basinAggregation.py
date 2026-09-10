@@ -513,6 +513,38 @@ def _agg_id_series(series: pd.Series) -> pd.Series:
   return pd.to_numeric(series, errors="coerce").astype("Int64")
 
 
+def _link_ids_with_upstream(
+  river: gpd.GeoDataFrame,
+  down_col: str,
+  outlet_value: int = OUTLET_VALUE,
+) -> set[int]:
+  """LINKNO/DN ids that have at least one upstream reach (fixed river topology)."""
+  outlet_value = int(outlet_value)
+  out: set[int] = set()
+  for down_id in river[down_col].to_numpy():
+    if _is_outlet_id(down_id, outlet_value):
+      continue
+    try:
+      out.add(int(down_id))
+    except (TypeError, ValueError):
+      continue
+  return out
+
+
+def _aggregate_unit_area_km2(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  link_id: int,
+) -> float:
+  """Total local area for the aggregate containing pour point ``link_id``."""
+  rows = basin.loc[basin[id_col].astype(int) == int(link_id)]
+  if rows.empty:
+    return 0.0
+  agg_id = int(rows["agg"].iloc[0])
+  group = basin.loc[basin["agg"].astype(int) == agg_id]
+  return float(group["_unitarea"].sum())
+
+
 def _current_agg_for_basin_id(
   basin: gpd.GeoDataFrame,
   id_col: str,
@@ -603,10 +635,11 @@ def build_survivor_downstream_absorb_table(
   agg_basin: pd.DataFrame,
   basin: gpd.GeoDataFrame,
   id_col: str,
+  min_sub_area: float,
 ) -> pd.DataFrame:
   """
-  Small basins that are not headwaters but drain to a link whose aggregate
-  was already absorbed (e.g. sibling left behind after internal confluence merge).
+  Confluence siblings only: small tribs whose immediate downstream junction link
+  was already folded into another aggregate (not general mid-network merges).
   """
   if candidates.empty:
     return pd.DataFrame(columns=["aggold", "agg", "aggdown"])
@@ -619,12 +652,21 @@ def build_survivor_downstream_absorb_table(
     candidates["agg"].tolist(),
     candidates["aggdown"].tolist(),
   ):
-    target = _current_agg_for_basin_id(
-      basin, id_col, down_link, survivor_ids=survivors
-    )
-    if target is None or int(target) == int(aggold):
+    try:
+      down_int = int(down_link)
+    except (TypeError, ValueError):
       continue
-    rows.append({"aggold": aggold, "target_agg": target})
+    junction_agg = _current_agg_for_basin_id(
+      basin, id_col, down_int, survivor_ids=survivors
+    )
+    if junction_agg is None or int(junction_agg) == int(aggold):
+      continue
+    # Junction still its own aggregate — not a stale absorbed confluence id.
+    if int(junction_agg) == down_int:
+      continue
+    if _aggregate_unit_area_km2(basin, id_col, down_int) >= min_sub_area:
+      continue
+    rows.append({"aggold": aggold, "target_agg": junction_agg})
 
   if not rows:
     return pd.DataFrame(columns=["aggold", "agg", "aggdown"])
@@ -812,6 +854,9 @@ def basin_aggregation(
   post_lake_subs = _downstream_basin_ids_of_lakes(
     basin, river, id_col, down_col, riv_id_col, outlet_value
   )
+  # Fixed river topology: true headwaters only (reaches with no upstream link).
+  # Reaches below a gauge have the gauge reach as upstream — never headwaters.
+  links_with_upstream = _link_ids_with_upstream(river, down_col, outlet_value)
   no_subbasin = len(basin)
   max_merge_iters = max(len(basin) * 2, 1000)
   merge_iter = 0
@@ -825,8 +870,9 @@ def basin_aggregation(
         "Check DSLINKNO / LINKNO topology in outputs/final/streams.shp "
         f"(and {TOPOLOGY_CYCLES_SHP} if river cycles were detected)."
       )
+    agg_ids = pd.to_numeric(agg_basin["agg"], errors="coerce").astype("Int64")
     headwaters = (
-      ~agg_basin["agg"].isin(agg_basin["aggdown"])
+      ~agg_ids.isin(list(links_with_upstream))
       & (agg_basin["_unitarea"] < min_sub_area)
       & (agg_basin["Mask"] < 2)
     )
@@ -861,7 +907,11 @@ def basin_aggregation(
     ]
     if not survivor_cands.empty:
       xx_surv = build_survivor_downstream_absorb_table(
-        survivor_cands, agg_basin, basin, id_col=id_col
+        survivor_cands,
+        agg_basin,
+        basin,
+        id_col=id_col,
+        min_sub_area=min_sub_area,
       )
       if not xx_surv.empty:
         basin = absorb_headwater_groups(basin, xx_surv, outlet_value=outlet_value)
