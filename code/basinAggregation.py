@@ -583,6 +583,53 @@ def build_headwater_absorb_table(
   )
 
 
+def build_survivor_downstream_absorb_table(
+  candidates: pd.DataFrame,
+  agg_basin: pd.DataFrame,
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+) -> pd.DataFrame:
+  """
+  Small basins that are not headwaters but drain to a link whose aggregate
+  was already absorbed (e.g. sibling left behind after internal confluence merge).
+  """
+  if candidates.empty:
+    return pd.DataFrame(columns=["aggold", "agg", "aggdown"])
+
+  survivors = set(agg_basin["agg"].astype(int))
+  rows: list[dict[str, object]] = []
+  targets = agg_basin[["agg", "aggdown"]].rename(columns={"aggdown": "new_aggdown"})
+
+  for aggold, down_link in zip(
+    candidates["agg"].tolist(),
+    candidates["aggdown"].tolist(),
+  ):
+    target = _current_agg_for_basin_id(
+      basin, id_col, down_link, survivor_ids=survivors
+    )
+    if target is None or int(target) == int(aggold):
+      continue
+    rows.append({"aggold": aggold, "target_agg": target})
+
+  if not rows:
+    return pd.DataFrame(columns=["aggold", "agg", "aggdown"])
+
+  pending = pd.DataFrame(rows)
+  merged = pending.merge(
+    targets,
+    left_on="target_agg",
+    right_on="agg",
+    how="left",
+  )
+  return pd.DataFrame(
+    {
+      "aggold": merged["aggold"],
+      "agg": merged["target_agg"],
+      "aggdown": merged["new_aggdown"],
+    }
+  )
+
+
 def absorb_headwater_groups(
   basin: gpd.GeoDataFrame,
   xx_df: pd.DataFrame,
@@ -645,23 +692,45 @@ def absorb_internal_groups(
     if not (basin.at[xz, "Mask"] < 2):
       continue
 
-    xz_agg_before = basin.at[xz, "agg"]
-    zz_labels = list(aggdown_index.get(xz_agg_before, ()))
     xx_aggdown = basin.at[xx, "aggdown"]
+    xz_agg_before = basin.at[xz, "agg"]
+    xz_main_labels = list(agg_index.get(xz_agg_before, ()))
 
-    pos1 = list(agg_index.get(xz_agg_before, ()))
-    if pos1:
-      basin.loc[pos1, "agg"] = xx_agg
-      if xz_agg_before != xx_agg:
-        agg_index[xx_agg].extend(pos1)
-        del agg_index[xz_agg_before]
+    # All-or-nothing at this confluence: every mergeable upstream trib joins
+    # together with the confluence unit, or none do (avoids one branch merged
+    # while a sibling stays separate on the same junction).
+    to_merge: list[tuple[Hashable, Any, list[Hashable], float]] = []
+    total_area = group_area
+    for y_label in xy:
+      y_agg_before = basin.at[y_label, "agg"]
+      if y_agg_before == xx_agg:
+        continue
+      y_group = list(agg_index.get(y_agg_before, ()))
+      y_area = (
+        float(basin.loc[y_group, "_unitarea"].sort_index().sum()) if y_group else 0.0
+      )
+      if y_area >= min_sub_area or not (basin.at[y_label, "Mask"] < 2):
+        continue
+      to_merge.append((y_label, y_agg_before, y_group, y_area))
+      total_area += y_area
 
-    xz_agg_after = basin.at[xz, "agg"]
-    pos2 = list(agg_index.get(xz_agg_after, ()))
-    _reassign_aggdown(basin, aggdown_index, pos2, xx_aggdown)
+    if not to_merge or total_area >= min_sub_area:
+      continue
 
-    if zz_labels:
-      _reassign_aggdown(basin, aggdown_index, zz_labels, xx_agg)
+    for _y_label, y_agg_before, _y_group, _y_area in to_merge:
+      pos1 = list(agg_index.get(y_agg_before, ()))
+      if pos1:
+        basin.loc[pos1, "agg"] = xx_agg
+        if y_agg_before != xx_agg:
+          agg_index[xx_agg].extend(pos1)
+          del agg_index[y_agg_before]
+
+      zz_labels = list(aggdown_index.get(y_agg_before, ()))
+      if zz_labels:
+        _reassign_aggdown(basin, aggdown_index, zz_labels, xx_agg)
+
+    if xz_main_labels:
+      _reassign_aggdown(basin, aggdown_index, xz_main_labels, xx_aggdown)
 
   return basin
 
@@ -762,6 +831,31 @@ def basin_aggregation(
       agg_basin = agg_basin.merge(basin[[id_col, "_uparea", "Mask"]], on=id_col, how="left")
       agg_basin = agg_basin.rename(columns={id_col: "agg", down_col: "aggdown"})
       agg_basin = _drop_small_outlets(agg_basin)
+
+    # Non-headwater small basins whose immediate downstream link already belongs
+    # to another aggregate (typical confluence sibling left after internal merge).
+    survivor_cands = agg_basin[
+      agg_basin["agg"].isin(agg_basin["aggdown"])
+      & (agg_basin["_unitarea"] < min_sub_area)
+      & (agg_basin["Mask"] < 2)
+      & ~agg_basin["aggdown"].isin(lake_subs)
+      & ~agg_basin["agg"].isin(post_lake_subs)
+    ]
+    if not survivor_cands.empty:
+      xx_surv = build_survivor_downstream_absorb_table(
+        survivor_cands, agg_basin, basin, id_col=id_col
+      )
+      if not xx_surv.empty:
+        basin = absorb_headwater_groups(basin, xx_surv, outlet_value=outlet_value)
+        agg_basin = basin.drop(columns="geometry").groupby(
+          ["agg", "aggdown"], as_index=False
+        ).agg({"_unitarea": "sum"})
+        agg_basin = agg_basin.rename(columns={"agg": id_col, "aggdown": down_col})
+        agg_basin = agg_basin.merge(
+          basin[[id_col, "_uparea", "Mask"]], on=id_col, how="left"
+        )
+        agg_basin = agg_basin.rename(columns={id_col: "agg", down_col: "aggdown"})
+        agg_basin = _drop_small_outlets(agg_basin)
 
     condition = (
       agg_basin["agg"].isin(agg_basin["aggdown"])
