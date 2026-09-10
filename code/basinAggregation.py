@@ -565,13 +565,18 @@ def build_headwater_absorb_table(
     _current_agg_for_basin_id(basin, id_col, down, survivor_ids=survivors)
     for down in hw["aggdown"].tolist()
   ]
-  merged = hw.merge(
-    agg_basin[["agg", "aggdown"]],
+  # Headwater ``aggdown`` is the downstream link id; merge target group's ``aggdown``
+  # from agg_basin only (avoid pandas _x/_y suffix collision).
+  targets = agg_basin[["agg", "aggdown"]].rename(columns={"aggdown": "new_aggdown"})
+  merged = hw[["aggold", "target_agg"]].merge(
+    targets,
     left_on="target_agg",
     right_on="agg",
     how="left",
   )
-  return merged[["aggold", "target_agg", "aggdown"]].rename(columns={"target_agg": "agg"})
+  return merged.rename(
+    columns={"target_agg": "agg", "new_aggdown": "aggdown"}
+  )[["aggold", "agg", "aggdown"]]
 
 
 def absorb_headwater_groups(
