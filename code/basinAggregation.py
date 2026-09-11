@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Any, Hashable, Optional
 
 import geopandas as gpd
@@ -616,6 +617,127 @@ def _next_down_link(
   return _basin_next_down_id(basin, id_col, down_col, link_id, outlet_value)
 
 
+def _build_combined_next_down_map(
+  basin: gpd.GeoDataFrame,
+  river: gpd.GeoDataFrame,
+  id_col: str,
+  down_col: str,
+  riv_id_col: str,
+  outlet_value: int,
+) -> dict[int, int]:
+  """Immediate downstream link id (river topology overrides basin when both exist)."""
+  outlet_value = int(outlet_value)
+  nxt: dict[int, int] = {}
+  for link, down in zip(basin[id_col].to_numpy(), basin[down_col].to_numpy()):
+    if _is_outlet_id(down, outlet_value):
+      continue
+    try:
+      nxt[int(link)] = int(down)
+    except (TypeError, ValueError):
+      continue
+  for link, down in zip(river[riv_id_col].to_numpy(), river[down_col].to_numpy()):
+    if _is_outlet_id(down, outlet_value):
+      continue
+    try:
+      nxt[int(link)] = int(down)
+    except (TypeError, ValueError):
+      continue
+  return nxt
+
+
+@dataclass
+class _BasinMergeTopology:
+  """Cached downstream walks (fixed DSLINKNO; safe across merge iterations)."""
+
+  next_down: dict[int, int]
+  _reach_cache: dict[tuple[int, int], bool] = field(default_factory=dict)
+
+  @classmethod
+  def from_frames(
+    cls,
+    basin: gpd.GeoDataFrame,
+    river: gpd.GeoDataFrame,
+    id_col: str,
+    down_col: str,
+    riv_id_col: str,
+    outlet_value: int,
+  ) -> _BasinMergeTopology:
+    return cls(
+      _build_combined_next_down_map(
+        basin, river, id_col, down_col, riv_id_col, outlet_value
+      )
+    )
+
+  def reaches_downstream(self, from_link: int, to_link: int) -> bool:
+    from_link = int(from_link)
+    to_link = int(to_link)
+    if from_link == to_link:
+      return True
+    key = (from_link, to_link)
+    hit = self._reach_cache.get(key)
+    if hit is not None:
+      return hit
+    current: int | None = from_link
+    seen: set[int] = set()
+    while current is not None and current not in seen:
+      if current == to_link:
+        self._reach_cache[key] = True
+        return True
+      seen.add(current)
+      current = self.next_down.get(current)
+    self._reach_cache[key] = False
+    return False
+
+
+def _upstream_links_by_down_node(
+  river: gpd.GeoDataFrame,
+  down_col: str,
+  riv_id_col: str,
+) -> dict[int, list[int]]:
+  out: dict[int, list[int]] = defaultdict(list)
+  for link, down in zip(river[riv_id_col].to_numpy(), river[down_col].to_numpy()):
+    try:
+      out[int(down)].append(int(link))
+    except (TypeError, ValueError):
+      continue
+  return dict(out)
+
+
+def _pour_agg_by_link(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+) -> dict[int, int]:
+  out: dict[int, int] = {}
+  for orig, agg in zip(
+    basin[id_col].astype(int).to_numpy(),
+    basin["agg"].astype(int).to_numpy(),
+  ):
+    o = int(orig)
+    if o not in out:
+      out[o] = int(agg)
+  return out
+
+
+def _id_to_agg_map(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+) -> dict[int, int]:
+  return {
+    int(orig): int(agg)
+    for orig, agg in zip(basin[id_col].to_numpy(), basin["agg"].to_numpy())
+  }
+
+
+def _agg_to_link_ids(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+) -> dict[int, tuple[int, ...]]:
+  grouped = basin.groupby(basin["agg"].astype(int))[id_col].agg(
+    lambda s: tuple(int(x) for x in s.astype(int).unique())
+  )
+  return {int(k): v for k, v in grouped.items()}
+
+
 def _topology_reaches_downstream_of(
   basin: gpd.GeoDataFrame,
   river: gpd.GeoDataFrame,
@@ -625,8 +747,11 @@ def _topology_reaches_downstream_of(
   from_link: int,
   to_link: int,
   outlet_value: int,
+  topo: _BasinMergeTopology | None = None,
 ) -> bool:
   """True if ``to_link`` is reachable downstream from ``from_link`` (river, then basin)."""
+  if topo is not None:
+    return topo.reaches_downstream(from_link, to_link)
   outlet_value = int(outlet_value)
   current: int | None = int(from_link)
   seen: set[int] = set()
@@ -669,53 +794,51 @@ def _absorb_crosses_gauge_barrier(
   source_agg: int,
   target_agg: int,
   outlet_value: int = OUTLET_VALUE,
+  topo: _BasinMergeTopology | None = None,
+  gauge_links: set[int] | None = None,
+  agg_links: dict[int, tuple[int, ...]] | None = None,
 ) -> bool:
   """
   True when absorbing ``source_agg`` into ``target_agg`` would fold reaches
   upstream of a gauge into the aggregate below that gauge on the same stem.
   """
-  outlet_value = int(outlet_value)
-  gauge_links = _gauge_pour_link_ids(basin, id_col)
+  gauge_links = gauge_links if gauge_links is not None else _gauge_pour_link_ids(
+    basin, id_col
+  )
   if not gauge_links:
     return False
 
-  src_links = basin.loc[
-    basin["agg"].astype(int) == int(source_agg), id_col
-  ].astype(int).unique()
-  tgt_links = basin.loc[
-    basin["agg"].astype(int) == int(target_agg), id_col
-  ].astype(int).unique()
+  if agg_links is not None:
+    src_links = agg_links.get(int(source_agg), ())
+    tgt_links = agg_links.get(int(target_agg), ())
+  else:
+    src_links = tuple(
+      basin.loc[basin["agg"].astype(int) == int(source_agg), id_col]
+      .astype(int)
+      .unique()
+    )
+    tgt_links = tuple(
+      basin.loc[basin["agg"].astype(int) == int(target_agg), id_col]
+      .astype(int)
+      .unique()
+    )
+
+  reach = topo.reaches_downstream if topo is not None else (
+    lambda a, b: _topology_reaches_downstream_of(
+      basin, river, id_col, down_col, riv_id_col, a, b, outlet_value
+    )
+  )
 
   for g in gauge_links:
-    for src in src_links:
-      s = int(src)
-      if s == g:
+    for s in src_links:
+      if int(s) == g:
         continue
-      if not _topology_reaches_downstream_of(
-        basin,
-        river,
-        id_col,
-        down_col,
-        riv_id_col,
-        s,
-        g,
-        outlet_value,
-      ):
+      if not reach(int(s), g):
         continue
-      for tgt in tgt_links:
-        t = int(tgt)
-        if t == g:
+      for t in tgt_links:
+        if int(t) == g:
           continue
-        if _topology_reaches_downstream_of(
-          basin,
-          river,
-          id_col,
-          down_col,
-          riv_id_col,
-          g,
-          t,
-          outlet_value,
-        ):
+        if reach(g, int(t)):
           return True
   return False
 
@@ -730,6 +853,8 @@ def _merge_target_crosses_gauge_from_upstream_arms(
   target_agg: int,
   gauge_links: set[int],
   outlet_value: int = OUTLET_VALUE,
+  topo: _BasinMergeTopology | None = None,
+  agg_links: dict[int, tuple[int, ...]] | None = None,
 ) -> bool:
   """
   True when folding tributaries at a junction into ``target_agg`` would bypass
@@ -737,26 +862,29 @@ def _merge_target_crosses_gauge_from_upstream_arms(
   """
   if not gauge_links:
     return False
-  outlet_value = int(outlet_value)
-  tgt_links = basin.loc[
-    basin["agg"].astype(int) == int(target_agg), id_col
-  ].astype(int).unique()
-  for g in gauge_links:
-    target_below_gauge = any(
-      t != g
-      and _topology_reaches_downstream_of(
-        basin, river, id_col, down_col, riv_id_col, g, int(t), outlet_value
-      )
-      for t in tgt_links
+  if agg_links is not None:
+    tgt_links = agg_links.get(int(target_agg), ())
+  else:
+    tgt_links = tuple(
+      basin.loc[basin["agg"].astype(int) == int(target_agg), id_col]
+      .astype(int)
+      .unique()
     )
+
+  reach = topo.reaches_downstream if topo is not None else (
+    lambda a, b: _topology_reaches_downstream_of(
+      basin, river, id_col, down_col, riv_id_col, a, b, outlet_value
+    )
+  )
+
+  for g in gauge_links:
+    target_below_gauge = any(t != g and reach(g, int(t)) for t in tgt_links)
     if not target_below_gauge:
       continue
     for u in upstream_link_ids:
       if int(u) == g:
         continue
-      if _topology_reaches_downstream_of(
-        basin, river, id_col, down_col, riv_id_col, int(u), g, outlet_value
-      ):
+      if reach(int(u), g):
         return True
   return False
 
@@ -990,6 +1118,9 @@ def build_confluence_absorb_table(
   lake_subs: set[int],
   post_lake_subs: set[int],
   outlet_value: int = OUTLET_VALUE,
+  topo: _BasinMergeTopology | None = None,
+  confluence_nodes: set[int] | None = None,
+  upstream_by_node: dict[int, list[int]] | None = None,
 ) -> pd.DataFrame:
   """
   Merge small confluence pieces into the downstream aggregate when allowed.
@@ -1001,17 +1132,38 @@ def build_confluence_absorb_table(
   outlet_value = int(outlet_value)
   survivors = set(agg_basin["agg"].astype(int))
   gauge_links = _gauge_pour_link_ids(basin, id_col)
+  pour_agg = _pour_agg_by_link(basin, id_col)
+  id_to_agg = _id_to_agg_map(basin, id_col)
+  agg_links = _agg_to_link_ids(basin, id_col)
+  nodes = (
+    confluence_nodes
+    if confluence_nodes is not None
+    else _confluence_node_ids(river, down_col, outlet_value)
+  )
+  up_map = upstream_by_node if upstream_by_node is not None else _upstream_links_by_down_node(
+    river, down_col, riv_id_col
+  )
+  link_mask: dict[int, int] = {}
+  link_aggdown: dict[int, object] = {}
+  for orig, mask, ad in zip(
+    basin[id_col].astype(int).to_numpy(),
+    basin["Mask"].to_numpy(),
+    basin["aggdown"].to_numpy(),
+  ):
+    lid = int(orig)
+    if lid not in link_mask:
+      link_mask[lid] = int(mask)
+      link_aggdown[lid] = ad
   rows: list[tuple[int, int]] = []
 
-  for node_c in _confluence_node_ids(river, down_col, outlet_value):
-    c_rows = basin.loc[basin[id_col].astype(int) == int(node_c)]
-    if c_rows.empty:
+  for node_c in nodes:
+    if node_c not in link_mask:
       continue
-    if int(c_rows.iloc[0]["Mask"]) == 3:
+    if link_mask[int(node_c)] == 3:
       continue
-    if _link_is_gauge_pour(basin, id_col, int(node_c)):
+    if int(node_c) in gauge_links:
       continue
-    ds_link = c_rows.iloc[0]["aggdown"]
+    ds_link = link_aggdown[int(node_c)]
     if _is_outlet_id(ds_link, outlet_value):
       continue
     try:
@@ -1025,6 +1177,8 @@ def build_confluence_absorb_table(
       ds_link,
       survivor_ids=survivors,
       gauge_link_ids=gauge_links,
+      pour_agg=pour_agg,
+      id_to_agg=id_to_agg,
     )
     if target_ds is None:
       continue
@@ -1033,7 +1187,7 @@ def build_confluence_absorb_table(
     ):
       continue
 
-    ups = _upstream_links_at_node(river, down_col, riv_id_col, node_c)
+    ups = up_map.get(int(node_c), [])
     if _merge_target_crosses_gauge_from_upstream_arms(
       basin,
       river,
@@ -1044,6 +1198,8 @@ def build_confluence_absorb_table(
       int(target_ds),
       gauge_links,
       outlet_value=outlet_value,
+      topo=topo,
+      agg_links=agg_links,
     ):
       continue
     hw_ups = [u for u in ups if not _link_has_upstream(u, links_with_upstream)]
@@ -1058,6 +1214,8 @@ def build_confluence_absorb_table(
       node_c,
       survivor_ids=survivors,
       gauge_link_ids=gauge_links,
+      pour_agg=pour_agg,
+      id_to_agg=id_to_agg,
     )
     merge_aggs: set[int] = set()
 
@@ -1069,6 +1227,8 @@ def build_confluence_absorb_table(
           h,
           survivor_ids=survivors,
           gauge_link_ids=gauge_links,
+          pour_agg=pour_agg,
+          id_to_agg=id_to_agg,
         )
         for h in hw_ups
       }
@@ -1093,8 +1253,8 @@ def build_confluence_absorb_table(
       merge_aggs.add(int(j_agg))
 
     for link_u in us_ups:
-      u_rows = basin.loc[basin[id_col].astype(int) == int(link_u)]
-      if u_rows.empty or int(u_rows.iloc[0]["Mask"]) >= 2:
+      lu = int(link_u)
+      if lu not in link_mask or link_mask[lu] >= 2:
         continue
       u_agg = _current_agg_for_basin_id(
         basin,
@@ -1102,6 +1262,8 @@ def build_confluence_absorb_table(
         link_u,
         survivor_ids=survivors,
         gauge_link_ids=gauge_links,
+        pour_agg=pour_agg,
+        id_to_agg=id_to_agg,
       )
       if u_agg is None or int(u_agg) == int(target_ds):
         continue
@@ -1133,6 +1295,9 @@ def build_confluence_absorb_table(
         int(aggold),
         int(target_ds),
         outlet_value=outlet_value,
+        topo=topo,
+        gauge_links=gauge_links,
+        agg_links=agg_links,
       ):
         continue
       rows.append((aggold, int(target_ds)))
@@ -1146,6 +1311,8 @@ def _current_agg_for_basin_id(
   basin_id: object,
   survivor_ids: set[int] | None = None,
   gauge_link_ids: set[int] | None = None,
+  pour_agg: dict[int, int] | None = None,
+  id_to_agg: dict[int, int] | None = None,
 ) -> int | None:
   """
   Aggregate id for the basin whose pour-point id is ``basin_id``.
@@ -1166,16 +1333,17 @@ def _current_agg_for_basin_id(
     basin, id_col
   )
 
+  if pour_agg is not None and bid in pour_agg:
+    return pour_agg[bid]
+
   rows = basin.loc[basin[id_col].astype(int) == bid, "agg"]
   if not rows.empty:
     return int(rows.iloc[0])
 
   if survivor_ids is None:
     survivor_ids = set(basin["agg"].astype(int).unique())
-  id_to_agg = {
-    int(orig): int(agg)
-    for orig, agg in zip(basin[id_col].to_numpy(), basin["agg"].to_numpy())
-  }
+  if id_to_agg is None:
+    id_to_agg = _id_to_agg_map(basin, id_col)
   down = bid
   seen: set[int] = set()
   while down not in survivor_ids:
@@ -1202,6 +1370,7 @@ def build_headwater_absorb_table(
   links_with_upstream: set[int],
   lake_subs: set[int],
   outlet_value: int = OUTLET_VALUE,
+  topo: _BasinMergeTopology | None = None,
 ) -> pd.DataFrame:
   """
   Rows for ``absorb_headwater_groups``: map each headwater onto the current
@@ -1212,6 +1381,9 @@ def build_headwater_absorb_table(
 
   survivors = set(agg_basin["agg"].astype(int))
   gauge_links = _gauge_pour_link_ids(basin, id_col)
+  pour_agg = _pour_agg_by_link(basin, id_col)
+  id_to_agg = _id_to_agg_map(basin, id_col)
+  agg_links = _agg_to_link_ids(basin, id_col)
   hw = small_subbasin.rename(columns={"agg": "aggold"}).copy()
   hw["target_agg"] = _agg_id_series(
     pd.Series(
@@ -1222,6 +1394,8 @@ def build_headwater_absorb_table(
           down,
           survivor_ids=survivors,
           gauge_link_ids=gauge_links,
+          pour_agg=pour_agg,
+          id_to_agg=id_to_agg,
         )
         for down in hw["aggdown"].tolist()
       ],
@@ -1266,6 +1440,9 @@ def build_headwater_absorb_table(
       int(aggold),
       int(target),
       outlet_value=outlet_value,
+      topo=topo,
+      gauge_links=gauge_links,
+      agg_links=agg_links,
     ):
       continue
     pairs.append((int(aggold), int(target)))
@@ -1283,11 +1460,18 @@ def absorb_headwater_groups(
   river: gpd.GeoDataFrame | None = None,
   down_col: str = NEXT_DOWN_ID,
   riv_id_col: str = RIVER_ID,
+  topo: _BasinMergeTopology | None = None,
+  gauge_links: set[int] | None = None,
+  agg_links: dict[int, tuple[int, ...]] | None = None,
 ) -> gpd.GeoDataFrame:
   """Same as: loc[agg==aggold, aggdown]=...; loc[agg==aggold, agg]=..."""
   agg_index = _index_labels_by_value(basin["agg"])
   upstream_links = links_with_upstream or set()
   post_lake = post_lake_subs or set()
+  if river is not None and gauge_links is None:
+    gauge_links = _gauge_pour_link_ids(basin, id_col)
+  if river is not None and agg_links is None:
+    agg_links = _agg_to_link_ids(basin, id_col)
   for i in range(len(xx_df)):
     aggold = xx_df["aggold"].iloc[i]
     new_agg = xx_df["agg"].iloc[i]
@@ -1314,6 +1498,9 @@ def absorb_headwater_groups(
       aggold_i,
       new_agg_i,
       outlet_value=outlet_value,
+      topo=topo,
+      gauge_links=gauge_links,
+      agg_links=agg_links,
     ):
       continue
     labels = agg_index.get(aggold)
@@ -1393,9 +1580,19 @@ def basin_aggregation(
   links_with_upstream |= _links_immediately_upstream_of_gauge(
     basin, id_col, down_col
   )
+  merge_topo = _BasinMergeTopology.from_frames(
+    basin, river, id_col, down_col, riv_id_col, outlet_value
+  )
+  confluence_nodes = _confluence_node_ids(river, down_col, outlet_value)
+  upstream_by_node = _upstream_links_by_down_node(river, down_col, riv_id_col)
+  gauge_link_ids = _gauge_pour_link_ids(basin, id_col)
   no_subbasin = len(basin)
   max_merge_iters = max(len(basin) * 2, 1000)
   merge_iter = 0
+  print(
+    f"Basin merge: {len(basin)} pour point(s), "
+    f"{len(confluence_nodes)} confluence node(s), max {max_merge_iters} iteration(s)."
+  )
 
   while True:
     merge_iter += 1
@@ -1419,11 +1616,9 @@ def basin_aggregation(
         d = int(down_id)
       except (TypeError, ValueError):
         return True
-      if d in lake_subs:
+      if d in lake_subs or d in gauge_link_ids:
         return True
-      return _link_is_gauge_pour(basin, id_col, d) or _link_is_lake_pour(
-        basin, id_col, d, lake_subs
-      )
+      return _link_is_lake_pour(basin, id_col, d, lake_subs)
 
     small_subbasin = small_subbasin[
       ~small_subbasin["aggdown"].map(_headwater_downstream_blocked)
@@ -1431,6 +1626,8 @@ def basin_aggregation(
       # not themselves be absorbed into a basin further downstream (agg -> blocked).
       & ~small_subbasin["agg"].isin(post_lake_subs)
     ].sort_values(by="_uparea", ascending=False)
+    applied_any = False
+    agg_links = _agg_to_link_ids(basin, id_col)
     if not small_subbasin.empty:
       xx = build_headwater_absorb_table(
         small_subbasin,
@@ -1443,25 +1640,32 @@ def basin_aggregation(
         links_with_upstream=links_with_upstream,
         lake_subs=lake_subs,
         outlet_value=outlet_value,
+        topo=merge_topo,
       )
-      basin = absorb_headwater_groups(
-        basin,
-        xx,
-        outlet_value=outlet_value,
-        links_with_upstream=links_with_upstream,
-        id_col=id_col,
-        post_lake_subs=post_lake_subs,
-        river=river,
-        down_col=down_col,
-        riv_id_col=riv_id_col,
-      )
-      agg_basin = basin.drop(columns="geometry").groupby(["agg", "aggdown"], as_index=False).agg(
-        {"_unitarea": "sum"}
-      )
-      agg_basin = agg_basin.rename(columns={"agg": id_col, "aggdown": down_col})
-      agg_basin = agg_basin.merge(basin[[id_col, "_uparea", "Mask"]], on=id_col, how="left")
-      agg_basin = agg_basin.rename(columns={id_col: "agg", down_col: "aggdown"})
-      agg_basin = _drop_small_outlets(agg_basin)
+      if not xx.empty:
+        basin = absorb_headwater_groups(
+          basin,
+          xx,
+          outlet_value=outlet_value,
+          links_with_upstream=links_with_upstream,
+          id_col=id_col,
+          post_lake_subs=post_lake_subs,
+          river=river,
+          down_col=down_col,
+          riv_id_col=riv_id_col,
+          topo=merge_topo,
+          gauge_links=gauge_link_ids,
+          agg_links=agg_links,
+        )
+        applied_any = True
+        agg_basin = basin.drop(columns="geometry").groupby(["agg", "aggdown"], as_index=False).agg(
+          {"_unitarea": "sum"}
+        )
+        agg_basin = agg_basin.rename(columns={"agg": id_col, "aggdown": down_col})
+        agg_basin = agg_basin.merge(basin[[id_col, "_uparea", "Mask"]], on=id_col, how="left")
+        agg_basin = agg_basin.rename(columns={id_col: "agg", down_col: "aggdown"})
+        agg_basin = _drop_small_outlets(agg_basin)
+        agg_links = _agg_to_link_ids(basin, id_col)
 
     xx_conf = build_confluence_absorb_table(
       basin,
@@ -1475,6 +1679,9 @@ def basin_aggregation(
       lake_subs=lake_subs,
       post_lake_subs=post_lake_subs,
       outlet_value=outlet_value,
+      topo=merge_topo,
+      confluence_nodes=confluence_nodes,
+      upstream_by_node=upstream_by_node,
     )
     if not xx_conf.empty:
       basin = absorb_headwater_groups(
@@ -1487,7 +1694,11 @@ def basin_aggregation(
         river=river,
         down_col=down_col,
         riv_id_col=riv_id_col,
+        topo=merge_topo,
+        gauge_links=gauge_link_ids,
+        agg_links=agg_links,
       )
+      applied_any = True
       agg_basin = basin.drop(columns="geometry").groupby(
         ["agg", "aggdown"], as_index=False
       ).agg({"_unitarea": "sum"})
@@ -1498,9 +1709,14 @@ def basin_aggregation(
       agg_basin = agg_basin.rename(columns={id_col: "agg", down_col: "aggdown"})
       agg_basin = _drop_small_outlets(agg_basin)
 
+    if not applied_any:
+      break
+
     if len(agg_basin[agg_basin["_unitarea"] < min_sub_area]) == no_subbasin:
       break
     no_subbasin = len(agg_basin[agg_basin["_unitarea"] < min_sub_area])
+
+  print(f"Basin merge loop finished after {merge_iter} iteration(s).")
 
   sentinel_group = basin["agg"].map(lambda a: _is_sentinel_object_id(a, outlet_value))
   if sentinel_group.any():
