@@ -747,6 +747,45 @@ def _headwater_link_ids(
   return out
 
 
+def _link_depth_from_headwaters(
+  upstream_by_node: dict[int, list[int]],
+  headwater_links: set[int],
+) -> dict[int, int]:
+  """
+  Downstream step count from the nearest network tip (0 = headwater link).
+
+  Propagates along the vector network so merges can be ordered upstream → DS.
+  """
+  depth: dict[int, int] = {int(hw): 0 for hw in headwater_links}
+  if not upstream_by_node:
+    return depth
+  changed = True
+  while changed:
+    changed = False
+    for down, ups in upstream_by_node.items():
+      down_i = int(down)
+      try:
+        d = max(depth.get(int(u), 0) for u in ups) + 1
+      except ValueError:
+        continue
+      if depth.get(down_i, -1) < d:
+        depth[down_i] = d
+        changed = True
+  return depth
+
+
+def _agg_min_link_depth(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  agg_id: int,
+  link_depth: dict[int, int],
+) -> int:
+  pours = basin.loc[basin["agg"].astype(int) == int(agg_id), id_col].astype(int)
+  if pours.empty:
+    return 10**9
+  return min(link_depth.get(int(p), 10**9) for p in pours)
+
+
 def _aggregate_ids_with_headwater_pour(
   basin: gpd.GeoDataFrame,
   id_col: str,
@@ -1002,6 +1041,76 @@ def _pour_uparea(basin: gpd.GeoDataFrame, id_col: str, link_id: int) -> float:
   return float(rows.iloc[0]) if not rows.empty else 0.0
 
 
+def _sort_absorb_table_upstream_first(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  link_depth: dict[int, int],
+  xx: pd.DataFrame,
+) -> pd.DataFrame:
+  """
+  Stable merge order: shallowest network depth first, then ``aggold``.
+
+  Matches processing from the most upstream basins downstream along the vector
+  network.
+  """
+  if xx.empty or "aggold" not in xx.columns:
+    return xx
+  order = sorted(
+    range(len(xx)),
+    key=lambda i: (
+      _agg_min_link_depth(basin, id_col, int(xx["aggold"].iloc[i]), link_depth),
+      int(xx["aggold"].iloc[i]),
+    ),
+  )
+  return xx.iloc[order].reset_index(drop=True)
+
+
+def _eligible_small_aggregate_ids(
+  basin: gpd.GeoDataFrame,
+  agg_basin: pd.DataFrame,
+  id_col: str,
+  post_lake_subs: set[int],
+  min_sub_area: float,
+) -> set[int]:
+  out: set[int] = set()
+  for agg_val in agg_basin["agg"].dropna().unique():
+    try:
+      agg_i = int(agg_val)
+    except (TypeError, ValueError):
+      continue
+    if _agg_group_unit_area(basin, agg_i) >= min_sub_area:
+      continue
+    if not _aggregate_may_be_absorbed(basin, agg_i, id_col, post_lake_subs):
+      continue
+    if _agg_is_lake_group(basin, agg_i):
+      continue
+    out.add(agg_i)
+  return out
+
+
+def _frontier_headwater_aggregate_ids(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  link_depth: dict[int, int],
+  eligible_small: set[int],
+) -> set[int]:
+  """
+  Most-upstream small aggregates on the vector network for this iteration.
+
+  Recomputed each merge round after prior folds — the ``headwater`` set moves
+  downstream along each branch as upstream units are absorbed.
+  """
+  if not eligible_small:
+    return set()
+  depths = {
+    a: _agg_min_link_depth(basin, id_col, a, link_depth) for a in eligible_small
+  }
+  min_d = min(depths.values())
+  if min_d >= 10**9:
+    return set()
+  return {a for a, d in depths.items() if d == min_d}
+
+
 def _link_is_gauge_pour(
   basin: gpd.GeoDataFrame,
   id_col: str,
@@ -1181,21 +1290,22 @@ def build_headwater_driven_absorb_table(
   lake_subs: set[int],
   post_lake_subs: set[int],
   upstream_by_node: dict[int, list[int]],
-  headwater_links: set[int],
+  link_depth: dict[int, int],
   min_sub_area: float,
   outlet_value: int = OUTLET_VALUE,
 ) -> pd.DataFrame:
   """
-  Headwater-driven merging (one round per call):
+  One merge wave per call (caller loops until empty):
 
-  * Network headwater aggregates with ``_unitarea < min_sub_area`` merge into
-    the aggregate at their immediate downstream link (``aggdown``).
-  * If other upstream reaches share that same downstream link, any **small**
-    non-headwater aggregate at those arms merges into the same target (basin
-    only; main-stem stream output still picks the highest-``_uparea`` path).
-  * Two small headwaters at the same downstream link both merge into that
-    downstream aggregate; the larger-``_uparea`` reach becomes the main stem.
+  * Find all small eligible aggregates, then take the **frontier**: those at the
+    minimum network depth (most upstream on the graph this round).
+  * Each frontier unit merges into the aggregate at its ``aggdown`` downstream
+    link, ordered shallowest-first along the network.
+  * Other **small** upstream arms sharing that downstream link join the same
+    target (basin area only; main-stem streams still use highest ``_uparea``).
   * **Three or more** upstream reaches at the same downstream link: no merge.
+
+  After applies, the next iteration rediscovers frontier headwaters further DS.
 
   Lakes and gauge units are never absorbed; upstream may merge into a gauge.
   """
@@ -1204,28 +1314,17 @@ def build_headwater_driven_absorb_table(
   gauge_links = _gauge_pour_link_ids(basin, id_col)
   pour_agg = _pour_agg_by_link(basin, id_col)
   id_to_agg = _id_to_agg_map(basin, id_col)
-  hw_pour_aggs = _aggregate_ids_with_headwater_pour(
-    basin, id_col, headwater_links
+  eligible_small = _eligible_small_aggregate_ids(
+    basin, agg_basin, id_col, post_lake_subs, min_sub_area
   )
+  frontier = _frontier_headwater_aggregate_ids(
+    basin, id_col, link_depth, eligible_small
+  )
+  if not frontier:
+    return pd.DataFrame(columns=["aggold", "agg", "aggdown"])
 
   ds_triggers: dict[int, set[int]] = defaultdict(set)
-  seen_agg: set[int] = set()
-  for agg_val in agg_basin["agg"].dropna().unique():
-    try:
-      agg_i = int(agg_val)
-    except (TypeError, ValueError):
-      continue
-    if agg_i in seen_agg:
-      continue
-    seen_agg.add(agg_i)
-    if agg_i not in hw_pour_aggs:
-      continue
-    if _agg_group_unit_area(basin, agg_i) >= min_sub_area:
-      continue
-    if not _aggregate_may_be_absorbed(basin, agg_i, id_col, post_lake_subs):
-      continue
-    if _agg_is_lake_group(basin, agg_i):
-      continue
+  for agg_i in sorted(frontier):
     ds_raw = _agg_primary_aggdown(agg_basin, agg_i)
     if ds_raw is None or _is_outlet_id(ds_raw, outlet_value):
       continue
@@ -1242,7 +1341,8 @@ def build_headwater_driven_absorb_table(
   rows: list[tuple[int, int]] = []
   seen_source: set[int] = set()
 
-  for ds, hw_aggs in ds_triggers.items():
+  for ds in sorted(ds_triggers.keys(), key=lambda d: (link_depth.get(int(d), 10**9), int(d))):
+    hw_aggs = ds_triggers[ds]
     if len(upstream_by_node.get(ds, [])) >= 3:
       continue
     target = _current_agg_for_basin_id(
@@ -1288,13 +1388,17 @@ def build_headwater_driven_absorb_table(
         continue
       sources.add(u_agg_i)
 
-    for aggold in sources:
+    for aggold in sorted(
+      sources,
+      key=lambda a: (_agg_min_link_depth(basin, id_col, int(a), link_depth), int(a)),
+    ):
       if aggold == target_i or aggold in seen_source:
         continue
       seen_source.add(aggold)
       rows.append((aggold, target_i))
 
-  return _absorb_table_from_targets(rows, agg_basin)
+  table = _absorb_table_from_targets(rows, agg_basin)
+  return _sort_absorb_table_upstream_first(basin, id_col, link_depth, table)
 
 
 def _current_agg_for_basin_id(
@@ -1471,11 +1575,12 @@ def basin_aggregation(
   )
   upstream_by_node = _upstream_links_by_down_node(river, down_col, riv_id_col)
   headwater_links = _headwater_link_ids(river, riv_id_col, upstream_by_node)
+  link_depth = _link_depth_from_headwaters(upstream_by_node, headwater_links)
   no_subbasin = len(basin)
   max_merge_iters = max(len(basin) * 2, 1000)
   merge_iter = 0
   print(
-    f"Basin merge (headwater-driven): {len(basin)} pour point(s), "
+    f"Basin merge (frontier headwaters → DS): {len(basin)} pour point(s), "
     f"max {max_merge_iters} iteration(s)."
   )
 
@@ -1496,11 +1601,12 @@ def basin_aggregation(
       lake_subs=lake_subs,
       post_lake_subs=post_lake_subs,
       upstream_by_node=upstream_by_node,
-      headwater_links=headwater_links,
+      link_depth=link_depth,
       min_sub_area=min_sub_area,
       outlet_value=outlet_value,
     )
     if not xx.empty:
+      xx = _sort_absorb_table_upstream_first(basin, id_col, link_depth, xx)
       basin = absorb_headwater_groups(
         basin,
         xx,
