@@ -1076,17 +1076,6 @@ def _linear_merge_may_apply_to_target(
   return True
 
 
-def _sole_upstream_link(
-  down_link: int,
-  upstream_by_node: dict[int, list[int]],
-) -> int | None:
-  """Upstream LINKNO when exactly one reach enters ``down_link``; else None."""
-  ups = upstream_by_node.get(int(down_link), [])
-  if len(ups) != 1:
-    return None
-  return int(ups[0])
-
-
 def _confluence_has_gauge_or_lake_upstream(
   basin: gpd.GeoDataFrame,
   id_col: str,
@@ -1178,102 +1167,14 @@ def _absorb_table_from_targets(
   )
 
 
-def build_linear_channel_absorb_table(
-  small_subbasin: pd.DataFrame,
-  agg_basin: pd.DataFrame,
-  basin: gpd.GeoDataFrame,
-  id_col: str,
-  lake_subs: set[int],
-  post_lake_subs: set[int],
-  upstream_by_node: dict[int, list[int]],
-  outlet_value: int = OUTLET_VALUE,
-) -> pd.DataFrame:
-  """
-  Merge a small upstream aggregate into its downstream neighbor only on a
-  single-inflow link (one river channel, no confluence at the downstream segment).
-
-  True network headwaters are the usual sub-threshold units: when their downstream
-  segment has only that one inflow, they qualify the same way as any linear
-  upstream (``sole_up`` equals the headwater reach).
-
-  Only the **source** must be below ``min_sub_area`` (via the candidate list); the
-  **target** may already be large and grows by summed ``_unitarea`` after merge.
-
-  Gauge and lake units are never absorbed; upstream may merge into a gauge unit.
-  """
-  outlet_value = int(outlet_value)
-  if small_subbasin.empty:
-    return pd.DataFrame(columns=["aggold", "agg", "aggdown"])
-
-  survivors = set(agg_basin["agg"].astype(int))
-  gauge_links = _gauge_pour_link_ids(basin, id_col)
-  pour_agg = _pour_agg_by_link(basin, id_col)
-  id_to_agg = _id_to_agg_map(basin, id_col)
-  rows: list[tuple[int, int]] = []
-  seen_source: set[int] = set()
-
-  for _, row in small_subbasin.iterrows():
-    try:
-      aggold = int(row["agg"])
-    except (TypeError, ValueError):
-      continue
-    if aggold in seen_source:
-      continue
-    seen_source.add(aggold)
-
-    if not _aggregate_may_be_absorbed(basin, aggold, id_col, post_lake_subs):
-      continue
-    if _agg_is_lake_group(basin, aggold):
-      continue
-
-    down_link = row["aggdown"]
-    if _is_outlet_id(down_link, outlet_value):
-      continue
-    try:
-      ds = int(down_link)
-    except (TypeError, ValueError):
-      continue
-    if _link_is_lake_pour(basin, id_col, ds, lake_subs):
-      continue
-
-    sole_up = _sole_upstream_link(ds, upstream_by_node)
-    if sole_up is None:
-      continue
-    up_agg = _current_agg_for_basin_id(
-      basin,
-      id_col,
-      sole_up,
-      survivor_ids=survivors,
-      gauge_link_ids=gauge_links,
-      pour_agg=pour_agg,
-      id_to_agg=id_to_agg,
-    )
-    if up_agg is None or int(up_agg) != aggold:
-      continue
-
-    target = _current_agg_for_basin_id(
-      basin,
-      id_col,
-      ds,
-      survivor_ids=survivors,
-      gauge_link_ids=gauge_links,
-      pour_agg=pour_agg,
-      id_to_agg=id_to_agg,
-    )
-    if target is None or int(target) == aggold:
-      continue
-    if _agg_is_lake_group(basin, int(target)):
-      continue
-    if not _linear_merge_may_apply_to_target(
-      basin, id_col, ds, int(target), lake_subs
-    ):
-      continue
-    rows.append((aggold, int(target)))
-
-  return _absorb_table_from_targets(rows, agg_basin)
+def _agg_primary_aggdown(agg_basin: pd.DataFrame, agg_id: int) -> object:
+  rows = agg_basin.loc[agg_basin["agg"].astype(int) == int(agg_id), "aggdown"]
+  if rows.empty:
+    return None
+  return rows.iloc[0]
 
 
-def build_two_way_confluence_absorb_table(
+def build_headwater_driven_absorb_table(
   basin: gpd.GeoDataFrame,
   agg_basin: pd.DataFrame,
   id_col: str,
@@ -1285,93 +1186,113 @@ def build_two_way_confluence_absorb_table(
   outlet_value: int = OUTLET_VALUE,
 ) -> pd.DataFrame:
   """
-  At a two-reach confluence, fold the tributary aggregate into the main-stem
-  aggregate (higher cumulative ``_uparea`` at the pour point).
+  Headwater-driven merging (one round per call):
 
-  When **both** arms already meet ``min_sub_area`` (two main stems joining),
-  neither aggregate is merged. When **both** reaches have upstream tributaries
-  on the network, neither is merged. Otherwise a small or headwater trib may
-  merge into the higher-``_uparea`` main stem.
+  * Network headwater aggregates with ``_unitarea < min_sub_area`` merge into
+    the aggregate at their immediate downstream link (``aggdown``).
+  * If other upstream reaches share that same downstream link, any **small**
+    non-headwater aggregate at those arms merges into the same target (basin
+    only; main-stem stream output still picks the highest-``_uparea`` path).
+  * Two small headwaters at the same downstream link both merge into that
+    downstream aggregate; the larger-``_uparea`` reach becomes the main stem.
+  * **Three or more** upstream reaches at the same downstream link: no merge.
+
+  Lakes and gauge units are never absorbed; upstream may merge into a gauge.
   """
   outlet_value = int(outlet_value)
   survivors = set(agg_basin["agg"].astype(int))
   gauge_links = _gauge_pour_link_ids(basin, id_col)
   pour_agg = _pour_agg_by_link(basin, id_col)
   id_to_agg = _id_to_agg_map(basin, id_col)
-  rows: list[tuple[int, int]] = []
-  seen_trib: set[int] = set()
+  hw_pour_aggs = _aggregate_ids_with_headwater_pour(
+    basin, id_col, headwater_links
+  )
 
-  for junction, ups in upstream_by_node.items():
-    if len(ups) != 2:
-      continue
-    if _link_is_lake_pour(basin, id_col, int(junction), lake_subs):
-      continue
+  ds_triggers: dict[int, set[int]] = defaultdict(set)
+  seen_agg: set[int] = set()
+  for agg_val in agg_basin["agg"].dropna().unique():
     try:
-      u1, u2 = int(ups[0]), int(ups[1])
+      agg_i = int(agg_val)
     except (TypeError, ValueError):
       continue
-    if _link_is_lake_pour(basin, id_col, u1, lake_subs) or _link_is_lake_pour(
-      basin, id_col, u2, lake_subs
-    ):
+    if agg_i in seen_agg:
       continue
-    # Both arms are continuing rivers (not tips): keep separate at this junction.
-    if u1 in upstream_by_node and u2 in upstream_by_node:
+    seen_agg.add(agg_i)
+    if agg_i not in hw_pour_aggs:
       continue
+    if _agg_group_unit_area(basin, agg_i) >= min_sub_area:
+      continue
+    if not _aggregate_may_be_absorbed(basin, agg_i, id_col, post_lake_subs):
+      continue
+    if _agg_is_lake_group(basin, agg_i):
+      continue
+    ds_raw = _agg_primary_aggdown(agg_basin, agg_i)
+    if ds_raw is None or _is_outlet_id(ds_raw, outlet_value):
+      continue
+    try:
+      ds = int(ds_raw)
+    except (TypeError, ValueError):
+      continue
+    if _link_is_lake_pour(basin, id_col, ds, lake_subs):
+      continue
+    if len(upstream_by_node.get(ds, [])) >= 3:
+      continue
+    ds_triggers[ds].add(agg_i)
 
-    a1, a2 = _pour_uparea(basin, id_col, u1), _pour_uparea(basin, id_col, u2)
-    if a1 > a2 or (a1 == a2 and u1 < u2):
-      main_u, trib_u = u1, u2
-    else:
-      main_u, trib_u = u2, u1
+  rows: list[tuple[int, int]] = []
+  seen_source: set[int] = set()
 
-    trib_agg = _current_agg_for_basin_id(
+  for ds, hw_aggs in ds_triggers.items():
+    if len(upstream_by_node.get(ds, [])) >= 3:
+      continue
+    target = _current_agg_for_basin_id(
       basin,
       id_col,
-      trib_u,
+      ds,
       survivor_ids=survivors,
       gauge_link_ids=gauge_links,
       pour_agg=pour_agg,
       id_to_agg=id_to_agg,
     )
-    main_agg = _current_agg_for_basin_id(
-      basin,
-      id_col,
-      main_u,
-      survivor_ids=survivors,
-      gauge_link_ids=gauge_links,
-      pour_agg=pour_agg,
-      id_to_agg=id_to_agg,
-    )
-    if trib_agg is None or main_agg is None:
+    if target is None:
       continue
-    trib_agg_i, main_agg_i = int(trib_agg), int(main_agg)
-    if trib_agg_i == main_agg_i or trib_agg_i in seen_trib:
+    target_i = int(target)
+    if _agg_is_lake_group(basin, target_i):
       continue
-    if _agg_is_lake_group(basin, trib_agg_i) or _agg_is_lake_group(
-      basin, main_agg_i
-    ):
-      continue
-    if not _aggregate_may_be_absorbed(basin, trib_agg_i, id_col, post_lake_subs):
-      continue
-
-    trib_unit = _agg_group_unit_area(basin, trib_agg_i)
-    main_unit = _agg_group_unit_area(basin, main_agg_i)
-    if main_unit >= min_sub_area and trib_unit >= min_sub_area:
-      continue
-
-    trib_is_headwater = trib_u in headwater_links
-    if trib_unit >= min_sub_area and not trib_is_headwater:
-      continue
-
-    if _agg_is_gauge_group(basin, main_agg_i):
-      pass
-    elif not _linear_merge_may_apply_to_target(
-      basin, id_col, main_u, main_agg_i, lake_subs
+    if not _linear_merge_may_apply_to_target(
+      basin, id_col, ds, target_i, lake_subs
     ):
       continue
 
-    rows.append((trib_agg_i, main_agg_i))
-    seen_trib.add(trib_agg_i)
+    sources: set[int] = set(int(a) for a in hw_aggs)
+    for u in upstream_by_node.get(ds, []):
+      u_agg = _current_agg_for_basin_id(
+        basin,
+        id_col,
+        u,
+        survivor_ids=survivors,
+        gauge_link_ids=gauge_links,
+        pour_agg=pour_agg,
+        id_to_agg=id_to_agg,
+      )
+      if u_agg is None:
+        continue
+      u_agg_i = int(u_agg)
+      if u_agg_i == target_i or u_agg_i in sources:
+        continue
+      if _agg_group_unit_area(basin, u_agg_i) >= min_sub_area:
+        continue
+      if not _aggregate_may_be_absorbed(basin, u_agg_i, id_col, post_lake_subs):
+        continue
+      if _agg_is_lake_group(basin, u_agg_i):
+        continue
+      sources.add(u_agg_i)
+
+    for aggold in sources:
+      if aggold == target_i or aggold in seen_source:
+        continue
+      seen_source.add(aggold)
+      rows.append((aggold, target_i))
 
   return _absorb_table_from_targets(rows, agg_basin)
 
@@ -1550,14 +1471,11 @@ def basin_aggregation(
   )
   upstream_by_node = _upstream_links_by_down_node(river, down_col, riv_id_col)
   headwater_links = _headwater_link_ids(river, riv_id_col, upstream_by_node)
-  lake_pour_links = set(
-    basin.loc[basin["Mask"] == 3, id_col].astype(int).to_numpy()
-  )
   no_subbasin = len(basin)
   max_merge_iters = max(len(basin) * 2, 1000)
   merge_iter = 0
   print(
-    f"Basin merge (linear channel only): {len(basin)} pour point(s), "
+    f"Basin merge (headwater-driven): {len(basin)} pour point(s), "
     f"max {max_merge_iters} iteration(s)."
   )
 
@@ -1570,69 +1488,18 @@ def basin_aggregation(
         "Check DSLINKNO / LINKNO topology in outputs/final/streams.shp "
         f"(and {TOPOLOGY_CYCLES_SHP} if river cycles were detected)."
       )
-    small_subbasin = agg_basin[
-      (agg_basin["_unitarea"] < min_sub_area) & (agg_basin["Mask"] < 2)
-    ]
-
-    def _merge_downstream_blocked(down_id: object) -> bool:
-      try:
-        d = int(down_id)
-      except (TypeError, ValueError):
-        return True
-      if d in lake_pour_links:
-        return True
-      return _link_is_lake_pour(basin, id_col, d, lake_subs)
-
-    headwater_aggs = _aggregate_ids_with_headwater_pour(
-      basin, id_col, headwater_links
-    )
-    small_subbasin = small_subbasin[
-      ~small_subbasin["aggdown"].map(_merge_downstream_blocked)
-      & ~small_subbasin["agg"].isin(post_lake_subs)
-    ].copy()
-    small_subbasin["_merge_prio"] = small_subbasin["agg"].map(
-      lambda a: 0 if int(a) in headwater_aggs else 1
-    )
-    # Headwaters first (area folding for size threshold), then larger small units.
-    small_subbasin = small_subbasin.sort_values(
-      by=["_merge_prio", "_uparea"],
-      ascending=[True, False],
-    ).drop(columns=["_merge_prio"])
     applied_any = False
-    xx_frames: list[pd.DataFrame] = []
-    if not small_subbasin.empty:
-      xx_frames.append(
-        build_linear_channel_absorb_table(
-          small_subbasin,
-          agg_basin,
-          basin,
-          id_col=id_col,
-          lake_subs=lake_subs,
-          post_lake_subs=post_lake_subs,
-          upstream_by_node=upstream_by_node,
-          outlet_value=outlet_value,
-        )
-      )
-    xx_frames.append(
-      build_two_way_confluence_absorb_table(
-        basin,
-        agg_basin,
-        id_col=id_col,
-        lake_subs=lake_subs,
-        post_lake_subs=post_lake_subs,
-        upstream_by_node=upstream_by_node,
-        headwater_links=headwater_links,
-        min_sub_area=min_sub_area,
-        outlet_value=outlet_value,
-      )
+    xx = build_headwater_driven_absorb_table(
+      basin,
+      agg_basin,
+      id_col=id_col,
+      lake_subs=lake_subs,
+      post_lake_subs=post_lake_subs,
+      upstream_by_node=upstream_by_node,
+      headwater_links=headwater_links,
+      min_sub_area=min_sub_area,
+      outlet_value=outlet_value,
     )
-    xx = (
-      pd.concat([f for f in xx_frames if not f.empty], ignore_index=True)
-      if any(not f.empty for f in xx_frames)
-      else pd.DataFrame(columns=["aggold", "agg", "aggdown"])
-    )
-    if not xx.empty:
-      xx = xx.drop_duplicates(subset=["aggold"], keep="first")
     if not xx.empty:
       basin = absorb_headwater_groups(
         basin,
