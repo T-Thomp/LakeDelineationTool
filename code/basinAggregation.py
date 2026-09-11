@@ -443,6 +443,7 @@ def _mark_river_main_stems(
     down_col: str,
     riv_id_col: str,
     upstream_by_node: dict[int, list[int]] | None = None,
+    headwater_links: set[int] | None = None,
 ) -> tuple[gpd.GeoDataFrame, list[dict]]:
     """Pick highest-uparea main stem per aggregate; stop and warn on DSLINKNO cycles."""
     agg_river = agg_river.copy()
@@ -450,6 +451,7 @@ def _mark_river_main_stems(
     cycle_features: list[dict] = []
     reported_cycles: set[tuple[int, ...]] = set()
     up_map = upstream_by_node or {}
+    hw_links = headwater_links or set()
 
     for agg_id in agg_river["agg"].dropna().unique():
         xx = agg_river.index[agg_river["agg"] == agg_id].tolist()
@@ -457,7 +459,19 @@ def _mark_river_main_stems(
         visited_set: set[int] = set()
 
         while xx:
-            yy = agg_river.loc[xx, "_uparea"].idxmax()
+            seed_link = _two_headwater_main_seed_link_for_agg(
+              agg_river, agg_id, up_map, hw_links, riv_id_col
+            )
+            if seed_link is not None:
+              seed_hit = xx
+              seed_idx = [
+                i
+                for i in seed_hit
+                if int(agg_river.loc[i, riv_id_col]) == int(seed_link)
+              ]
+              yy = seed_idx[0] if seed_idx else agg_river.loc[xx, "_uparea"].idxmax()
+            else:
+              yy = agg_river.loc[xx, "_uparea"].idxmax()
             if up_map:
               _mark_main_stem_upstream_chain(agg_river, yy, riv_id_col, up_map)
             link_id = int(agg_river.loc[yy, riv_id_col])
@@ -745,6 +759,65 @@ def _headwater_link_ids(
     if lid not in receives_inflow:
       out.add(lid)
   return out
+
+
+def _is_two_headwater_confluence(
+  upstream_by_node: dict[int, list[int]],
+  ds: int,
+  headwater_links: set[int],
+) -> bool:
+  ups = upstream_by_node.get(int(ds), [])
+  if len(ups) != 2:
+    return False
+  try:
+    u1, u2 = int(ups[0]), int(ups[1])
+  except (TypeError, ValueError):
+    return False
+  return u1 in headwater_links and u2 in headwater_links
+
+
+def _river_link_uparea(
+  agg_river: gpd.GeoDataFrame,
+  riv_id_col: str,
+  link_id: int,
+) -> float:
+  rows = agg_river.loc[agg_river[riv_id_col].astype(int) == int(link_id), "_uparea"]
+  return float(rows.max()) if not rows.empty else 0.0
+
+
+def _two_headwater_main_seed_link_for_agg(
+  agg_river: gpd.GeoDataFrame,
+  agg_id: object,
+  upstream_by_node: dict[int, list[int]],
+  headwater_links: set[int],
+  riv_id_col: str,
+) -> int | None:
+  """
+  At a two-headwater confluence inside ``agg_id``, return the upstream link id
+  with larger cumulative area (main channel seed).
+  """
+  agg_rows = agg_river.loc[agg_river["agg"] == agg_id]
+  if agg_rows.empty or not headwater_links:
+    return None
+  link_set = set(agg_rows[riv_id_col].astype(int))
+  best_uparea = -1.0
+  best_link: int | None = None
+  for _ds, ups in upstream_by_node.items():
+    if len(ups) != 2:
+      continue
+    u1, u2 = int(ups[0]), int(ups[1])
+    if u1 not in headwater_links or u2 not in headwater_links:
+      continue
+    if u1 not in link_set or u2 not in link_set:
+      continue
+    a1 = _river_link_uparea(agg_river, riv_id_col, u1)
+    a2 = _river_link_uparea(agg_river, riv_id_col, u2)
+    winner = u1 if a1 >= a2 else u2
+    aw = max(a1, a2)
+    if aw > best_uparea:
+      best_uparea = aw
+      best_link = winner
+  return best_link
 
 
 def _link_depth_from_headwaters(
@@ -1290,6 +1363,7 @@ def build_headwater_driven_absorb_table(
   lake_subs: set[int],
   post_lake_subs: set[int],
   upstream_by_node: dict[int, list[int]],
+  headwater_links: set[int],
   link_depth: dict[int, int],
   min_sub_area: float,
   outlet_value: int = OUTLET_VALUE,
@@ -1302,7 +1376,10 @@ def build_headwater_driven_absorb_table(
   * Each frontier unit merges into the aggregate at its ``aggdown`` downstream
     link, ordered shallowest-first along the network.
   * Other **small** upstream arms sharing that downstream link join the same
-    target (basin area only; main-stem streams still use highest ``_uparea``).
+    target (basin area only).
+  * **Two headwater** reaches at the same downstream link: when this junction
+    merges, **both** upstream aggregates join the downstream target; streams
+    follow the higher-``_uparea`` headwater through the downstream segment.
   * **Three or more** upstream reaches at the same downstream link: no merge.
 
   After applies, the next iteration rediscovers frontier headwaters further DS.
@@ -1387,6 +1464,28 @@ def build_headwater_driven_absorb_table(
       if _agg_is_lake_group(basin, u_agg_i):
         continue
       sources.add(u_agg_i)
+
+    if _is_two_headwater_confluence(upstream_by_node, ds, headwater_links):
+      for u in upstream_by_node.get(ds, []):
+        u_agg = _current_agg_for_basin_id(
+          basin,
+          id_col,
+          u,
+          survivor_ids=survivors,
+          gauge_link_ids=gauge_links,
+          pour_agg=pour_agg,
+          id_to_agg=id_to_agg,
+        )
+        if u_agg is None:
+          continue
+        u_agg_i = int(u_agg)
+        if u_agg_i == target_i:
+          continue
+        if _agg_is_lake_group(basin, u_agg_i):
+          continue
+        if not _aggregate_may_be_absorbed(basin, u_agg_i, id_col, post_lake_subs):
+          continue
+        sources.add(u_agg_i)
 
     for aggold in sorted(
       sources,
@@ -1601,6 +1700,7 @@ def basin_aggregation(
       lake_subs=lake_subs,
       post_lake_subs=post_lake_subs,
       upstream_by_node=upstream_by_node,
+      headwater_links=headwater_links,
       link_depth=link_depth,
       min_sub_area=min_sub_area,
       outlet_value=outlet_value,
@@ -1667,7 +1767,11 @@ def basin_aggregation(
       how="left",
     )
   agg_river, cycle_features = _mark_river_main_stems(
-    agg_river, down_col, riv_id_col, upstream_by_node=upstream_by_node
+    agg_river,
+    down_col,
+    riv_id_col,
+    upstream_by_node=upstream_by_node,
+    headwater_links=headwater_links,
   )
   _export_topology_cycles(cycle_features, agg_river.crs)
   agg_river = agg_river[agg_river["mask"] == 1].copy()
