@@ -99,6 +99,10 @@ MIN_RIV_LENGTH = 1.0          # km
 # Match this to MESH outlet_value (e.g. -9999).
 OUTLET_VALUE = -9999
 
+# TEMP: per-iteration merge diagnostics (delete this block + call sites when done).
+MERGE_ITER_DIAG = False
+MERGE_ITER_DIAG_DIR = WORKING / "merge_iteration_diag"
+
 
 # ==============================================================================
 # HELPERS
@@ -443,7 +447,6 @@ def _mark_river_main_stems(
     down_col: str,
     riv_id_col: str,
     upstream_by_node: dict[int, list[int]] | None = None,
-    headwater_links: set[int] | None = None,
 ) -> tuple[gpd.GeoDataFrame, list[dict]]:
     """Pick highest-uparea main stem per aggregate; stop and warn on DSLINKNO cycles."""
     agg_river = agg_river.copy()
@@ -451,7 +454,6 @@ def _mark_river_main_stems(
     cycle_features: list[dict] = []
     reported_cycles: set[tuple[int, ...]] = set()
     up_map = upstream_by_node or {}
-    hw_links = headwater_links or set()
 
     for agg_id in agg_river["agg"].dropna().unique():
         xx = agg_river.index[agg_river["agg"] == agg_id].tolist()
@@ -459,19 +461,7 @@ def _mark_river_main_stems(
         visited_set: set[int] = set()
 
         while xx:
-            seed_link = _two_headwater_main_seed_link_for_agg(
-              agg_river, agg_id, up_map, hw_links, riv_id_col
-            )
-            if seed_link is not None:
-              seed_hit = xx
-              seed_idx = [
-                i
-                for i in seed_hit
-                if int(agg_river.loc[i, riv_id_col]) == int(seed_link)
-              ]
-              yy = seed_idx[0] if seed_idx else agg_river.loc[xx, "_uparea"].idxmax()
-            else:
-              yy = agg_river.loc[xx, "_uparea"].idxmax()
+            yy = agg_river.loc[xx, "_uparea"].idxmax()
             if up_map:
               _mark_main_stem_upstream_chain(agg_river, yy, riv_id_col, up_map)
             link_id = int(agg_river.loc[yy, riv_id_col])
@@ -506,6 +496,117 @@ def _export_topology_cycles(cycle_features: list[dict], crs) -> None:
     TOPOLOGY_CYCLES_SHP.parent.mkdir(parents=True, exist_ok=True)
     gpd.GeoDataFrame(cycle_features, crs=crs).to_file(TOPOLOGY_CYCLES_SHP)
     print(f"Wrote {len(cycle_features)} cycle link feature(s) to {TOPOLOGY_CYCLES_SHP}")
+
+
+def _merge_iter_diagnostic_enabled(flag: bool | None) -> bool:
+  if flag is not None:
+    return bool(flag)
+  env = os.environ.get("BASIN_MERGE_DIAG", "").strip().lower()
+  if env in ("1", "true", "yes"):
+    return True
+  return MERGE_ITER_DIAG
+
+
+def write_basin_merge_iteration_diagnostic(
+  iteration: int,
+  phase: str,
+  basin: gpd.GeoDataFrame,
+  agg_basin: pd.DataFrame,
+  absorb_table: pd.DataFrame,
+  river: gpd.GeoDataFrame,
+  *,
+  id_col: str,
+  down_col: str,
+  riv_id_col: str,
+  link_depth: dict[int, int],
+  headwater_links: set[int],
+  upstream_by_node: dict[int, list[int]],
+  lake_subs: set[int],
+  post_lake_subs: set[int],
+  min_sub_area: float,
+  outlet_value: int = OUTLET_VALUE,
+  output_root=os.fspath(MERGE_ITER_DIAG_DIR),
+) -> None:
+  """
+  TEMP — dump one merge-loop snapshot for QGIS / CSV review. Safe to delete later.
+
+  Writes under ``output_root/iter_NNNN_<phase>/``:
+
+  * ``absorb.csv`` — merge rows applied (or planned) this round
+  * ``agg_summary.csv`` — one row per surviving aggregate
+  * ``pour_points.csv`` — pour polygons with agg, depth, frontier flags
+  * ``streams_mask.shp`` — all river links with ``agg``, ``mask`` (main stem),
+    ``link_depth``, ``is_hw_link`` (network tip), ``would_drop`` (= not main stem)
+  """
+  outlet_value = int(outlet_value)
+  iter_dir = os.path.join(output_root, f"iter_{iteration:04d}_{phase}")
+  os.makedirs(iter_dir, exist_ok=True)
+
+  absorb_table.copy().to_csv(os.path.join(iter_dir, "absorb.csv"), index=False)
+
+  agg_summary = agg_basin.copy()
+  agg_summary.to_csv(os.path.join(iter_dir, "agg_summary.csv"), index=False)
+
+  eligible = _eligible_small_aggregate_ids(
+    basin, agg_basin, id_col, post_lake_subs, min_sub_area
+  )
+  frontier = _frontier_headwater_aggregate_ids(
+    basin, id_col, link_depth, eligible
+  )
+  pour = basin[[id_col, "agg", "aggdown", "_unitarea", "_uparea", "Mask"]].copy()
+  pour["link_depth"] = pour[id_col].astype(int).map(
+    lambda i: link_depth.get(int(i), -1)
+  )
+  pour["agg_min_depth"] = pour["agg"].astype(int).map(
+    lambda a: _agg_min_link_depth(basin, id_col, int(a), link_depth)
+  )
+  pour["eligible_small"] = pour["agg"].astype(int).isin(eligible).astype(int)
+  pour["frontier_hw"] = pour["agg"].astype(int).isin(frontier).astype(int)
+  pour["is_network_headwater_link"] = pour[id_col].astype(int).isin(headwater_links).astype(
+    int
+  )
+  pour.to_csv(os.path.join(iter_dir, "pour_points.csv"), index=False)
+
+  if id_col == riv_id_col:
+    riv = river.merge(
+      basin[[id_col, "agg"]].copy(),
+      on=riv_id_col,
+      how="left",
+    )
+  else:
+    riv = river.merge(
+      basin[[id_col, "agg"]].copy(),
+      left_on=riv_id_col,
+      right_on=id_col,
+      how="left",
+    )
+  riv_diag, _ = _mark_river_main_stems(
+    riv, down_col, riv_id_col, upstream_by_node=upstream_by_node
+  )
+  link_ids = riv_diag[riv_id_col].astype(int)
+  riv_diag["link_depth"] = link_ids.map(lambda i: link_depth.get(int(i), -1))
+  riv_diag["is_hw_link"] = link_ids.isin(headwater_links).astype(int)
+  riv_diag["would_drop"] = (riv_diag["mask"] != 1).astype(int)
+  keep_cols = [
+    riv_id_col,
+    down_col,
+    "agg",
+    UP_AREA,
+    "_uparea",
+    "mask",
+    "link_depth",
+    "is_hw_link",
+    "would_drop",
+    "geometry",
+  ]
+  keep_cols = [c for c in keep_cols if c in riv_diag.columns]
+  streams_out = os.path.join(iter_dir, "streams_mask.shp")
+  riv_diag[keep_cols].to_file(streams_out)
+  n_drop = int(riv_diag["would_drop"].sum())
+  print(
+    f"Merge diag iter {iteration} ({phase}): {iter_dir} "
+    f"({len(absorb_table)} absorb row(s), {n_drop} stream link(s) would drop)"
+  )
 
 
 # ==============================================================================
@@ -759,65 +860,6 @@ def _headwater_link_ids(
     if lid not in receives_inflow:
       out.add(lid)
   return out
-
-
-def _is_two_headwater_confluence(
-  upstream_by_node: dict[int, list[int]],
-  ds: int,
-  headwater_links: set[int],
-) -> bool:
-  ups = upstream_by_node.get(int(ds), [])
-  if len(ups) != 2:
-    return False
-  try:
-    u1, u2 = int(ups[0]), int(ups[1])
-  except (TypeError, ValueError):
-    return False
-  return u1 in headwater_links and u2 in headwater_links
-
-
-def _river_link_uparea(
-  agg_river: gpd.GeoDataFrame,
-  riv_id_col: str,
-  link_id: int,
-) -> float:
-  rows = agg_river.loc[agg_river[riv_id_col].astype(int) == int(link_id), "_uparea"]
-  return float(rows.max()) if not rows.empty else 0.0
-
-
-def _two_headwater_main_seed_link_for_agg(
-  agg_river: gpd.GeoDataFrame,
-  agg_id: object,
-  upstream_by_node: dict[int, list[int]],
-  headwater_links: set[int],
-  riv_id_col: str,
-) -> int | None:
-  """
-  At a two-headwater confluence inside ``agg_id``, return the upstream link id
-  with larger cumulative area (main channel seed).
-  """
-  agg_rows = agg_river.loc[agg_river["agg"] == agg_id]
-  if agg_rows.empty or not headwater_links:
-    return None
-  link_set = set(agg_rows[riv_id_col].astype(int))
-  best_uparea = -1.0
-  best_link: int | None = None
-  for _ds, ups in upstream_by_node.items():
-    if len(ups) != 2:
-      continue
-    u1, u2 = int(ups[0]), int(ups[1])
-    if u1 not in headwater_links or u2 not in headwater_links:
-      continue
-    if u1 not in link_set or u2 not in link_set:
-      continue
-    a1 = _river_link_uparea(agg_river, riv_id_col, u1)
-    a2 = _river_link_uparea(agg_river, riv_id_col, u2)
-    winner = u1 if a1 >= a2 else u2
-    aw = max(a1, a2)
-    if aw > best_uparea:
-      best_uparea = aw
-      best_link = winner
-  return best_link
 
 
 def _link_depth_from_headwaters(
@@ -1363,7 +1405,6 @@ def build_headwater_driven_absorb_table(
   lake_subs: set[int],
   post_lake_subs: set[int],
   upstream_by_node: dict[int, list[int]],
-  headwater_links: set[int],
   link_depth: dict[int, int],
   min_sub_area: float,
   outlet_value: int = OUTLET_VALUE,
@@ -1376,10 +1417,7 @@ def build_headwater_driven_absorb_table(
   * Each frontier unit merges into the aggregate at its ``aggdown`` downstream
     link, ordered shallowest-first along the network.
   * Other **small** upstream arms sharing that downstream link join the same
-    target (basin area only).
-  * **Two headwater** reaches at the same downstream link: when this junction
-    merges, **both** upstream aggregates join the downstream target; streams
-    follow the higher-``_uparea`` headwater through the downstream segment.
+    target (basin area only; main-stem streams still use highest ``_uparea``).
   * **Three or more** upstream reaches at the same downstream link: no merge.
 
   After applies, the next iteration rediscovers frontier headwaters further DS.
@@ -1464,28 +1502,6 @@ def build_headwater_driven_absorb_table(
       if _agg_is_lake_group(basin, u_agg_i):
         continue
       sources.add(u_agg_i)
-
-    if _is_two_headwater_confluence(upstream_by_node, ds, headwater_links):
-      for u in upstream_by_node.get(ds, []):
-        u_agg = _current_agg_for_basin_id(
-          basin,
-          id_col,
-          u,
-          survivor_ids=survivors,
-          gauge_link_ids=gauge_links,
-          pour_agg=pour_agg,
-          id_to_agg=id_to_agg,
-        )
-        if u_agg is None:
-          continue
-        u_agg_i = int(u_agg)
-        if u_agg_i == target_i:
-          continue
-        if _agg_is_lake_group(basin, u_agg_i):
-          continue
-        if not _aggregate_may_be_absorbed(basin, u_agg_i, id_col, post_lake_subs):
-          continue
-        sources.add(u_agg_i)
 
     for aggold in sorted(
       sources,
@@ -1618,6 +1634,7 @@ def basin_aggregation(
   min_riv_slope: float,
   min_riv_length: float,
   outlet_value: int = OUTLET_VALUE,
+  merge_iter_diagnostic: bool | None = None,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
   """
   Aggregate basins and rivers based on drainage area, slope, and reservoir masking.
@@ -1678,6 +1695,30 @@ def basin_aggregation(
   no_subbasin = len(basin)
   max_merge_iters = max(len(basin) * 2, 1000)
   merge_iter = 0
+  diag = _merge_iter_diagnostic_enabled(merge_iter_diagnostic)
+  diag_kw = dict(
+    id_col=id_col,
+    down_col=down_col,
+    riv_id_col=riv_id_col,
+    link_depth=link_depth,
+    headwater_links=headwater_links,
+    upstream_by_node=upstream_by_node,
+    lake_subs=lake_subs,
+    post_lake_subs=post_lake_subs,
+    min_sub_area=min_sub_area,
+    outlet_value=outlet_value,
+  )
+  if diag:
+    empty_absorb = pd.DataFrame(columns=["aggold", "agg", "aggdown"])
+    write_basin_merge_iteration_diagnostic(
+      0,
+      "initial",
+      basin,
+      agg_basin,
+      empty_absorb,
+      river,
+      **diag_kw,
+    )
   print(
     f"Basin merge (frontier headwaters → DS): {len(basin)} pour point(s), "
     f"max {max_merge_iters} iteration(s)."
@@ -1700,7 +1741,6 @@ def basin_aggregation(
       lake_subs=lake_subs,
       post_lake_subs=post_lake_subs,
       upstream_by_node=upstream_by_node,
-      headwater_links=headwater_links,
       link_depth=link_depth,
       min_sub_area=min_sub_area,
       outlet_value=outlet_value,
@@ -1723,6 +1763,16 @@ def basin_aggregation(
       agg_basin = agg_basin.merge(basin[[id_col, "_uparea", "Mask"]], on=id_col, how="left")
       agg_basin = agg_basin.rename(columns={id_col: "agg", down_col: "aggdown"})
       agg_basin = _drop_small_outlets(agg_basin)
+      if diag:
+        write_basin_merge_iteration_diagnostic(
+          merge_iter,
+          "after_merge",
+          basin,
+          agg_basin,
+          xx,
+          river,
+          **diag_kw,
+        )
 
     if not applied_any:
       break
@@ -1732,6 +1782,24 @@ def basin_aggregation(
     no_subbasin = len(agg_basin[agg_basin["_unitarea"] < min_sub_area])
 
   print(f"Basin merge loop finished after {merge_iter} iteration(s).")
+
+  if diag:
+    final_agg = basin.drop(columns="geometry").groupby(["agg", "aggdown"], as_index=False).agg(
+      {"_unitarea": "sum"}
+    )
+    final_agg = final_agg.rename(columns={"agg": id_col, "aggdown": down_col})
+    final_agg = final_agg.merge(basin[[id_col, "_uparea", "Mask"]], on=id_col, how="left")
+    final_agg = final_agg.rename(columns={id_col: "agg", down_col: "aggdown"})
+    final_agg = _drop_small_outlets(final_agg)
+    write_basin_merge_iteration_diagnostic(
+      merge_iter + 1,
+      "final_pre_dissolve",
+      basin,
+      final_agg,
+      pd.DataFrame(columns=["aggold", "agg", "aggdown"]),
+      river,
+      **diag_kw,
+    )
 
   sentinel_group = basin["agg"].map(lambda a: _is_sentinel_object_id(a, outlet_value))
   if sentinel_group.any():
@@ -1767,11 +1835,7 @@ def basin_aggregation(
       how="left",
     )
   agg_river, cycle_features = _mark_river_main_stems(
-    agg_river,
-    down_col,
-    riv_id_col,
-    upstream_by_node=upstream_by_node,
-    headwater_links=headwater_links,
+    agg_river, down_col, riv_id_col, upstream_by_node=upstream_by_node
   )
   _export_topology_cycles(cycle_features, agg_river.crs)
   agg_river = agg_river[agg_river["mask"] == 1].copy()
@@ -1849,6 +1913,7 @@ def run_aggregation(
   min_riv_slope: float = MIN_RIV_SLOPE,
   min_riv_length: float = MIN_RIV_LENGTH,
   outlet_value: int = OUTLET_VALUE,
+  merge_iter_diagnostic: bool | None = None,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
   """Load cleanGeofabric outputs, aggregate, and write shapefiles."""
   print(f"Loading basins: {basins_path}")
@@ -1863,6 +1928,7 @@ def run_aggregation(
     min_riv_slope,
     min_riv_length,
     outlet_value=outlet_value,
+    merge_iter_diagnostic=merge_iter_diagnostic,
   )
 
   os.makedirs(os.path.dirname(output_basins_path) or ".", exist_ok=True)
