@@ -817,8 +817,9 @@ def _eligible_small_aggregate_ids(
   post_lake_subs: set[int],
   min_sub_area: float,
 ) -> set[int]:
+  """Small aggregates among all surviving pour groups (not only ``agg_basin`` rows)."""
   out: set[int] = set()
-  for agg_val in agg_basin["agg"].dropna().unique():
+  for agg_val in basin["agg"].dropna().unique():
     try:
       agg_i = int(agg_val)
     except (TypeError, ValueError):
@@ -990,6 +991,34 @@ def _agg_primary_aggdown(agg_basin: pd.DataFrame, agg_id: int) -> object:
   return rows.iloc[0]
 
 
+def _agg_downstream_link(
+  basin: gpd.GeoDataFrame,
+  agg_basin: pd.DataFrame,
+  agg_id: int,
+) -> object:
+  """Next downstream link id for ``agg_id`` (merge table, then pour rows)."""
+  down = _agg_primary_aggdown(agg_basin, int(agg_id))
+  if down is None or pd.isna(down):
+    down = _agg_aggdown_on_basin(basin, int(agg_id))
+  if pd.isna(down):
+    return None
+  return down
+
+
+def _linear_series_topology_allows(
+  agg_u: int,
+  ds_link: int,
+  upstream_by_node: dict[int, list[int]],
+  pour_agg: dict[int, int],
+) -> bool:
+  """True on a non-confluence node where the sole upstream reach is ``agg_u``."""
+  ups = upstream_by_node.get(int(ds_link), [])
+  if len(ups) != 1:
+    return False
+  up_agg = pour_agg.get(int(ups[0]))
+  return up_agg is not None and int(up_agg) == int(agg_u)
+
+
 def build_headwater_driven_absorb_table(
   basin: gpd.GeoDataFrame,
   agg_basin: pd.DataFrame,
@@ -1037,7 +1066,7 @@ def build_headwater_driven_absorb_table(
       basin, id_col, agg_i, upstream_by_node
     ):
       continue
-    ds_raw = _agg_primary_aggdown(agg_basin, agg_i)
+    ds_raw = _agg_downstream_link(basin, agg_basin, agg_i)
     if ds_raw is None or _is_outlet_id(ds_raw, outlet_value):
       continue
     try:
@@ -1158,28 +1187,50 @@ def build_linear_main_stem_series_absorb_table(
   * Both at or above half-min → merge only if combined local area is below
     ``max_combined_frac`` × ``min_sub_area``.
 
-  Pairs come from the river graph: one upstream reach into a node → one candidate
-  merge (upstream aggregate into downstream). Lakes/gauges/post-lake rules match
+  Pairs follow each aggregate's ``aggdown`` onto the resolved downstream aggregate
+  (same chain as headwater), with river checks at the downstream pour so
+  confluence arms are not folded together. Lakes/gauges/post-lake rules match
   the headwater pass.
   """
+  outlet_value = int(outlet_value)
   pour_agg = _pour_agg_by_link(basin, id_col)
-  linear_nodes = sorted(
-    (int(ds) for ds, ups in upstream_by_node.items() if len(ups) == 1),
-    key=lambda d: (link_depth.get(d, 10**9), d),
-  )
+  id_to_agg = _id_to_agg_map(basin, id_col)
+  gauge_links = _gauge_pour_link_ids(basin, id_col)
+  survivors = {int(a) for a in basin["agg"].dropna().astype(int).unique()}
 
+  agg_ids = sorted(survivors)
   rows: list[tuple[int, int]] = []
   seen: set[tuple[int, int]] = set()
 
-  for ds_i in linear_nodes:
-    up_link = int(upstream_by_node[ds_i][0])
-    agg_d = pour_agg.get(ds_i)
-    agg_u = pour_agg.get(up_link)
-    if agg_d is None or agg_u is None:
+  for agg_u in agg_ids:
+    if _agg_pour_is_multi_inflow_junction(
+      basin, id_col, agg_u, upstream_by_node
+    ):
+      continue
+    ds_raw = _agg_downstream_link(basin, agg_basin, agg_u)
+    if ds_raw is None or _is_outlet_id(ds_raw, outlet_value):
+      continue
+    try:
+      ds_link = int(ds_raw)
+    except (TypeError, ValueError):
+      continue
+    agg_d = _current_agg_for_basin_id(
+      basin,
+      id_col,
+      ds_link,
+      survivor_ids=survivors,
+      gauge_link_ids=gauge_links,
+      pour_agg=pour_agg,
+      id_to_agg=id_to_agg,
+    )
+    if agg_d is None:
       continue
     agg_d = int(agg_d)
-    agg_u = int(agg_u)
     if agg_u == agg_d:
+      continue
+    if not _linear_series_topology_allows(
+      agg_u, ds_link, upstream_by_node, pour_agg
+    ):
       continue
     pair = (agg_u, agg_d)
     if pair in seen:
@@ -1197,7 +1248,7 @@ def build_linear_main_stem_series_absorb_table(
     if _agg_is_lake_group(basin, agg_u) or _agg_is_lake_group(basin, agg_d):
       continue
     if not _linear_merge_may_apply_to_target(
-      basin, id_col, ds_i, agg_d, lake_subs
+      basin, id_col, ds_link, agg_d, lake_subs
     ):
       continue
     seen.add(pair)
