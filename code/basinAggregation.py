@@ -216,7 +216,17 @@ def _basin_columns_for_output(
   }
   from_table = set(_basin_pour_through_cols(basin, id_col))
   ordered = list(dict.fromkeys(_basin_attr_cols(basin) + list(from_input) + list(from_table)))
-  return [c for c in ordered if c in basin.columns and c not in _internal_basin_columns(id_col, down_col)]
+  skip = _internal_basin_columns(id_col, down_col) | {UP_AREA}
+  if UNIT_AREA:
+    skip.add(UNIT_AREA)
+  return [c for c in ordered if c in basin.columns and c not in skip]
+
+
+def _deduplicate_geodataframe_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+  """Shapefile export breaks when duplicate labels (e.g. two ``DSContArea`` columns)."""
+  if gdf.columns.is_unique:
+    return gdf
+  return gdf.loc[:, ~gdf.columns.duplicated()].copy()
 
 
 def _slope_from_strm_drop_and_length(
@@ -2072,6 +2082,9 @@ def basin_aggregation(
     down_col=down_col,
     outlet_value=outlet_value,
   )
+
+  agg_basin = _deduplicate_geodataframe_columns(agg_basin)
+  agg_river = _deduplicate_geodataframe_columns(agg_river)
 
   return agg_basin, agg_river
 

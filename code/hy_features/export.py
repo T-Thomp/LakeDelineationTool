@@ -87,10 +87,16 @@ def export_shapefile_legacy(gdf: gpd.GeoDataFrame, filename: str | Path) -> None
     Compatible with TauDEM/MESH tools (DSContArea, LINKNO, etc.).
     """
     export_gdf = rename_shapefile_columns(gdf.copy())
+    if not export_gdf.columns.is_unique:
+        export_gdf = export_gdf.loc[:, ~export_gdf.columns.duplicated()].copy()
+
     float_cols = export_gdf.select_dtypes(include=["float64", "float32"]).columns
     for col in float_cols:
         if col != "Slope":
-            export_gdf[col] = pd.to_numeric(export_gdf[col], errors="coerce").fillna(0.0).round(3)
+            series = export_gdf[col]
+            if isinstance(series, pd.DataFrame):
+                series = series.iloc[:, 0]
+            export_gdf[col] = pd.to_numeric(series, errors="coerce").fillna(0.0).round(3)
 
     if "Slope" in export_gdf.columns:
         export_gdf["Slope"] = pd.to_numeric(export_gdf["Slope"], errors="coerce").fillna(0.0)
