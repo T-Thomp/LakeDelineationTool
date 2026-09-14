@@ -767,18 +767,56 @@ def _junction_two_inflow_both_continuing(
   )
 
 
-def _agg_pour_is_multi_inflow_junction(
+def _agg_survivor_pour_link(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  agg_id: int,
+) -> int | None:
+  """Outlet pour (``DN == agg``) when present, else any pour in the aggregate."""
+  survivor = basin.loc[
+    basin[id_col].astype(int) == basin["agg"].astype(int),
+    [id_col, "agg"],
+  ]
+  survivor = survivor.loc[survivor["agg"].astype(int) == int(agg_id), id_col]
+  if not survivor.empty:
+    return int(survivor.iloc[0])
+  fallback = basin.loc[basin["agg"].astype(int) == int(agg_id), id_col]
+  if fallback.empty:
+    return None
+  return int(fallback.iloc[0])
+
+
+def _pour_immediate_downstream_link(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  down_col: str,
+  link_id: int,
+  outlet_value: int,
+) -> int | None:
+  """One basin/river hop downstream from pour ``link_id`` (``DSLINKNO``)."""
+  rows = basin.loc[basin[id_col].astype(int) == int(link_id), down_col]
+  if rows.empty:
+    return None
+  raw = rows.iloc[0]
+  if _is_outlet_id(raw, outlet_value):
+    return None
+  try:
+    return int(raw)
+  except (TypeError, ValueError):
+    return None
+
+
+def _aggregate_outlet_is_confluence(
   basin: gpd.GeoDataFrame,
   id_col: str,
   agg_id: int,
   upstream_by_node: dict[int, list[int]],
 ) -> bool:
-  """True if any pour link in the aggregate is a 2+ inflow stream junction."""
-  pours = basin.loc[basin["agg"].astype(int) == int(agg_id), id_col].astype(int)
-  for link in pours.to_numpy():
-    if len(upstream_by_node.get(int(link), [])) >= 2:
-      return True
-  return False
+  """True when the aggregate outlet pour sits at a 2+ inflow stream junction."""
+  link = _agg_survivor_pour_link(basin, id_col, agg_id)
+  if link is None:
+    return True
+  return len(upstream_by_node.get(int(link), [])) >= 2
 
 
 def _agg_group_unit_area(basin: gpd.GeoDataFrame, agg_id: int) -> float:
@@ -1005,24 +1043,11 @@ def _agg_downstream_link(
   return down
 
 
-def _linear_series_topology_allows(
-  agg_u: int,
-  ds_link: int,
-  upstream_by_node: dict[int, list[int]],
-  pour_agg: dict[int, int],
-) -> bool:
-  """True on a non-confluence node where the sole upstream reach is ``agg_u``."""
-  ups = upstream_by_node.get(int(ds_link), [])
-  if len(ups) != 1:
-    return False
-  up_agg = pour_agg.get(int(ups[0]))
-  return up_agg is not None and int(up_agg) == int(agg_u)
-
-
 def build_headwater_driven_absorb_table(
   basin: gpd.GeoDataFrame,
   agg_basin: pd.DataFrame,
   id_col: str,
+  down_col: str,
   lake_subs: set[int],
   post_lake_subs: set[int],
   upstream_by_node: dict[int, list[int]],
@@ -1047,7 +1072,7 @@ def build_headwater_driven_absorb_table(
   Lakes and gauge units are never absorbed; upstream may merge into a gauge.
   """
   outlet_value = int(outlet_value)
-  survivors = set(agg_basin["agg"].astype(int))
+  survivors = {int(a) for a in basin["agg"].dropna().astype(int).unique()}
   gauge_links = _gauge_pour_link_ids(basin, id_col)
   pour_agg = _pour_agg_by_link(basin, id_col)
   id_to_agg = _id_to_agg_map(basin, id_col)
@@ -1062,16 +1087,17 @@ def build_headwater_driven_absorb_table(
 
   ds_triggers: dict[int, set[int]] = defaultdict(set)
   for agg_i in sorted(frontier):
-    if _agg_pour_is_multi_inflow_junction(
+    if _aggregate_outlet_is_confluence(
       basin, id_col, agg_i, upstream_by_node
     ):
       continue
-    ds_raw = _agg_downstream_link(basin, agg_basin, agg_i)
-    if ds_raw is None or _is_outlet_id(ds_raw, outlet_value):
+    u_link = _agg_survivor_pour_link(basin, id_col, agg_i)
+    if u_link is None:
       continue
-    try:
-      ds = int(ds_raw)
-    except (TypeError, ValueError):
+    ds = _pour_immediate_downstream_link(
+      basin, id_col, down_col, u_link, outlet_value
+    )
+    if ds is None:
       continue
     if _link_is_lake_pour(basin, id_col, ds, lake_subs):
       continue
@@ -1115,7 +1141,7 @@ def build_headwater_driven_absorb_table(
     ):
       if aggold == target_i or aggold in seen_source:
         continue
-      if _agg_pour_is_multi_inflow_junction(
+      if _aggregate_outlet_is_confluence(
         basin, id_col, aggold, upstream_by_node
       ):
         continue
@@ -1134,6 +1160,8 @@ def _linear_series_areas_may_merge(
   max_combined_frac: float,
 ) -> bool:
   """Area rules for merging two adjacent main-stem aggregates in series."""
+  if area_upstream < min_sub_area or area_downstream < min_sub_area:
+    return True
   half_min = min_sub_area * half_min_frac
   cap = min_sub_area * max_combined_frac
   if min(area_upstream, area_downstream) < half_min:
@@ -1167,6 +1195,7 @@ def build_linear_main_stem_series_absorb_table(
   basin: gpd.GeoDataFrame,
   agg_basin: pd.DataFrame,
   id_col: str,
+  down_col: str,
   upstream_by_node: dict[int, list[int]],
   link_depth: dict[int, int],
   lake_subs: set[int],
@@ -1179,18 +1208,14 @@ def build_linear_main_stem_series_absorb_table(
   """
   After headwater merging: merge upstream → downstream on **linear** reaches only.
 
-  A downstream pour qualifies when it has exactly **one** upstream river segment
-  (no confluence at that node). Area rules (``half_min_frac``, ``max_combined_frac``
-  × ``min_sub_area``):
+  Pairs are the immediate river/basin hop from each aggregate's outlet pour
+  (``DN == agg``) to the next ``DSLINKNO``, when that node has a single upstream
+  reach belonging to the upstream aggregate. Area rules (``half_min_frac``,
+  ``max_combined_frac`` × ``min_sub_area``):
 
   * Either unit below half-min → merge.
   * Both at or above half-min → merge only if combined local area is below
     ``max_combined_frac`` × ``min_sub_area``.
-
-  Pairs follow each aggregate's ``aggdown`` onto the resolved downstream aggregate
-  (same chain as headwater), with river checks at the downstream pour so
-  confluence arms are not folded together. Lakes/gauges/post-lake rules match
-  the headwater pass.
   """
   outlet_value = int(outlet_value)
   pour_agg = _pour_agg_by_link(basin, id_col)
@@ -1203,16 +1228,18 @@ def build_linear_main_stem_series_absorb_table(
   seen: set[tuple[int, int]] = set()
 
   for agg_u in agg_ids:
-    if _agg_pour_is_multi_inflow_junction(
-      basin, id_col, agg_u, upstream_by_node
-    ):
+    u_link = _agg_survivor_pour_link(basin, id_col, agg_u)
+    if u_link is None:
       continue
-    ds_raw = _agg_downstream_link(basin, agg_basin, agg_u)
-    if ds_raw is None or _is_outlet_id(ds_raw, outlet_value):
+    ds_link = _pour_immediate_downstream_link(
+      basin, id_col, down_col, u_link, outlet_value
+    )
+    if ds_link is None:
       continue
-    try:
-      ds_link = int(ds_raw)
-    except (TypeError, ValueError):
+    ups = upstream_by_node.get(int(ds_link), [])
+    if len(ups) != 1 or int(ups[0]) != int(u_link):
+      continue
+    if pour_agg.get(int(u_link)) != int(agg_u):
       continue
     agg_d = _current_agg_for_basin_id(
       basin,
@@ -1227,10 +1254,6 @@ def build_linear_main_stem_series_absorb_table(
       continue
     agg_d = int(agg_d)
     if agg_u == agg_d:
-      continue
-    if not _linear_series_topology_allows(
-      agg_u, ds_link, upstream_by_node, pour_agg
-    ):
       continue
     pair = (agg_u, agg_d)
     if pair in seen:
@@ -1443,6 +1466,7 @@ def basin_aggregation(
       basin,
       agg_basin,
       id_col=id_col,
+      down_col=down_col,
       lake_subs=lake_subs,
       post_lake_subs=post_lake_subs,
       upstream_by_node=upstream_by_node,
@@ -1499,6 +1523,7 @@ def basin_aggregation(
         basin,
         agg_basin,
         id_col=id_col,
+        down_col=down_col,
         upstream_by_node=upstream_by_node,
         link_depth=link_depth,
         lake_subs=lake_subs,
