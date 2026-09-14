@@ -69,6 +69,7 @@ UP_AREA = "DSContArea"
 # River hydraulics
 SLOPE = "Slope"
 LENGTH = "Length"                # reach length; converted with LENGTH_SCALE
+STRM_DROP = "strmDrop"           # TauDEM elevation drop along reach (m); sum on merge
 
 # Masking / special units
 GAUGE_FLAG: Optional[str] = None  # numeric 0/1 column; None -> derive from GAUGE_IDS
@@ -94,6 +95,11 @@ MIN_SUB_AREA = 100.0          # km² — minimum local area (_unitarea) to keep 
                               # units may be absorbed. Merged aggregates may be much larger than this.
 MIN_RIV_SLOPE = 0.0000001     # minimum accepted river slope (WATFLOOD manual)
 MIN_RIV_LENGTH = 1.0          # km
+
+# Final linear main-stem series merge (after headwater pass). Fractions of ``MIN_SUB_AREA``.
+LINEAR_SERIES_MERGE_ENABLED = True
+LINEAR_SERIES_MERGE_HALF_MIN_FRAC = 0.5   # either unit below this → always merge pair
+LINEAR_SERIES_MERGE_MAX_COMBINED_FRAC = 2.0  # when both ≥ half-min, merge if sum < this × min
 
 # Sentinel written to DSLINKNO for the most-downstream basin(s).
 # Match this to MESH outlet_value (e.g. -9999).
@@ -127,6 +133,104 @@ def _basin_attr_cols(basin: gpd.GeoDataFrame) -> list[str]:
     FRAC_LAKE_AREA,
   ]
   return [c for c in candidates if c in basin.columns]
+
+
+def _basin_pour_through_cols(basin: gpd.GeoDataFrame, id_col: str) -> list[str]:
+  """TauDEM / geofabric basin columns to keep on aggregated pour rows (non-internal)."""
+  skip = {
+    "geometry",
+    "agg",
+    "aggdown",
+    "Mask",
+    id_col,
+    "_unitarea",
+    "_uparea",
+    "_lake_cat",
+    "_has_gauge",
+  }
+  return [c for c in basin.columns if c not in skip and not str(c).startswith("_")]
+
+
+def _stream_dissolve_aggfunc(
+  gdf: gpd.GeoDataFrame,
+  *,
+  riv_id_col: str = RIVER_ID,
+  down_col: str = NEXT_DOWN_ID,
+) -> dict[str, str]:
+  """
+  combiningBasins / cleanGeofabric-style dissolve: ``sum`` Length and strmDrop;
+  ``max`` on other numeric TauDEM fields; ``first`` on remaining columns.
+  ``Slope`` is recomputed after dissolve (not aggregated).
+
+  See ``combiningBasins.build_stream_agg_logic`` and ``cleanGeofabric.bypass_phantom_streams``.
+  """
+  sum_cols = {LENGTH, "_lengthkm", "Length", STRM_DROP}
+  skip = {
+    "geometry",
+    "agg",
+    "mask",
+    "_slope_weighted",
+    SLOPE,
+    riv_id_col,
+    down_col,
+  }
+  logic: dict[str, str] = {}
+  for col in gdf.columns:
+    if col in skip:
+      continue
+    if col in sum_cols:
+      logic[col] = "sum"
+    elif pd.api.types.is_numeric_dtype(gdf[col]):
+      logic[col] = "max"
+    else:
+      logic[col] = "first"
+  return logic
+
+
+def _internal_basin_columns(id_col: str, down_col: str) -> set[str]:
+  return {
+    "geometry",
+    "agg",
+    "aggdown",
+    "Mask",
+    id_col,
+    down_col,
+    "_unitarea",
+    "_uparea",
+    "_lake_cat",
+    "_has_gauge",
+  }
+
+
+def _basin_columns_for_output(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  down_col: str,
+  original_basin_columns: list[str],
+) -> list[str]:
+  """All non-internal basin / TauDEM columns to attach to each aggregated polygon."""
+  from_input = {
+    c
+    for c in original_basin_columns
+    if c not in _internal_basin_columns(id_col, down_col) and c != "geometry"
+  }
+  from_table = set(_basin_pour_through_cols(basin, id_col))
+  ordered = list(dict.fromkeys(_basin_attr_cols(basin) + list(from_input) + list(from_table)))
+  return [c for c in ordered if c in basin.columns and c not in _internal_basin_columns(id_col, down_col)]
+
+
+def _slope_from_strm_drop_and_length(
+  length_m: pd.Series,
+  strm_drop: pd.Series,
+  min_riv_slope: float,
+) -> pd.Series:
+  """``Slope = strmDrop / Length`` (cleanGeofabric / combiningBasins convention)."""
+  length_m = pd.to_numeric(length_m, errors="coerce")
+  strm_drop = pd.to_numeric(strm_drop, errors="coerce").fillna(0.0)
+  slope = strm_drop / length_m.replace(0, np.nan)
+  slope = slope.fillna(min_riv_slope).clip(lower=min_riv_slope)
+  slope = slope.mask(slope >= 1.0, min_riv_slope)
+  return slope
 
 
 def _one_row_per_agg(
@@ -1430,6 +1534,136 @@ def build_headwater_driven_absorb_table(
   return _sort_absorb_table_upstream_first(basin, id_col, link_depth, table)
 
 
+def _linear_series_areas_may_merge(
+  area_upstream: float,
+  area_downstream: float,
+  min_sub_area: float,
+  half_min_frac: float,
+  max_combined_frac: float,
+) -> bool:
+  """Area rules for merging two adjacent main-stem aggregates in series."""
+  half_min = min_sub_area * half_min_frac
+  cap = min_sub_area * max_combined_frac
+  if min(area_upstream, area_downstream) < half_min:
+    return True
+  return (area_upstream + area_downstream) < cap
+
+
+def _agg_id_for_pour_link(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  link_id: int,
+) -> int | None:
+  rows = basin.loc[basin[id_col].astype(int) == int(link_id), "agg"]
+  if rows.empty:
+    return None
+  return int(rows.iloc[0])
+
+
+def _rebuild_agg_basin_table(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  down_col: str,
+  min_sub_area: float,
+  outlet_value: int,
+) -> pd.DataFrame:
+  """Summed local areas and pour attributes per surviving ``agg``."""
+  outlet_value = int(outlet_value)
+
+  def _drop_small_outlets(df: pd.DataFrame) -> pd.DataFrame:
+    is_outlet = df["aggdown"].map(lambda d: _is_outlet_id(d, outlet_value))
+    return df[(~(is_outlet & (df["_uparea"] < min_sub_area))) | (df["Mask"] == 3)]
+
+  agg_basin = basin.drop(columns="geometry").groupby(["agg", "aggdown"], as_index=False).agg(
+    {"_unitarea": "sum"}
+  )
+  agg_basin = agg_basin.rename(columns={"agg": id_col, "aggdown": down_col})
+  agg_basin = agg_basin.merge(basin[[id_col, "_uparea", "Mask"]], on=id_col, how="left")
+  agg_basin = agg_basin.rename(columns={id_col: "agg", down_col: "aggdown"})
+  return _drop_small_outlets(agg_basin)
+
+
+def build_linear_main_stem_series_absorb_table(
+  basin: gpd.GeoDataFrame,
+  agg_basin: pd.DataFrame,
+  river: gpd.GeoDataFrame,
+  id_col: str,
+  down_col: str,
+  riv_id_col: str,
+  upstream_by_node: dict[int, list[int]],
+  link_depth: dict[int, int],
+  lake_subs: set[int],
+  post_lake_subs: set[int],
+  min_sub_area: float,
+  half_min_frac: float,
+  max_combined_frac: float,
+  outlet_value: int = OUTLET_VALUE,
+) -> pd.DataFrame:
+  """
+  After headwater merging: fold adjacent main-stem aggregates on linear links.
+
+  Only single-inflow nodes (no side headwaters at the pour). Merge upstream
+  aggregate into downstream when area rules pass; lakes/gauges/post-lake rules
+  match the headwater pass.
+  """
+  outlet_value = int(outlet_value)
+  if id_col == riv_id_col:
+    riv = river.merge(basin[[id_col, "agg"]].copy(), on=riv_id_col, how="left")
+  else:
+    riv = river.merge(
+      basin[[id_col, "agg"]].copy(),
+      left_on=riv_id_col,
+      right_on=id_col,
+      how="left",
+    )
+  riv, _ = _mark_river_main_stems(
+    riv, down_col, riv_id_col, upstream_by_node=upstream_by_node
+  )
+  main_stem = set(riv.loc[riv["mask"] == 1, riv_id_col].astype(int))
+
+  rows: list[tuple[int, int]] = []
+  seen: set[tuple[int, int]] = set()
+
+  for ds, ups in upstream_by_node.items():
+    if len(ups) != 1:
+      continue
+    try:
+      u = int(ups[0])
+      ds_i = int(ds)
+    except (TypeError, ValueError):
+      continue
+    if u not in main_stem or ds_i not in main_stem:
+      continue
+    agg_u = _agg_id_for_pour_link(basin, id_col, u)
+    agg_d = _agg_id_for_pour_link(basin, id_col, ds_i)
+    if agg_u is None or agg_d is None or agg_u == agg_d:
+      continue
+    pair = (agg_u, agg_d)
+    if pair in seen:
+      continue
+    area_u = _agg_group_unit_area(basin, agg_u)
+    area_d = _agg_group_unit_area(basin, agg_d)
+    if not _linear_series_areas_may_merge(
+      area_u, area_d, min_sub_area, half_min_frac, max_combined_frac
+    ):
+      continue
+    if not _aggregate_may_be_absorbed(basin, agg_u, id_col, post_lake_subs):
+      continue
+    if _agg_is_gauge_group(basin, agg_u):
+      continue
+    if _agg_is_lake_group(basin, agg_u) or _agg_is_lake_group(basin, agg_d):
+      continue
+    if not _linear_merge_may_apply_to_target(
+      basin, id_col, ds_i, agg_d, lake_subs
+    ):
+      continue
+    seen.add(pair)
+    rows.append((agg_u, agg_d))
+
+  table = _absorb_table_from_targets(rows, agg_basin)
+  return _sort_absorb_table_upstream_first(basin, id_col, link_depth, table)
+
+
 def _current_agg_for_basin_id(
   basin: gpd.GeoDataFrame,
   id_col: str,
@@ -1548,6 +1782,9 @@ def basin_aggregation(
   min_riv_slope: float,
   min_riv_length: float,
   outlet_value: int = OUTLET_VALUE,
+  linear_series_merge: bool = LINEAR_SERIES_MERGE_ENABLED,
+  linear_series_half_min_frac: float = LINEAR_SERIES_MERGE_HALF_MIN_FRAC,
+  linear_series_max_combined_frac: float = LINEAR_SERIES_MERGE_MAX_COMBINED_FRAC,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
   """
   Aggregate basins and rivers based on drainage area, slope, and reservoir masking.
@@ -1564,6 +1801,8 @@ def basin_aggregation(
   Terminal basins receive ``outlet_value`` in ``DSLINKNO`` (default ``OUTLET_VALUE``).
   """
   outlet_value = int(outlet_value)
+  original_basin_columns = list(input_basin.columns)
+  original_river_columns = list(input_river.columns)
   basin, river = prepare_input_tables(input_basin, input_river)
 
   id_col = BASIN_ID
@@ -1645,13 +1884,9 @@ def basin_aggregation(
         post_lake_subs=post_lake_subs,
       )
       applied_any = True
-      agg_basin = basin.drop(columns="geometry").groupby(["agg", "aggdown"], as_index=False).agg(
-        {"_unitarea": "sum"}
+      agg_basin = _rebuild_agg_basin_table(
+        basin, id_col, down_col, min_sub_area, outlet_value
       )
-      agg_basin = agg_basin.rename(columns={"agg": id_col, "aggdown": down_col})
-      agg_basin = agg_basin.merge(basin[[id_col, "_uparea", "Mask"]], on=id_col, how="left")
-      agg_basin = agg_basin.rename(columns={id_col: "agg", down_col: "aggdown"})
-      agg_basin = _drop_small_outlets(agg_basin)
 
     if not applied_any:
       break
@@ -1661,6 +1896,51 @@ def basin_aggregation(
     no_subbasin = len(agg_basin[agg_basin["_unitarea"] < min_sub_area])
 
   print(f"Basin merge loop finished after {merge_iter} iteration(s).")
+
+  if linear_series_merge:
+    series_rounds = 0
+    max_series_iters = max(len(basin), 500)
+    print(
+      "Basin merge (linear main-stem series): "
+      f"half-min={linear_series_half_min_frac}×, "
+      f"combined cap={linear_series_max_combined_frac}× MIN_SUB_AREA."
+    )
+    while True:
+      if series_rounds >= max_series_iters:
+        raise RuntimeError(
+          f"Linear main-stem merge did not converge after {max_series_iters} iterations."
+        )
+      xx_series = build_linear_main_stem_series_absorb_table(
+        basin,
+        agg_basin,
+        river,
+        id_col=id_col,
+        down_col=down_col,
+        riv_id_col=riv_id_col,
+        upstream_by_node=upstream_by_node,
+        link_depth=link_depth,
+        lake_subs=lake_subs,
+        post_lake_subs=post_lake_subs,
+        min_sub_area=min_sub_area,
+        half_min_frac=linear_series_half_min_frac,
+        max_combined_frac=linear_series_max_combined_frac,
+        outlet_value=outlet_value,
+      )
+      if xx_series.empty:
+        break
+      series_rounds += 1
+      basin = absorb_headwater_groups(
+        basin,
+        xx_series,
+        outlet_value=outlet_value,
+        allow_with_upstream=True,
+        id_col=id_col,
+        post_lake_subs=post_lake_subs,
+      )
+      agg_basin = _rebuild_agg_basin_table(
+        basin, id_col, down_col, min_sub_area, outlet_value
+      )
+    print(f"Linear main-stem merge finished after {series_rounds} round(s).")
 
   sentinel_group = basin["agg"].map(lambda a: _is_sentinel_object_id(a, outlet_value))
   if sentinel_group.any():
@@ -1679,7 +1959,12 @@ def basin_aggregation(
   pour_down = _one_row_per_agg(basin, id_col, ["aggdown"])
   basin = basin.drop(columns=["aggdown"]).merge(pour_down, on="agg", how="left")
 
-  attr_cols = ["aggdown", "_uparea"] + _basin_attr_cols(basin)
+  basin_out_cols = _basin_columns_for_output(
+    basin, id_col, down_col, original_basin_columns
+  )
+  attr_cols = ["aggdown", "_uparea"] + [
+    c for c in basin_out_cols if c != down_col
+  ]
   pour_attrs = _one_row_per_agg(basin, id_col, attr_cols)
 
   agg_basin = basin.dissolve(by="agg", aggfunc={"_unitarea": "sum"}, as_index=False)
@@ -1702,24 +1987,28 @@ def basin_aggregation(
   agg_river = agg_river[agg_river["mask"] == 1].copy()
   agg_river["_slope_weighted"] = agg_river[SLOPE] * agg_river["_lengthkm"]
 
-  agg_river = agg_river.dissolve(
-    by="agg",
-    aggfunc={"_lengthkm": "sum", "_slope_weighted": "sum"},
-    as_index=False,
-  ).rename(columns={"agg": riv_id_col})
+  stream_agg = _stream_dissolve_aggfunc(
+    agg_river, riv_id_col=riv_id_col, down_col=down_col
+  )
+  stream_agg["_slope_weighted"] = "sum"
+  agg_river = agg_river.dissolve(by="agg", aggfunc=stream_agg, as_index=False).rename(
+    columns={"agg": riv_id_col}
+  )
 
-  agg_river[SLOPE] = agg_river["_slope_weighted"] / agg_river["_lengthkm"].replace(0, np.nan)
+  length_m = agg_river["_lengthkm"] / LENGTH_SCALE
+  agg_river[LENGTH] = length_m
+  if STRM_DROP not in agg_river.columns:
+    raise ValueError(
+      f"River layer is missing '{STRM_DROP}' (expected from TauDEM / cleanGeofabric "
+      f"after combiningBasins). Columns present: {list(agg_river.columns)}"
+    )
+  agg_river[SLOPE] = _slope_from_strm_drop_and_length(
+    length_m, agg_river[STRM_DROP], min_riv_slope
+  )
   basin_topo = agg_basin[[id_col, down_col, "_uparea"]].copy()
   if id_col != riv_id_col:
     basin_topo = basin_topo.rename(columns={id_col: riv_id_col})
   agg_river = agg_river.merge(basin_topo, on=riv_id_col, how="left")
-
-  extra_river_cols = [riv_id_col]
-  if STREAM_ORDER in river.columns:
-    extra_river_cols.append(STREAM_ORDER)
-  if HILLSLOPE and HILLSLOPE in river.columns:
-    extra_river_cols.append(HILLSLOPE)
-  agg_river = agg_river.merge(river[extra_river_cols].copy(), on=riv_id_col, how="left")
 
   unit_out = UNIT_AREA or "area_km2"
   agg_basin = agg_basin.rename(columns={"_unitarea": unit_out, "_uparea": UP_AREA})
@@ -1728,12 +2017,34 @@ def basin_aggregation(
   if AREA_SCALE != 1.0:
     agg_basin[UP_AREA] = agg_basin[UP_AREA] / AREA_SCALE
 
-  agg_river[LENGTH] = agg_river["_lengthkm"] / LENGTH_SCALE
-  agg_river[UP_AREA] = agg_river["_uparea"] / AREA_SCALE
+  if "_uparea" in agg_river.columns:
+    agg_river[UP_AREA] = agg_river["_uparea"] / AREA_SCALE
   drop_riv = ["_lengthkm", "_uparea", "_slope_weighted", "mask"]
   if id_col != riv_id_col and id_col in agg_river.columns:
     drop_riv.append(id_col)
   agg_river = agg_river.drop(columns=drop_riv, errors="ignore")
+
+  missing_riv = [
+    c
+    for c in original_river_columns
+    if c != "geometry" and c not in agg_river.columns
+  ]
+  if missing_riv:
+    print(
+      "Warning: aggregated streams missing column(s) from input rivers layer: "
+      f"{missing_riv}"
+    )
+
+  missing_bas = [
+    c
+    for c in original_basin_columns
+    if c != "geometry" and c not in agg_basin.columns
+  ]
+  if missing_bas:
+    print(
+      "Warning: aggregated basins missing column(s) from input basins layer: "
+      f"{missing_bas}"
+    )
 
   agg_basin[id_col] = agg_basin[id_col].astype("int64")
   agg_basin[down_col] = (
@@ -1774,6 +2085,9 @@ def run_aggregation(
   min_riv_slope: float = MIN_RIV_SLOPE,
   min_riv_length: float = MIN_RIV_LENGTH,
   outlet_value: int = OUTLET_VALUE,
+  linear_series_merge: bool = LINEAR_SERIES_MERGE_ENABLED,
+  linear_series_half_min_frac: float = LINEAR_SERIES_MERGE_HALF_MIN_FRAC,
+  linear_series_max_combined_frac: float = LINEAR_SERIES_MERGE_MAX_COMBINED_FRAC,
 ) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
   """Load cleanGeofabric outputs, aggregate, and write shapefiles."""
   print(f"Loading basins: {basins_path}")
@@ -1788,6 +2102,9 @@ def run_aggregation(
     min_riv_slope,
     min_riv_length,
     outlet_value=outlet_value,
+    linear_series_merge=linear_series_merge,
+    linear_series_half_min_frac=linear_series_half_min_frac,
+    linear_series_max_combined_frac=linear_series_max_combined_frac,
   )
 
   os.makedirs(os.path.dirname(output_basins_path) or ".", exist_ok=True)
