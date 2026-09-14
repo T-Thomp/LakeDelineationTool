@@ -1603,6 +1603,25 @@ def _rebuild_agg_basin_table(
   return _drop_small_outlets(agg_basin)
 
 
+def _survivor_pour_links_for_agg(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  agg_id: int,
+) -> np.ndarray:
+  """
+  LINKNO/DN values for the aggregate's **outlet pour** (``DN == agg``).
+
+  After headwater merges, other polygons may share ``agg`` but sit on tributary
+  links (confluences). Linear series rules use the survivor pour only.
+  """
+  survivor = basin.loc[basin[id_col].astype(int) == basin["agg"].astype(int)]
+  links = survivor.loc[survivor["agg"].astype(int) == int(agg_id), id_col].astype(int)
+  if not links.empty:
+    return links.unique()
+  fallback = basin.loc[basin["agg"].astype(int) == int(agg_id), id_col].astype(int)
+  return fallback.unique()
+
+
 def _sole_upstream_agg_for_aggregate(
   basin: gpd.GeoDataFrame,
   id_col: str,
@@ -1610,10 +1629,10 @@ def _sole_upstream_agg_for_aggregate(
   upstream_by_node: dict[int, list[int]],
 ) -> int | None:
   """
-  When every pour for ``agg_d`` has exactly one upstream link on the river graph,
-  return that upstream aggregate id (else None).
+  When the survivor pour for ``agg_d`` has exactly one upstream link, return
+  that upstream aggregate id (else None).
   """
-  pour_links = basin.loc[basin["agg"].astype(int) == int(agg_d), id_col].astype(int).unique()
+  pour_links = _survivor_pour_links_for_agg(basin, id_col, agg_d)
   if len(pour_links) == 0:
     return None
   up_aggs: set[int] = set()
@@ -1662,7 +1681,7 @@ def build_linear_main_stem_series_absorb_table(
   rows: list[tuple[int, int]] = []
   seen: set[tuple[int, int]] = set()
 
-  survivor_aggs = sorted(int(a) for a in agg_basin["agg"].dropna().unique())
+  survivor_aggs = sorted(int(a) for a in basin["agg"].dropna().astype(int).unique())
   for agg_d in survivor_aggs:
     agg_u = _sole_upstream_agg_for_aggregate(
       basin, id_col, agg_d, upstream_by_node
@@ -1684,10 +1703,10 @@ def build_linear_main_stem_series_absorb_table(
       continue
     if _agg_is_lake_group(basin, agg_u) or _agg_is_lake_group(basin, agg_d):
       continue
-    pour_ids = basin.loc[basin["agg"].astype(int) == int(agg_d), id_col].astype(int)
-    if pour_ids.empty:
+    pour_links = _survivor_pour_links_for_agg(basin, id_col, agg_d)
+    if len(pour_links) == 0:
       continue
-    ds_i = int(pour_ids.iloc[0])
+    ds_i = int(pour_links[0])
     if not _linear_merge_may_apply_to_target(
       basin, id_col, ds_i, agg_d, lake_subs
     ):
@@ -1936,8 +1955,11 @@ def basin_aggregation(
   agg_basin = _rebuild_agg_basin_table(
     basin, id_col, down_col, min_sub_area, outlet_value
   )
-  n_survivor_aggs = len(agg_basin)
-  print(f"Aggregate table after headwater pass: {n_survivor_aggs} unit(s).")
+  n_agg_ids = int(basin["agg"].nunique())
+  print(
+    f"After headwater pass: {n_agg_ids} aggregate id(s), "
+    f"{len(agg_basin)} row(s) in merge summary table."
+  )
 
   if linear_series_merge:
     series_rounds = 0
@@ -1986,9 +2008,10 @@ def basin_aggregation(
     agg_basin = _rebuild_agg_basin_table(
       basin, id_col, down_col, min_sub_area, outlet_value
     )
+    n_after_linear = int(basin["agg"].nunique())
     print(
       f"Linear series merge finished after {series_rounds} round(s); "
-      f"{len(agg_basin)} aggregate unit(s) (was {n_survivor_aggs} after headwater)."
+      f"{n_after_linear} aggregate id(s) (was {n_agg_ids} after headwater)."
     )
 
   sentinel_group = basin["agg"].map(lambda a: _is_sentinel_object_id(a, outlet_value))
