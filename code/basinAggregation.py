@@ -97,10 +97,12 @@ MIN_RIV_LENGTH = 1.0          # km
 
 # Final linear main-stem series merge (after headwater pass). Fractions of ``MIN_SUB_AREA``.
 LINEAR_SERIES_MERGE_ENABLED = True
-LINEAR_SERIES_MERGE_HALF_MIN_FRAC = 0.5   # either agg local area below this × min → merge
+LINEAR_SERIES_MERGE_HALF_MIN_FRAC = 0.5   # either agg below this × min → merge (ignores combined cap)
 LINEAR_SERIES_MERGE_MAX_COMBINED_FRAC = 2.0  # when both ≥ half-min, merge only if sum < this × min
 # When True, skip area caps only (gauge/lake/post-lake barriers always apply).
 LINEAR_MERGE_SKIP_AREA_RULES = False
+# Per-round linear scan/absorb logging (very slow on large networks if True).
+LINEAR_MERGE_VERBOSE = False
 
 # Sentinel written to DSLINKNO for the most-downstream basin(s).
 # Match this to MESH outlet_value (e.g. -9999).
@@ -1380,18 +1382,34 @@ def _linear_series_areas_may_merge(
   half_min_frac: float,
   max_combined_frac: float,
 ) -> bool:
-  """
-  Area rules for merging two adjacent main-stem aggregates in series.
-
-  Uses summed local ``_unitarea`` per aggregate (not MIN_SUB_AREA as a hard
-  merge-if-below gate). Headwater pass already folds sub-100 km² units at
-  confluences; here only half-min and combined cap apply.
-  """
+  """Area rules for adjacent main-stem aggregates (summed local ``_unitarea``)."""
   half_min = min_sub_area * half_min_frac
   cap = min_sub_area * max_combined_frac
   if min(area_upstream, area_downstream) < half_min:
     return True
   return (area_upstream + area_downstream) < cap
+
+
+def _select_disjoint_linear_merge_pairs(
+  rows: list[tuple[int, int]],
+) -> tuple[list[tuple[int, int]], int]:
+  """
+  Pick pairs for one linear merge round without sharing aggregate ids.
+
+  ``rows`` must already be ordered most-upstream first (e.g. by pour link depth).
+  On a chain A→B→C, only (A, B) is taken this round; (B, C) waits for the next.
+  """
+  used: set[int] = set()
+  selected: list[tuple[int, int]] = []
+  deferred = 0
+  for agg_u, agg_d in rows:
+    if agg_u in used or agg_d in used:
+      deferred += 1
+      continue
+    selected.append((agg_u, agg_d))
+    used.add(agg_u)
+    used.add(agg_d)
+  return selected, deferred
 
 
 def _rebuild_agg_basin_table(
@@ -1436,6 +1454,9 @@ def build_linear_main_stem_series_absorb_table(
   Uses an **aggregate series graph** rebuilt from current ``agg`` on each pour
   (sole upstream aggregate at each river node). Upstream may merge into a gauge
   downstream; a gauge unit never merges further downstream.
+
+  Each call returns at most one pair per aggregate id (disjoint set), processing
+  the most-upstream eligible pair on each linear chain first.
   """
   outlet_value = int(outlet_value)
   skip_area = LINEAR_MERGE_SKIP_AREA_RULES
@@ -1481,14 +1502,23 @@ def build_linear_main_stem_series_absorb_table(
     seen.add(pair)
     rows.append((agg_u, agg_d))
 
-  mode = "no area cap" if skip_area else "area + barriers"
-  print(
-    f"  Linear merge scan ({mode}): {len(series_edges)} aggregate edge(s), "
-    f"{len(rows)} pair(s) to absorb."
-  )
-  if skip:
-    parts = ", ".join(f"{k}={v}" for k, v in sorted(skip.items()))
-    print(f"  Linear skip counts: {parts}")
+  n_eligible = len(rows)
+  rows, deferred_same_round = _select_disjoint_linear_merge_pairs(rows)
+
+  if LINEAR_MERGE_VERBOSE:
+    mode = "no area cap" if skip_area else "area + barriers"
+    print(
+      f"  Linear merge scan ({mode}): {len(series_edges)} aggregate edge(s), "
+      f"{n_eligible} eligible pair(s), {len(rows)} selected this round."
+    )
+    if deferred_same_round:
+      print(
+        f"  Linear deferred (agg already in a pair this round): "
+        f"{deferred_same_round}"
+      )
+    if skip:
+      parts = ", ".join(f"{k}={v}" for k, v in sorted(skip.items()))
+      print(f"  Linear skip counts: {parts}")
 
   table = _absorb_table_from_targets(
     rows, agg_basin, basin, id_col=id_col, down_col=down_col, outlet_value=outlet_value
@@ -1788,9 +1818,10 @@ def basin_aggregation(
     else:
       print(
         "Basin merge (linear series, single upstream segment): "
-        f"half-min={linear_series_half_min_frac}×, "
-        f"combined cap={linear_series_max_combined_frac}× MIN_SUB_AREA."
+        f"half-min={linear_series_half_min_frac}× overrides cap; "
+        f"otherwise sum < {linear_series_max_combined_frac}× MIN_SUB_AREA."
       )
+    series_pairs_applied = 0
     while True:
       if series_rounds >= max_series_iters:
         raise RuntimeError(
@@ -1813,21 +1844,6 @@ def basin_aggregation(
       if xx_series.empty:
         break
       series_rounds += 1
-      n_candidates = len(xx_series)
-      if not LINEAR_MERGE_SKIP_AREA_RULES and n_candidates > 1:
-        # One hop per round so area sums reflect current aggregates (cap is pairwise).
-        xx_series = xx_series.iloc[:1].copy()
-      ex_u = int(xx_series["aggold"].iloc[0])
-      ex_d = int(xx_series["agg"].iloc[0])
-      area_note = ""
-      if not LINEAR_MERGE_SKIP_AREA_RULES:
-        au = _agg_group_unit_area(basin, ex_u)
-        ad = _agg_group_unit_area(basin, ex_d)
-        area_note = f"; local areas {au:.1f}+{ad:.1f}={au + ad:.1f} km²"
-      print(
-        f"  Linear merge round {series_rounds}: {n_candidates} candidate pair(s), "
-        f"applying {len(xx_series)} (example: {ex_u} → {ex_d}{area_note})"
-      )
       n_aggs_before = int(basin["agg"].nunique())
       basin, n_applied, abs_skip = absorb_merge_groups(
         basin,
@@ -1839,19 +1855,27 @@ def basin_aggregation(
         agg_basin=agg_basin,
         enforce_barriers=True,
       )
+      series_pairs_applied += n_applied
       n_aggs_after = int(basin["agg"].nunique())
-      print(
-        f"  Linear absorb: {n_applied}/{len(xx_series)} row(s) applied; "
-        f"aggregate ids {n_aggs_before} → {n_aggs_after}."
-      )
-      if abs_skip:
-        parts = ", ".join(f"{k}={v}" for k, v in sorted(abs_skip.items()))
-        print(f"  Linear absorb skips: {parts}")
-      if n_applied == 0 or n_aggs_after >= n_aggs_before:
+      if LINEAR_MERGE_VERBOSE:
         print(
-          "  Linear merge stopping: absorb made no progress "
-          "(pairing works; check absorb skips above)."
+          f"  Linear merge round {series_rounds}: {len(xx_series)} pair(s), "
+          f"applied {n_applied}; aggregate ids {n_aggs_before} → {n_aggs_after}."
         )
+        if abs_skip:
+          parts = ", ".join(f"{k}={v}" for k, v in sorted(abs_skip.items()))
+          print(f"  Linear absorb skips: {parts}")
+      if n_applied == 0 or n_aggs_after >= n_aggs_before:
+        if LINEAR_MERGE_VERBOSE:
+          print(
+            "  Linear merge stopping: absorb made no progress "
+            "(pairing works; check absorb skips above)."
+          )
+        elif n_applied == 0 and not xx_series.empty:
+          print(
+            "Warning: linear merge found absorb candidate(s) but applied none "
+            "(set LINEAR_MERGE_VERBOSE=True for details)."
+          )
         break
       agg_basin = _rebuild_agg_basin_table(
         basin, id_col, down_col, min_sub_area, outlet_value
@@ -1861,7 +1885,8 @@ def basin_aggregation(
     )
     n_after_linear = int(basin["agg"].nunique())
     print(
-      f"Linear series merge finished after {series_rounds} round(s); "
+      f"Linear series merge: {series_rounds} round(s), "
+      f"{series_pairs_applied} pair(s) applied; "
       f"{n_after_linear} aggregate id(s) (was {n_agg_ids} after headwater)."
     )
 
