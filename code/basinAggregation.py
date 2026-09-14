@@ -99,6 +99,8 @@ MIN_RIV_LENGTH = 1.0          # km
 LINEAR_SERIES_MERGE_ENABLED = True
 LINEAR_SERIES_MERGE_HALF_MIN_FRAC = 0.5   # either unit below this → always merge pair
 LINEAR_SERIES_MERGE_MAX_COMBINED_FRAC = 2.0  # when both ≥ half-min, merge if sum < this × min
+# Debug: merge all single-upstream main-stem pairs (no area / lake / gauge gates).
+LINEAR_MERGE_TOPOLOGY_ONLY = True
 
 # Sentinel written to DSLINKNO for the most-downstream basin(s).
 # Match this to MESH outlet_value (e.g. -9999).
@@ -1226,20 +1228,29 @@ def build_linear_main_stem_series_absorb_table(
   agg_ids = sorted(survivors)
   rows: list[tuple[int, int]] = []
   seen: set[tuple[int, int]] = set()
+  topo_only = LINEAR_MERGE_TOPOLOGY_ONLY
+  skip: dict[str, int] = defaultdict(int)
 
   for agg_u in agg_ids:
     u_link = _agg_survivor_pour_link(basin, id_col, agg_u)
     if u_link is None:
+      skip["no_survivor_outlet_pour"] += 1
       continue
     ds_link = _pour_immediate_downstream_link(
       basin, id_col, down_col, u_link, outlet_value
     )
     if ds_link is None:
+      skip["outlet_at_terminal_or_missing_dslinkno"] += 1
       continue
     ups = upstream_by_node.get(int(ds_link), [])
-    if len(ups) != 1 or int(ups[0]) != int(u_link):
+    if len(ups) != 1:
+      skip["downstream_not_single_upstream_reach"] += 1
+      continue
+    if int(ups[0]) != int(u_link):
+      skip["dslinkno_hop_not_sole_river_upstream"] += 1
       continue
     if pour_agg.get(int(u_link)) != int(agg_u):
+      skip["upstream_link_belongs_to_other_agg"] += 1
       continue
     agg_d = _current_agg_for_basin_id(
       basin,
@@ -1251,31 +1262,49 @@ def build_linear_main_stem_series_absorb_table(
       id_to_agg=id_to_agg,
     )
     if agg_d is None:
+      skip["downstream_agg_unresolved"] += 1
       continue
     agg_d = int(agg_d)
     if agg_u == agg_d:
+      skip["already_same_aggregate"] += 1
       continue
     pair = (agg_u, agg_d)
     if pair in seen:
+      skip["duplicate_pair"] += 1
       continue
-    area_u = _agg_group_unit_area(basin, agg_u)
-    area_d = _agg_group_unit_area(basin, agg_d)
-    if not _linear_series_areas_may_merge(
-      area_u, area_d, min_sub_area, half_min_frac, max_combined_frac
-    ):
-      continue
-    if not _aggregate_may_be_absorbed(basin, agg_u, id_col, post_lake_subs):
-      continue
-    if _agg_is_gauge_group(basin, agg_u):
-      continue
-    if _agg_is_lake_group(basin, agg_u) or _agg_is_lake_group(basin, agg_d):
-      continue
-    if not _linear_merge_may_apply_to_target(
-      basin, id_col, ds_link, agg_d, lake_subs
-    ):
-      continue
+    if not topo_only:
+      area_u = _agg_group_unit_area(basin, agg_u)
+      area_d = _agg_group_unit_area(basin, agg_d)
+      if not _linear_series_areas_may_merge(
+        area_u, area_d, min_sub_area, half_min_frac, max_combined_frac
+      ):
+        skip["area_threshold"] += 1
+        continue
+      if not _aggregate_may_be_absorbed(basin, agg_u, id_col, post_lake_subs):
+        skip["source_may_not_be_absorbed"] += 1
+        continue
+      if _agg_is_gauge_group(basin, agg_u):
+        skip["source_is_gauge"] += 1
+        continue
+      if _agg_is_lake_group(basin, agg_u) or _agg_is_lake_group(basin, agg_d):
+        skip["lake_unit"] += 1
+        continue
+      if not _linear_merge_may_apply_to_target(
+        basin, id_col, ds_link, agg_d, lake_subs
+      ):
+        skip["lake_or_gauge_downstream"] += 1
+        continue
     seen.add(pair)
     rows.append((agg_u, agg_d))
+
+  mode = "topology-only (no area/mask gates)" if topo_only else "area + barrier rules"
+  print(
+    f"  Linear merge scan ({mode}): {len(agg_ids)} aggregate(s), "
+    f"{len(rows)} pair(s) to absorb."
+  )
+  if skip:
+    parts = ", ".join(f"{k}={v}" for k, v in sorted(skip.items()))
+    print(f"  Linear skip counts: {parts}")
 
   table = _absorb_table_from_targets(rows, agg_basin, basin)
   return _sort_absorb_table_upstream_first(basin, id_col, link_depth, table)
@@ -1509,11 +1538,17 @@ def basin_aggregation(
   if linear_series_merge:
     series_rounds = 0
     max_series_iters = max(len(basin), 500)
-    print(
-      "Basin merge (linear series, single upstream segment): "
-      f"half-min={linear_series_half_min_frac}×, "
-      f"combined cap={linear_series_max_combined_frac}× MIN_SUB_AREA."
-    )
+    if LINEAR_MERGE_TOPOLOGY_ONLY:
+      print(
+        "Basin merge (linear series): TOPOLOGY ONLY — "
+        "single upstream reach, no confluence; area/lake/gauge gates off."
+      )
+    else:
+      print(
+        "Basin merge (linear series, single upstream segment): "
+        f"half-min={linear_series_half_min_frac}×, "
+        f"combined cap={linear_series_max_combined_frac}× MIN_SUB_AREA."
+      )
     while True:
       if series_rounds >= max_series_iters:
         raise RuntimeError(
