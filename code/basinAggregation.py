@@ -1596,10 +1596,7 @@ def _rebuild_agg_basin_table(
 def build_linear_main_stem_series_absorb_table(
   basin: gpd.GeoDataFrame,
   agg_basin: pd.DataFrame,
-  river: gpd.GeoDataFrame,
   id_col: str,
-  down_col: str,
-  riv_id_col: str,
   upstream_by_node: dict[int, list[int]],
   link_depth: dict[int, int],
   lake_subs: set[int],
@@ -1610,26 +1607,19 @@ def build_linear_main_stem_series_absorb_table(
   outlet_value: int = OUTLET_VALUE,
 ) -> pd.DataFrame:
   """
-  After headwater merging: fold adjacent main-stem aggregates on linear links.
+  After headwater merging: merge upstream → downstream on **linear** reaches only.
 
-  Only single-inflow nodes (no side headwaters at the pour). Merge upstream
-  aggregate into downstream when area rules pass; lakes/gauges/post-lake rules
-  match the headwater pass.
+  A downstream pour qualifies when it has exactly **one** upstream river segment
+  (no confluence at that node). Area rules (``half_min_frac``, ``max_combined_frac``
+  × ``min_sub_area``):
+
+  * Either unit below half-min → merge.
+  * Both at or above half-min → merge only if combined local area is below
+    ``max_combined_frac`` × ``min_sub_area``.
+
+  Lakes/gauges/post-lake rules match the headwater pass.
   """
   outlet_value = int(outlet_value)
-  if id_col == riv_id_col:
-    riv = river.merge(basin[[id_col, "agg"]].copy(), on=riv_id_col, how="left")
-  else:
-    riv = river.merge(
-      basin[[id_col, "agg"]].copy(),
-      left_on=riv_id_col,
-      right_on=id_col,
-      how="left",
-    )
-  riv, _ = _mark_river_main_stems(
-    riv, down_col, riv_id_col, upstream_by_node=upstream_by_node
-  )
-  main_stem = set(riv.loc[riv["mask"] == 1, riv_id_col].astype(int))
 
   rows: list[tuple[int, int]] = []
   seen: set[tuple[int, int]] = set()
@@ -1637,12 +1627,12 @@ def build_linear_main_stem_series_absorb_table(
   for ds, ups in upstream_by_node.items():
     if len(ups) != 1:
       continue
+    if _is_outlet_id(ds, outlet_value):
+      continue
     try:
       u = int(ups[0])
       ds_i = int(ds)
     except (TypeError, ValueError):
-      continue
-    if u not in main_stem or ds_i not in main_stem:
       continue
     agg_u = _agg_id_for_pour_link(basin, id_col, u)
     agg_d = _agg_id_for_pour_link(basin, id_col, ds_i)
@@ -1911,7 +1901,7 @@ def basin_aggregation(
     series_rounds = 0
     max_series_iters = max(len(basin), 500)
     print(
-      "Basin merge (linear main-stem series): "
+      "Basin merge (linear series, single upstream segment): "
       f"half-min={linear_series_half_min_frac}×, "
       f"combined cap={linear_series_max_combined_frac}× MIN_SUB_AREA."
     )
@@ -1923,10 +1913,7 @@ def basin_aggregation(
       xx_series = build_linear_main_stem_series_absorb_table(
         basin,
         agg_basin,
-        river,
         id_col=id_col,
-        down_col=down_col,
-        riv_id_col=riv_id_col,
         upstream_by_node=upstream_by_node,
         link_depth=link_depth,
         lake_subs=lake_subs,
