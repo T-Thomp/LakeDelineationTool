@@ -808,6 +808,108 @@ def _pour_immediate_downstream_link(
     return None
 
 
+def _immediate_downstream_link(
+  basin: gpd.GeoDataFrame,
+  river: gpd.GeoDataFrame,
+  id_col: str,
+  down_col: str,
+  riv_id_col: str,
+  link_id: int,
+  outlet_value: int,
+) -> int | None:
+  """Next downstream node from ``link_id`` (river ``LINKNO`` row, else basin pour)."""
+  rows = river.loc[river[riv_id_col].astype(int) == int(link_id)]
+  if not rows.empty:
+    raw = rows.iloc[0][down_col]
+    if not _is_outlet_id(raw, outlet_value):
+      try:
+        return int(raw)
+      except (TypeError, ValueError):
+        pass
+  return _pour_immediate_downstream_link(
+    basin, id_col, down_col, link_id, outlet_value
+  )
+
+
+def _headwater_confluence_target_pour_link(
+  u_link: int,
+  basin: gpd.GeoDataFrame,
+  river: gpd.GeoDataFrame,
+  id_col: str,
+  down_col: str,
+  riv_id_col: str,
+  upstream_by_node: dict[int, list[int]],
+  lake_subs: set[int],
+  outlet_value: int,
+) -> int | None:
+  """
+  First **confluence** pour downstream of ``u_link`` on the river.
+
+  Headwater folds happen only here (shared immediate downstream segment with
+  another reach). Linear stems with no confluence return ``None`` (no headwater
+  merge on that branch).
+  """
+  outlet_value = int(outlet_value)
+  current = int(u_link)
+  seen: set[int] = set()
+  for _ in range(len(river) + len(basin) + 1):
+    if current in seen:
+      return None
+    seen.add(current)
+    ds = _immediate_downstream_link(
+      basin, river, id_col, down_col, riv_id_col, current, outlet_value
+    )
+    if ds is None:
+      return None
+    if _link_is_lake_pour(basin, id_col, ds, lake_subs):
+      return None
+    ups = upstream_by_node.get(int(ds), [])
+    if len(ups) >= 2:
+      return int(ds)
+    if len(ups) == 1 and int(ups[0]) == current:
+      current = int(ds)
+      continue
+    return None
+  return None
+
+
+def _build_aggregate_series_edges(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  upstream_by_node: dict[int, list[int]],
+  pour_agg: dict[int, int] | None = None,
+) -> list[tuple[int, int, int]]:
+  """
+  Merge topology after basin ``agg`` updates: edges ``(agg_u, agg_d, ds_link)`` where
+  ``agg_d`` has exactly one distinct upstream aggregate on the river graph.
+  """
+  if pour_agg is None:
+    pour_agg = _pour_agg_by_link(basin, id_col)
+  edges: list[tuple[int, int, int]] = []
+  seen: set[tuple[int, int]] = set()
+  for ds_link, ups in upstream_by_node.items():
+    if not ups:
+      continue
+    agg_d = _agg_at_pour_link(basin, id_col, int(ds_link), pour_agg)
+    if agg_d is None:
+      continue
+    sole = _sole_upstream_aggregate_at_river_node(
+      int(ds_link), upstream_by_node, pour_agg
+    )
+    if sole is None:
+      continue
+    agg_u, _u = sole
+    agg_u, agg_d = int(agg_u), int(agg_d)
+    if agg_u == agg_d:
+      continue
+    key = (agg_u, agg_d)
+    if key in seen:
+      continue
+    seen.add(key)
+    edges.append((agg_u, agg_d, int(ds_link)))
+  return edges
+
+
 def _agg_at_pour_link(
   basin: gpd.GeoDataFrame,
   id_col: str,
@@ -823,6 +925,61 @@ def _agg_at_pour_link(
   if rows.empty:
     return None
   return int(rows.iloc[0])
+
+
+def _sole_upstream_aggregate_at_river_node(
+  ds_link: int,
+  upstream_by_node: dict[int, list[int]],
+  pour_agg: dict[int, int],
+) -> tuple[int, int] | None:
+  """
+  One logical upstream aggregate into ``ds_link``, by current ``agg`` on each reach.
+
+  The river graph is fixed, so headwater folds can leave **two or more reaches**
+  into a node that still share a single upstream aggregate id. Those nodes are
+  treated as linear for series merge (same as one physical inflow).
+  """
+  ds_link = int(ds_link)
+  agg_d = pour_agg.get(ds_link)
+  ups = upstream_by_node.get(ds_link, [])
+  if not ups:
+    return None
+  up_by_agg: dict[int, int] = {}
+  for u in ups:
+    u_i = int(u)
+    agg_u = pour_agg.get(u_i)
+    if agg_u is None:
+      continue
+    agg_u = int(agg_u)
+    if agg_d is not None and agg_u == int(agg_d):
+      continue
+    if agg_u not in up_by_agg:
+      up_by_agg[agg_u] = u_i
+  if len(up_by_agg) != 1:
+    return None
+  agg_u = next(iter(up_by_agg))
+  return agg_u, up_by_agg[agg_u]
+
+
+def _river_node_has_multiple_upstream_aggregates(
+  ds_link: int,
+  upstream_by_node: dict[int, list[int]],
+  pour_agg: dict[int, int],
+  agg_d: int | None = None,
+) -> bool:
+  """True when two or more distinct upstream aggregates still enter ``ds_link``."""
+  ds_link = int(ds_link)
+  ups = upstream_by_node.get(ds_link, [])
+  uniq: set[int] = set()
+  for u in ups:
+    a = pour_agg.get(int(u))
+    if a is None:
+      return True
+    a = int(a)
+    if agg_d is not None and a == int(agg_d):
+      continue
+    uniq.add(a)
+  return len(uniq) > 1
 
 
 def _aggregate_outlet_is_confluence(
@@ -1095,8 +1252,10 @@ def _agg_downstream_link(
 def build_headwater_driven_absorb_table(
   basin: gpd.GeoDataFrame,
   agg_basin: pd.DataFrame,
+  river: gpd.GeoDataFrame,
   id_col: str,
   down_col: str,
+  riv_id_col: str,
   lake_subs: set[int],
   post_lake_subs: set[int],
   upstream_by_node: dict[int, list[int]],
@@ -1109,11 +1268,10 @@ def build_headwater_driven_absorb_table(
 
   * Find all small eligible aggregates, then take the **frontier**: those at the
     minimum network depth (most upstream on the graph this round).
-  * Each frontier unit merges into the aggregate at its ``aggdown`` downstream
-    link, ordered shallowest-first along the network.
-  * At a downstream link, only **frontier** aggregates listed for that node
-    merge (no extra batch of other small co-inflow arms). Skip 2-inflow
-    junctions where both incoming reaches are continuing rivers.
+  * Each frontier unit walks downstream to the first **confluence** (2+ river
+    inflows). It merges only there, into the aggregate at that shared pour.
+  * Linear stems with no confluence are **not** merged in this pass.
+  * At that pour, only **frontier** aggregates listed for that node merge.
   * **Three or more** upstream reaches at the same downstream link: no merge.
 
   After applies, the next iteration rediscovers frontier headwaters further DS.
@@ -1143,8 +1301,16 @@ def build_headwater_driven_absorb_table(
     u_link = _agg_survivor_pour_link(basin, id_col, agg_i)
     if u_link is None:
       continue
-    ds = _pour_immediate_downstream_link(
-      basin, id_col, down_col, u_link, outlet_value
+    ds = _headwater_confluence_target_pour_link(
+      u_link,
+      basin,
+      river,
+      id_col,
+      down_col,
+      riv_id_col,
+      upstream_by_node,
+      lake_subs,
+      outlet_value,
     )
     if ds is None:
       continue
@@ -1161,25 +1327,29 @@ def build_headwater_driven_absorb_table(
     hw_aggs = ds_triggers[ds]
     if len(upstream_by_node.get(ds, [])) >= 3:
       continue
-    if _junction_two_inflow_both_continuing(upstream_by_node, ds):
-      continue
-    target = _current_agg_for_basin_id(
-      basin,
-      id_col,
-      ds,
-      survivor_ids=survivors,
-      gauge_link_ids=gauge_links,
-      pour_agg=pour_agg,
-      id_to_agg=id_to_agg,
-    )
-    if target is None:
-      continue
-    target_i = int(target)
+    target_i = _agg_at_pour_link(basin, id_col, int(ds), pour_agg)
+    if target_i is None:
+      resolved = _current_agg_for_basin_id(
+        basin,
+        id_col,
+        ds,
+        survivor_ids=survivors,
+        gauge_link_ids=gauge_links,
+        pour_agg=pour_agg,
+        id_to_agg=id_to_agg,
+      )
+      if resolved is None:
+        continue
+      target_i = int(resolved)
+    else:
+      target_i = int(target_i)
     if _agg_is_lake_group(basin, target_i):
       continue
     if not _linear_merge_may_apply_to_target(
       basin, id_col, ds, target_i, lake_subs
     ):
+      continue
+    if len(upstream_by_node.get(int(ds), [])) < 2:
       continue
 
     sources: set[int] = set(int(a) for a in hw_aggs)
@@ -1259,33 +1429,25 @@ def build_linear_main_stem_series_absorb_table(
   """
   After headwater merging: merge upstream → downstream on **linear** reaches only.
 
-  Pairs come from the **river** graph (single upstream into a node). Aggregate
-  ids are taken at each pour link. Upstream may merge into a gauge downstream;
-  a gauge unit never merges further downstream.
+  Uses an **aggregate series graph** rebuilt from current ``agg`` on each pour
+  (sole upstream aggregate at each river node). Upstream may merge into a gauge
+  downstream; a gauge unit never merges further downstream.
   """
   outlet_value = int(outlet_value)
-  pour_agg = _pour_agg_by_link(basin, id_col)
   skip_area = LINEAR_MERGE_SKIP_AREA_RULES
 
-  linear_nodes = sorted(
-    (int(ds) for ds, ups in upstream_by_node.items() if len(ups) == 1),
-    key=lambda d: (link_depth.get(d, 10**9), d),
+  series_edges = _build_aggregate_series_edges(
+    basin, id_col, upstream_by_node
+  )
+  series_edges.sort(
+    key=lambda e: (link_depth.get(e[2], 10**9), e[0], e[1])
   )
 
   rows: list[tuple[int, int]] = []
   seen: set[tuple[int, int]] = set()
   skip: dict[str, int] = defaultdict(int)
 
-  for ds_link in linear_nodes:
-    u_link = int(upstream_by_node[ds_link][0])
-    agg_u = _agg_at_pour_link(basin, id_col, u_link, pour_agg)
-    agg_d = _agg_at_pour_link(basin, id_col, ds_link, pour_agg)
-    if agg_u is None or agg_d is None:
-      skip["missing_agg_at_pour"] += 1
-      continue
-    if agg_u == agg_d:
-      skip["already_same_aggregate"] += 1
-      continue
+  for agg_u, agg_d, ds_link in series_edges:
     pair = (agg_u, agg_d)
     if pair in seen:
       skip["duplicate_pair"] += 1
@@ -1317,7 +1479,7 @@ def build_linear_main_stem_series_absorb_table(
 
   mode = "no area cap" if skip_area else "area + barriers"
   print(
-    f"  Linear merge scan ({mode}): {len(linear_nodes)} linear node(s), "
+    f"  Linear merge scan ({mode}): {len(series_edges)} aggregate edge(s), "
     f"{len(rows)} pair(s) to absorb."
   )
   if skip:
@@ -1560,8 +1722,10 @@ def basin_aggregation(
     xx = build_headwater_driven_absorb_table(
       basin,
       agg_basin,
+      river,
       id_col=id_col,
       down_col=down_col,
+      riv_id_col=riv_id_col,
       lake_subs=lake_subs,
       post_lake_subs=post_lake_subs,
       upstream_by_node=upstream_by_node,
@@ -1600,9 +1764,13 @@ def basin_aggregation(
     basin, id_col, down_col, min_sub_area, outlet_value
   )
   n_agg_ids = int(basin["agg"].nunique())
+  n_series_edges = len(
+    _build_aggregate_series_edges(basin, id_col, upstream_by_node)
+  )
   print(
     f"After headwater pass: {n_agg_ids} aggregate id(s), "
-    f"{len(agg_basin)} row(s) in merge summary table."
+    f"{len(agg_basin)} row(s) in merge summary table, "
+    f"{n_series_edges} sole-upstream aggregate edge(s) for linear merge."
   )
 
   if linear_series_merge:
