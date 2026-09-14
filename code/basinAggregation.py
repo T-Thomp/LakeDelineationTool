@@ -618,6 +618,17 @@ def _index_labels_by_value(series: pd.Series) -> dict[Any, list[Hashable]]:
   return out
 
 
+def _agg_index_by_agg_id(basin: gpd.GeoDataFrame) -> dict[int, list[Hashable]]:
+  """Row labels grouped by ``agg`` (int keys for reliable absorb-table lookup)."""
+  out: dict[int, list[Hashable]] = defaultdict(list)
+  for lab, val in basin["agg"].items():
+    try:
+      out[int(val)].append(lab)
+    except (TypeError, ValueError):
+      continue
+  return out
+
+
 def _index_first_label(series: pd.Series) -> dict[Any, Hashable]:
   out: dict[Any, Hashable] = {}
   for lab, val in series.items():
@@ -1587,10 +1598,37 @@ def _rebuild_agg_basin_table(
   agg_basin = basin.drop(columns="geometry").groupby(["agg", "aggdown"], as_index=False).agg(
     {"_unitarea": "sum"}
   )
-  agg_basin = agg_basin.rename(columns={"agg": id_col, "aggdown": down_col})
-  agg_basin = agg_basin.merge(basin[[id_col, "_uparea", "Mask"]], on=id_col, how="left")
-  agg_basin = agg_basin.rename(columns={id_col: "agg", down_col: "aggdown"})
+  pour = _one_row_per_agg(basin, id_col, ["_uparea", "Mask"])
+  agg_basin = agg_basin.merge(pour, on="agg", how="left")
   return _drop_small_outlets(agg_basin)
+
+
+def _sole_upstream_agg_for_aggregate(
+  basin: gpd.GeoDataFrame,
+  id_col: str,
+  agg_d: int,
+  upstream_by_node: dict[int, list[int]],
+) -> int | None:
+  """
+  When every pour for ``agg_d`` has exactly one upstream link on the river graph,
+  return that upstream aggregate id (else None).
+  """
+  pour_links = basin.loc[basin["agg"].astype(int) == int(agg_d), id_col].astype(int).unique()
+  if len(pour_links) == 0:
+    return None
+  up_aggs: set[int] = set()
+  for ds_i in pour_links:
+    ups = upstream_by_node.get(int(ds_i), [])
+    if len(ups) != 1:
+      return None
+    agg_u = _agg_id_for_pour_link(basin, id_col, int(ups[0]))
+    if agg_u is None:
+      return None
+    up_aggs.add(int(agg_u))
+  if len(up_aggs) != 1:
+    return None
+  agg_u = next(iter(up_aggs))
+  return None if agg_u == int(agg_d) else agg_u
 
 
 def build_linear_main_stem_series_absorb_table(
@@ -1624,19 +1662,12 @@ def build_linear_main_stem_series_absorb_table(
   rows: list[tuple[int, int]] = []
   seen: set[tuple[int, int]] = set()
 
-  for ds, ups in upstream_by_node.items():
-    if len(ups) != 1:
-      continue
-    if _is_outlet_id(ds, outlet_value):
-      continue
-    try:
-      u = int(ups[0])
-      ds_i = int(ds)
-    except (TypeError, ValueError):
-      continue
-    agg_u = _agg_id_for_pour_link(basin, id_col, u)
-    agg_d = _agg_id_for_pour_link(basin, id_col, ds_i)
-    if agg_u is None or agg_d is None or agg_u == agg_d:
+  survivor_aggs = sorted(int(a) for a in agg_basin["agg"].dropna().unique())
+  for agg_d in survivor_aggs:
+    agg_u = _sole_upstream_agg_for_aggregate(
+      basin, id_col, agg_d, upstream_by_node
+    )
+    if agg_u is None:
       continue
     pair = (agg_u, agg_d)
     if pair in seen:
@@ -1653,6 +1684,10 @@ def build_linear_main_stem_series_absorb_table(
       continue
     if _agg_is_lake_group(basin, agg_u) or _agg_is_lake_group(basin, agg_d):
       continue
+    pour_ids = basin.loc[basin["agg"].astype(int) == int(agg_d), id_col].astype(int)
+    if pour_ids.empty:
+      continue
+    ds_i = int(pour_ids.iloc[0])
     if not _linear_merge_may_apply_to_target(
       basin, id_col, ds_i, agg_d, lake_subs
     ):
@@ -1734,7 +1769,7 @@ def absorb_headwater_groups(
   agg_links: dict[int, tuple[int, ...]] | None = None,
 ) -> gpd.GeoDataFrame:
   """Same as: loc[agg==aggold, aggdown]=...; loc[agg==aggold, agg]=..."""
-  agg_index = _index_labels_by_value(basin["agg"])
+  agg_index = _agg_index_by_agg_id(basin)
   upstream_links = links_with_upstream or set()
   post_lake = post_lake_subs or set()
   if river is not None and gauge_links is None:
@@ -1760,15 +1795,15 @@ def absorb_headwater_groups(
       continue
     if _agg_is_gauge_group(basin, aggold_i):
       continue
-    labels = agg_index.get(aggold)
+    labels = agg_index.get(aggold_i)
     if not labels:
       continue
     labels = list(labels)
     basin.loc[labels, "aggdown"] = new_aggdown
     basin.loc[labels, "agg"] = new_agg
-    if aggold != new_agg:
-      agg_index[new_agg].extend(labels)
-      del agg_index[aggold]
+    if aggold_i != new_agg_i:
+      agg_index[new_agg_i].extend(labels)
+      del agg_index[aggold_i]
   return basin
 
 
@@ -1835,8 +1870,9 @@ def basin_aggregation(
     is_outlet = df["aggdown"].map(lambda d: _is_outlet_id(d, outlet_value))
     return df[(~(is_outlet & (df["_uparea"] < min_sub_area))) | (df["Mask"] == 3)]
 
-  agg_basin = basin[["agg", "aggdown", "_unitarea", "_uparea", "Mask"]].copy()
-  agg_basin = _drop_small_outlets(agg_basin)
+  agg_basin = _rebuild_agg_basin_table(
+    basin, id_col, down_col, min_sub_area, outlet_value
+  )
   lake_subs = set(basin.loc[basin["Mask"] == 3, "agg"].astype(int))
   post_lake_subs = _downstream_basin_ids_of_lakes(
     basin, river, id_col, down_col, riv_id_col, outlet_value
@@ -1897,6 +1933,12 @@ def basin_aggregation(
 
   print(f"Basin merge loop finished after {merge_iter} iteration(s).")
 
+  agg_basin = _rebuild_agg_basin_table(
+    basin, id_col, down_col, min_sub_area, outlet_value
+  )
+  n_survivor_aggs = len(agg_basin)
+  print(f"Aggregate table after headwater pass: {n_survivor_aggs} unit(s).")
+
   if linear_series_merge:
     series_rounds = 0
     max_series_iters = max(len(basin), 500)
@@ -1926,6 +1968,10 @@ def basin_aggregation(
       if xx_series.empty:
         break
       series_rounds += 1
+      print(
+        f"  Linear merge round {series_rounds}: {len(xx_series)} pair(s) "
+        f"(example: {xx_series['aggold'].iloc[0]} → {xx_series['agg'].iloc[0]})"
+      )
       basin = absorb_headwater_groups(
         basin,
         xx_series,
@@ -1937,7 +1983,13 @@ def basin_aggregation(
       agg_basin = _rebuild_agg_basin_table(
         basin, id_col, down_col, min_sub_area, outlet_value
       )
-    print(f"Linear main-stem merge finished after {series_rounds} round(s).")
+    agg_basin = _rebuild_agg_basin_table(
+      basin, id_col, down_col, min_sub_area, outlet_value
+    )
+    print(
+      f"Linear series merge finished after {series_rounds} round(s); "
+      f"{len(agg_basin)} aggregate unit(s) (was {n_survivor_aggs} after headwater)."
+    )
 
   sentinel_group = basin["agg"].map(lambda a: _is_sentinel_object_id(a, outlet_value))
   if sentinel_group.any():
