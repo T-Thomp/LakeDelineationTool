@@ -97,8 +97,8 @@ MIN_RIV_LENGTH = 1.0          # km
 
 # Final linear main-stem series merge (after headwater pass). Fractions of ``MIN_SUB_AREA``.
 LINEAR_SERIES_MERGE_ENABLED = True
-LINEAR_SERIES_MERGE_HALF_MIN_FRAC = 0.5   # either unit below this → always merge pair
-LINEAR_SERIES_MERGE_MAX_COMBINED_FRAC = 2.0  # when both ≥ half-min, merge if sum < this × min
+LINEAR_SERIES_MERGE_HALF_MIN_FRAC = 0.5   # either agg local area below this × min → merge
+LINEAR_SERIES_MERGE_MAX_COMBINED_FRAC = 2.0  # when both ≥ half-min, merge only if sum < this × min
 # When True, skip area caps only (gauge/lake/post-lake barriers always apply).
 LINEAR_MERGE_SKIP_AREA_RULES = False
 
@@ -1380,9 +1380,13 @@ def _linear_series_areas_may_merge(
   half_min_frac: float,
   max_combined_frac: float,
 ) -> bool:
-  """Area rules for merging two adjacent main-stem aggregates in series."""
-  if area_upstream < min_sub_area or area_downstream < min_sub_area:
-    return True
+  """
+  Area rules for merging two adjacent main-stem aggregates in series.
+
+  Uses summed local ``_unitarea`` per aggregate (not MIN_SUB_AREA as a hard
+  merge-if-below gate). Headwater pass already folds sub-100 km² units at
+  confluences; here only half-min and combined cap apply.
+  """
   half_min = min_sub_area * half_min_frac
   cap = min_sub_area * max_combined_frac
   if min(area_upstream, area_downstream) < half_min:
@@ -1809,9 +1813,20 @@ def basin_aggregation(
       if xx_series.empty:
         break
       series_rounds += 1
+      n_candidates = len(xx_series)
+      if not LINEAR_MERGE_SKIP_AREA_RULES and n_candidates > 1:
+        # One hop per round so area sums reflect current aggregates (cap is pairwise).
+        xx_series = xx_series.iloc[:1].copy()
+      ex_u = int(xx_series["aggold"].iloc[0])
+      ex_d = int(xx_series["agg"].iloc[0])
+      area_note = ""
+      if not LINEAR_MERGE_SKIP_AREA_RULES:
+        au = _agg_group_unit_area(basin, ex_u)
+        ad = _agg_group_unit_area(basin, ex_d)
+        area_note = f"; local areas {au:.1f}+{ad:.1f}={au + ad:.1f} km²"
       print(
-        f"  Linear merge round {series_rounds}: {len(xx_series)} pair(s) "
-        f"(example: {xx_series['aggold'].iloc[0]} → {xx_series['agg'].iloc[0]})"
+        f"  Linear merge round {series_rounds}: {n_candidates} candidate pair(s), "
+        f"applying {len(xx_series)} (example: {ex_u} → {ex_d}{area_note})"
       )
       n_aggs_before = int(basin["agg"].nunique())
       basin, n_applied, abs_skip = absorb_merge_groups(
