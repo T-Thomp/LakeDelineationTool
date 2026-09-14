@@ -988,10 +988,37 @@ def _agg_aggdown_on_basin(basin: gpd.GeoDataFrame, agg_id: int) -> object:
   return rows.iloc[0]
 
 
+def _aggdown_for_surviving_target(
+  basin: gpd.GeoDataFrame,
+  agg_basin: pd.DataFrame,
+  id_col: str,
+  down_col: str,
+  target_agg: int,
+  outlet_value: int,
+) -> object:
+  """``aggdown`` to assign to rows absorbed into ``target_agg``."""
+  target_agg = int(target_agg)
+  down = _agg_primary_aggdown(agg_basin, target_agg)
+  if down is None or pd.isna(down):
+    down = _agg_aggdown_on_basin(basin, target_agg)
+  if down is None or pd.isna(down):
+    link = _agg_survivor_pour_link(basin, id_col, target_agg)
+    if link is not None:
+      down = _pour_immediate_downstream_link(
+        basin, id_col, down_col, link, outlet_value
+      )
+  if down is None or pd.isna(down):
+    return int(outlet_value)
+  return down
+
+
 def _absorb_table_from_targets(
   rows: list[tuple[int, int]],
   agg_basin: pd.DataFrame,
   basin: gpd.GeoDataFrame | None = None,
+  id_col: str = BASIN_ID,
+  down_col: str = NEXT_DOWN_ID,
+  outlet_value: int = OUTLET_VALUE,
 ) -> pd.DataFrame:
   if not rows:
     return pd.DataFrame(columns=["aggold", "agg", "aggdown"])
@@ -1008,13 +1035,16 @@ def _absorb_table_from_targets(
   )
   aggdown = merged["new_aggdown"].copy()
   if basin is not None:
-    missing = aggdown.isna()
-    for idx in merged.index[missing]:
+    for idx in merged.index:
+      if not pd.isna(aggdown.loc[idx]):
+        continue
       try:
         target_i = int(merged.loc[idx, "target_agg"])
       except (TypeError, ValueError):
         continue
-      aggdown.loc[idx] = _agg_aggdown_on_basin(basin, target_i)
+      aggdown.loc[idx] = _aggdown_for_surviving_target(
+        basin, agg_basin, id_col, down_col, target_i, outlet_value
+      )
   return pd.DataFrame(
     {
       "aggold": merged["aggold"],
@@ -1150,7 +1180,9 @@ def build_headwater_driven_absorb_table(
       seen_source.add(aggold)
       rows.append((aggold, target_i))
 
-  table = _absorb_table_from_targets(rows, agg_basin, basin)
+  table = _absorb_table_from_targets(
+    rows, agg_basin, basin, id_col=id_col, down_col=down_col, outlet_value=outlet_value
+  )
   return _sort_absorb_table_upstream_first(basin, id_col, link_depth, table)
 
 
@@ -1306,7 +1338,9 @@ def build_linear_main_stem_series_absorb_table(
     parts = ", ".join(f"{k}={v}" for k, v in sorted(skip.items()))
     print(f"  Linear skip counts: {parts}")
 
-  table = _absorb_table_from_targets(rows, agg_basin, basin)
+  table = _absorb_table_from_targets(
+    rows, agg_basin, basin, id_col=id_col, down_col=down_col, outlet_value=outlet_value
+  )
   return _sort_absorb_table_upstream_first(basin, id_col, link_depth, table)
 
 
@@ -1364,44 +1398,90 @@ def _current_agg_for_basin_id(
   return down
 
 
-def absorb_headwater_groups(
+def absorb_merge_groups(
   basin: gpd.GeoDataFrame,
   xx_df: pd.DataFrame,
   outlet_value: int = OUTLET_VALUE,
   id_col: str = BASIN_ID,
+  down_col: str = NEXT_DOWN_ID,
   post_lake_subs: set[int] | None = None,
-) -> gpd.GeoDataFrame:
-  """Same as: loc[agg==aggold, aggdown]=...; loc[agg==aggold, agg]=..."""
+  agg_basin: pd.DataFrame | None = None,
+  enforce_barriers: bool = True,
+) -> tuple[gpd.GeoDataFrame, int]:
+  """Apply absorb rows: ``loc[agg==aggold] → new agg / aggdown``."""
   agg_index = _agg_index_by_agg_id(basin)
   post_lake = post_lake_subs or set()
+  outlet_value = int(outlet_value)
+  applied = 0
+  skip: dict[str, int] = defaultdict(int)
+
   for i in range(len(xx_df)):
     aggold = xx_df["aggold"].iloc[i]
     new_agg = xx_df["agg"].iloc[i]
     new_aggdown = xx_df["aggdown"].iloc[i]
     if pd.isna(new_agg) or _is_sentinel_object_id(new_agg, outlet_value):
-      continue
-    if pd.isna(new_aggdown):
+      skip["bad_target_agg"] += 1
       continue
     try:
       aggold_i = int(aggold)
       new_agg_i = int(new_agg)
     except (TypeError, ValueError):
+      skip["non_integer_agg_id"] += 1
       continue
-    if not _aggregate_may_be_absorbed(basin, aggold_i, id_col, post_lake):
-      continue
-    if _agg_is_lake_group(basin, new_agg_i):
-      continue
-    if _agg_is_gauge_group(basin, aggold_i):
-      continue
+    if pd.isna(new_aggdown):
+      if agg_basin is not None:
+        new_aggdown = _aggdown_for_surviving_target(
+          basin, agg_basin, id_col, down_col, new_agg_i, outlet_value
+        )
+      else:
+        new_aggdown = _agg_aggdown_on_basin(basin, new_agg_i)
+      if pd.isna(new_aggdown):
+        skip["missing_aggdown"] += 1
+        continue
+    if enforce_barriers:
+      if not _aggregate_may_be_absorbed(basin, aggold_i, id_col, post_lake):
+        skip["source_barrier"] += 1
+        continue
+      if _agg_is_lake_group(basin, new_agg_i):
+        skip["target_lake"] += 1
+        continue
+      if _agg_is_gauge_group(basin, aggold_i):
+        skip["source_gauge"] += 1
+        continue
     labels = agg_index.get(aggold_i)
     if not labels:
+      skip["no_rows_for_source_agg"] += 1
       continue
     labels = list(labels)
     basin.loc[labels, "aggdown"] = new_aggdown
-    basin.loc[labels, "agg"] = new_agg
+    basin.loc[labels, "agg"] = new_agg_i
+    applied += 1
     if aggold_i != new_agg_i:
       agg_index[new_agg_i].extend(labels)
       del agg_index[aggold_i]
+  return basin, applied, dict(skip)
+
+
+def absorb_headwater_groups(
+  basin: gpd.GeoDataFrame,
+  xx_df: pd.DataFrame,
+  outlet_value: int = OUTLET_VALUE,
+  id_col: str = BASIN_ID,
+  down_col: str = NEXT_DOWN_ID,
+  post_lake_subs: set[int] | None = None,
+  agg_basin: pd.DataFrame | None = None,
+  enforce_barriers: bool = True,
+) -> gpd.GeoDataFrame:
+  basin, _applied, _skip = absorb_merge_groups(
+    basin,
+    xx_df,
+    outlet_value=outlet_value,
+    id_col=id_col,
+    down_col=down_col,
+    post_lake_subs=post_lake_subs,
+    agg_basin=agg_basin,
+    enforce_barriers=enforce_barriers,
+  )
   return basin
 
 
@@ -1505,17 +1585,21 @@ def basin_aggregation(
     )
     if not xx.empty:
       xx = _sort_absorb_table_upstream_first(basin, id_col, link_depth, xx)
-      basin = absorb_headwater_groups(
+      basin, n_applied, _ = absorb_merge_groups(
         basin,
         xx,
         outlet_value=outlet_value,
         id_col=id_col,
+        down_col=down_col,
         post_lake_subs=post_lake_subs,
+        agg_basin=agg_basin,
+        enforce_barriers=True,
       )
-      applied_any = True
-      agg_basin = _rebuild_agg_basin_table(
-        basin, id_col, down_col, min_sub_area, outlet_value
-      )
+      applied_any = n_applied > 0
+      if applied_any:
+        agg_basin = _rebuild_agg_basin_table(
+          basin, id_col, down_col, min_sub_area, outlet_value
+        )
 
     if not applied_any:
       break
@@ -1575,13 +1659,31 @@ def basin_aggregation(
         f"  Linear merge round {series_rounds}: {len(xx_series)} pair(s) "
         f"(example: {xx_series['aggold'].iloc[0]} → {xx_series['agg'].iloc[0]})"
       )
-      basin = absorb_headwater_groups(
+      n_aggs_before = int(basin["agg"].nunique())
+      basin, n_applied, abs_skip = absorb_merge_groups(
         basin,
         xx_series,
         outlet_value=outlet_value,
         id_col=id_col,
+        down_col=down_col,
         post_lake_subs=post_lake_subs,
+        agg_basin=agg_basin,
+        enforce_barriers=not LINEAR_MERGE_TOPOLOGY_ONLY,
       )
+      n_aggs_after = int(basin["agg"].nunique())
+      print(
+        f"  Linear absorb: {n_applied}/{len(xx_series)} row(s) applied; "
+        f"aggregate ids {n_aggs_before} → {n_aggs_after}."
+      )
+      if abs_skip:
+        parts = ", ".join(f"{k}={v}" for k, v in sorted(abs_skip.items()))
+        print(f"  Linear absorb skips: {parts}")
+      if n_applied == 0 or n_aggs_after >= n_aggs_before:
+        print(
+          "  Linear merge stopping: absorb made no progress "
+          "(pairing works; check absorb skips above)."
+        )
+        break
       agg_basin = _rebuild_agg_basin_table(
         basin, id_col, down_col, min_sub_area, outlet_value
       )
