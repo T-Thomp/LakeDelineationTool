@@ -875,6 +875,53 @@ def _headwater_confluence_target_pour_link(
   return None
 
 
+def _headwater_neighbor_upstream_agg_at_confluence(
+  ds_link: int,
+  aggold: int,
+  upstream_by_node: dict[int, list[int]],
+  pour_agg: dict[int, int],
+) -> int | None:
+  """
+  At a confluence ``ds_link``, aggregate on the **other** upstream branch from
+  ``aggold`` (e.g. B → A when A and B both enter C, not B → C).
+  """
+  ds_link = int(ds_link)
+  aggold = int(aggold)
+  ups = upstream_by_node.get(ds_link, [])
+  if len(ups) < 2:
+    return None
+  neighbor_aggs: set[int] = set()
+  for u in ups:
+    a = pour_agg.get(int(u))
+    if a is None:
+      return None
+    a = int(a)
+    if a == aggold:
+      continue
+    neighbor_aggs.add(a)
+  if len(neighbor_aggs) != 1:
+    return None
+  return next(iter(neighbor_aggs))
+
+
+def _headwater_larger_basin_merges_into_smaller(
+  basin: gpd.GeoDataFrame,
+  aggold: int,
+  target_agg: int,
+) -> bool:
+  """
+  True when ``aggold`` should absorb into ``target_agg`` at a double-headwater
+  confluence: larger local basin area → smaller; equal area → higher agg id → lower.
+  """
+  area_src = _agg_group_unit_area(basin, int(aggold))
+  area_tgt = _agg_group_unit_area(basin, int(target_agg))
+  if area_src > area_tgt:
+    return True
+  if area_src < area_tgt:
+    return False
+  return int(aggold) > int(target_agg)
+
+
 def _build_aggregate_series_edges(
   basin: gpd.GeoDataFrame,
   id_col: str,
@@ -1271,20 +1318,23 @@ def build_headwater_driven_absorb_table(
   * Find all small eligible aggregates, then take the **frontier**: those at the
     minimum network depth (most upstream on the graph this round).
   * Each frontier unit walks downstream to the first **confluence** (2+ river
-    inflows). It merges only there, into the aggregate at that shared pour.
+    inflows). It merges into the **neighbor upstream** aggregate on that junction
+    (tributary B into stem A at C → ``(A+B) → C``, not B into the pour at C).
   * Linear stems with no confluence are **not** merged in this pass.
   * At that pour, only **frontier** aggregates listed for that node merge.
   * **Three or more** upstream reaches at the same downstream link: no merge.
+  * **Two frontier headwaters** at the same 2-way confluence: compare summed
+    local basin area (``_unitarea``); the **larger** merges into the **smaller**.
+    Equal area → higher ``agg`` id into lower ``agg`` id.
+  * If the neighbor is **not** a frontier headwater at that confluence, the
+    headwater merges into that neighbor with no area comparison.
 
   After applies, the next iteration rediscovers frontier headwaters further DS.
 
   Gauge units never merge downstream; upstream may merge into a gauge target.
   """
   outlet_value = int(outlet_value)
-  survivors = {int(a) for a in basin["agg"].dropna().astype(int).unique()}
-  gauge_links = _gauge_pour_link_ids(basin, id_col)
   pour_agg = _pour_agg_by_link(basin, id_col)
-  id_to_agg = _id_to_agg_map(basin, id_col)
   eligible_small = _eligible_small_aggregate_ids(
     basin, agg_basin, id_col, post_lake_subs, min_sub_area
   )
@@ -1327,31 +1377,8 @@ def build_headwater_driven_absorb_table(
 
   for ds in sorted(ds_triggers.keys(), key=lambda d: (link_depth.get(int(d), 10**9), int(d))):
     hw_aggs = ds_triggers[ds]
-    if len(upstream_by_node.get(ds, [])) >= 3:
-      continue
-    target_i = _agg_at_pour_link(basin, id_col, int(ds), pour_agg)
-    if target_i is None:
-      resolved = _current_agg_for_basin_id(
-        basin,
-        id_col,
-        ds,
-        survivor_ids=survivors,
-        gauge_link_ids=gauge_links,
-        pour_agg=pour_agg,
-        id_to_agg=id_to_agg,
-      )
-      if resolved is None:
-        continue
-      target_i = int(resolved)
-    else:
-      target_i = int(target_i)
-    if _agg_is_lake_group(basin, target_i):
-      continue
-    if not _linear_merge_may_apply_to_target(
-      basin, id_col, ds, target_i, lake_subs
-    ):
-      continue
-    if len(upstream_by_node.get(int(ds), [])) < 2:
+    ups = upstream_by_node.get(int(ds), [])
+    if len(ups) >= 3 or len(ups) < 2:
       continue
 
     sources: set[int] = set(int(a) for a in hw_aggs)
@@ -1360,10 +1387,29 @@ def build_headwater_driven_absorb_table(
       sources,
       key=lambda a: (_agg_min_link_depth(basin, id_col, int(a), link_depth), int(a)),
     ):
-      if aggold == target_i or aggold in seen_source:
+      if aggold in seen_source:
         continue
       if _aggregate_outlet_is_confluence(
         basin, id_col, aggold, upstream_by_node
+      ):
+        continue
+      neighbor = _headwater_neighbor_upstream_agg_at_confluence(
+        int(ds), aggold, upstream_by_node, pour_agg
+      )
+      if neighbor is None:
+        continue
+      target_i = int(neighbor)
+      if target_i == aggold:
+        continue
+      if target_i in sources:
+        if not _headwater_larger_basin_merges_into_smaller(
+          basin, aggold, target_i
+        ):
+          continue
+      if _agg_is_lake_group(basin, target_i):
+        continue
+      if not _linear_merge_may_apply_to_target(
+        basin, id_col, ds, target_i, lake_subs
       ):
         continue
       seen_source.add(aggold)
@@ -1739,7 +1785,8 @@ def basin_aggregation(
   max_merge_iters = max(len(basin) * 2, 1000)
   merge_iter = 0
   print(
-    f"Basin merge (frontier headwaters → DS): {len(basin)} pour point(s), "
+    f"Basin merge (frontier headwaters → neighbor at confluence): "
+    f"{len(basin)} pour point(s), "
     f"max {max_merge_iters} iteration(s)."
   )
 
