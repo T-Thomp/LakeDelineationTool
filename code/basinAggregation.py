@@ -1735,6 +1735,9 @@ def basin_aggregation(
   absorbed polygons sum onto the downstream ``agg`` and the result may be
   well above ``min_sub_area``.
 
+  Merge schedule: each round runs one **headwater** wave then one **linear**
+  wave, rebuilds the merge table, and repeats until neither wave applies a row.
+
   Returns aggregated basin and river GeoDataFrames. Each basin is identified by
   BASIN_ID. Gauge IDs, lake flags/IDs, lake area, and fractional lake area are
   pour-point attributes only.
@@ -1781,26 +1784,46 @@ def basin_aggregation(
   upstream_by_node = _upstream_links_by_down_node(river, down_col, riv_id_col)
   headwater_links = _headwater_link_ids(river, riv_id_col, upstream_by_node)
   link_depth = _link_depth_from_headwaters(upstream_by_node, headwater_links)
-  no_subbasin = len(basin)
-  max_merge_iters = max(len(basin) * 2, 1000)
-  merge_iter = 0
+  n_agg_start = int(basin["agg"].nunique())
+  max_merge_iters = max(len(basin) * 3, 1000)
+  combine_round = 0
+  total_hw_applied = 0
+  total_linear_applied = 0
+
   print(
-    f"Basin merge (frontier headwaters → neighbor at confluence): "
-    f"{len(basin)} pour point(s), "
-    f"max {max_merge_iters} iteration(s)."
+    f"Basin merge (headwater wave + linear wave until idle): "
+    f"{len(basin)} pour point(s), {n_agg_start} aggregate id(s) initially, "
+    f"max {max_merge_iters} round(s)."
   )
+  if linear_series_merge:
+    if LINEAR_MERGE_SKIP_AREA_RULES:
+      print(
+        "  Linear: single-upstream nodes; area caps off, "
+        "gauge/lake/post-lake barriers on."
+      )
+    else:
+      print(
+        "  Linear: half-min="
+        f"{linear_series_half_min_frac}× overrides cap; otherwise sum < "
+        f"{linear_series_max_combined_frac}× MIN_SUB_AREA."
+      )
+  else:
+    print("  Linear series merge disabled (headwater waves only).")
 
   while True:
-    merge_iter += 1
-    if merge_iter > max_merge_iters:
+    combine_round += 1
+    if combine_round > max_merge_iters:
       raise RuntimeError(
-        f"Basin merge loop did not converge after {max_merge_iters} iterations. "
+        f"Basin merge did not converge after {max_merge_iters} round(s). "
         "Small subbasins may be oscillating without merging. "
         "Check DSLINKNO / LINKNO topology in outputs/final/streams.shp "
         f"(and {TOPOLOGY_CYCLES_SHP} if river cycles were detected)."
       )
-    applied_any = False
-    xx = build_headwater_driven_absorb_table(
+
+    hw_applied = 0
+    linear_applied = 0
+
+    xx_hw = build_headwater_driven_absorb_table(
       basin,
       agg_basin,
       river,
@@ -1814,11 +1837,13 @@ def basin_aggregation(
       min_sub_area=min_sub_area,
       outlet_value=outlet_value,
     )
-    if not xx.empty:
-      xx = _sort_absorb_table_upstream_first(basin, id_col, link_depth, xx)
-      basin, n_applied, _ = absorb_merge_groups(
+    if not xx_hw.empty:
+      xx_hw = _sort_absorb_table_upstream_first(
+        basin, id_col, link_depth, xx_hw
+      )
+      basin, hw_applied, _ = absorb_merge_groups(
         basin,
-        xx,
+        xx_hw,
         outlet_value=outlet_value,
         id_col=id_col,
         down_col=down_col,
@@ -1826,54 +1851,9 @@ def basin_aggregation(
         agg_basin=agg_basin,
         enforce_barriers=True,
       )
-      applied_any = n_applied > 0
-      if applied_any:
-        agg_basin = _rebuild_agg_basin_table(
-          basin, id_col, down_col, min_sub_area, outlet_value
-        )
+      total_hw_applied += hw_applied
 
-    if not applied_any:
-      break
-
-    if len(agg_basin[agg_basin["_unitarea"] < min_sub_area]) == no_subbasin:
-      break
-    no_subbasin = len(agg_basin[agg_basin["_unitarea"] < min_sub_area])
-
-  print(f"Basin merge loop finished after {merge_iter} iteration(s).")
-
-  agg_basin = _rebuild_agg_basin_table(
-    basin, id_col, down_col, min_sub_area, outlet_value
-  )
-  n_agg_ids = int(basin["agg"].nunique())
-  n_series_edges = len(
-    _build_aggregate_series_edges(basin, id_col, upstream_by_node)
-  )
-  print(
-    f"After headwater pass: {n_agg_ids} aggregate id(s), "
-    f"{len(agg_basin)} row(s) in merge summary table, "
-    f"{n_series_edges} sole-upstream aggregate edge(s) for linear merge."
-  )
-
-  if linear_series_merge:
-    series_rounds = 0
-    max_series_iters = max(len(basin), 500)
-    if LINEAR_MERGE_SKIP_AREA_RULES:
-      print(
-        "Basin merge (linear series): single-upstream nodes only; "
-        "area caps off, gauge/lake/post-lake barriers on."
-      )
-    else:
-      print(
-        "Basin merge (linear series, single upstream segment): "
-        f"half-min={linear_series_half_min_frac}× overrides cap; "
-        f"otherwise sum < {linear_series_max_combined_frac}× MIN_SUB_AREA."
-      )
-    series_pairs_applied = 0
-    while True:
-      if series_rounds >= max_series_iters:
-        raise RuntimeError(
-          f"Linear main-stem merge did not converge after {max_series_iters} iterations."
-        )
+    if linear_series_merge:
       xx_series = build_linear_main_stem_series_absorb_table(
         basin,
         agg_basin,
@@ -1888,54 +1868,60 @@ def basin_aggregation(
         max_combined_frac=linear_series_max_combined_frac,
         outlet_value=outlet_value,
       )
-      if xx_series.empty:
-        break
-      series_rounds += 1
-      n_aggs_before = int(basin["agg"].nunique())
-      basin, n_applied, abs_skip = absorb_merge_groups(
-        basin,
-        xx_series,
-        outlet_value=outlet_value,
-        id_col=id_col,
-        down_col=down_col,
-        post_lake_subs=post_lake_subs,
-        agg_basin=agg_basin,
-        enforce_barriers=True,
-      )
-      series_pairs_applied += n_applied
-      n_aggs_after = int(basin["agg"].nunique())
-      if LINEAR_MERGE_VERBOSE:
-        print(
-          f"  Linear merge round {series_rounds}: {len(xx_series)} pair(s), "
-          f"applied {n_applied}; aggregate ids {n_aggs_before} → {n_aggs_after}."
+      if not xx_series.empty:
+        n_aggs_before = int(basin["agg"].nunique())
+        basin, linear_applied, abs_skip = absorb_merge_groups(
+          basin,
+          xx_series,
+          outlet_value=outlet_value,
+          id_col=id_col,
+          down_col=down_col,
+          post_lake_subs=post_lake_subs,
+          agg_basin=agg_basin,
+          enforce_barriers=True,
         )
-        if abs_skip:
-          parts = ", ".join(f"{k}={v}" for k, v in sorted(abs_skip.items()))
-          print(f"  Linear absorb skips: {parts}")
-      if n_applied == 0 or n_aggs_after >= n_aggs_before:
+        total_linear_applied += linear_applied
+        n_aggs_after = int(basin["agg"].nunique())
         if LINEAR_MERGE_VERBOSE:
           print(
-            "  Linear merge stopping: absorb made no progress "
-            "(pairing works; check absorb skips above)."
+            f"  Round {combine_round} linear: {len(xx_series)} pair(s), "
+            f"applied {linear_applied}; aggregate ids "
+            f"{n_aggs_before} → {n_aggs_after}."
           )
-        elif n_applied == 0 and not xx_series.empty:
+          if abs_skip:
+            parts = ", ".join(f"{k}={v}" for k, v in sorted(abs_skip.items()))
+            print(f"  Linear absorb skips: {parts}")
+        elif linear_applied == 0:
           print(
             "Warning: linear merge found absorb candidate(s) but applied none "
-            "(set LINEAR_MERGE_VERBOSE=True for details)."
+            f"(round {combine_round}; set LINEAR_MERGE_VERBOSE=True for details)."
           )
-        break
+
+    if hw_applied > 0 or linear_applied > 0:
       agg_basin = _rebuild_agg_basin_table(
         basin, id_col, down_col, min_sub_area, outlet_value
       )
-    agg_basin = _rebuild_agg_basin_table(
-      basin, id_col, down_col, min_sub_area, outlet_value
-    )
-    n_after_linear = int(basin["agg"].nunique())
-    print(
-      f"Linear series merge: {series_rounds} round(s), "
-      f"{series_pairs_applied} pair(s) applied; "
-      f"{n_after_linear} aggregate id(s) (was {n_agg_ids} after headwater)."
-    )
+      if LINEAR_MERGE_VERBOSE:
+        print(
+          f"  Round {combine_round}: headwater applied {hw_applied}, "
+          f"linear applied {linear_applied}."
+        )
+    else:
+      break
+
+  agg_basin = _rebuild_agg_basin_table(
+    basin, id_col, down_col, min_sub_area, outlet_value
+  )
+  n_agg_ids = int(basin["agg"].nunique())
+  n_series_edges = len(
+    _build_aggregate_series_edges(basin, id_col, upstream_by_node)
+  )
+  print(
+    f"Basin merge finished after {combine_round} round(s): "
+    f"headwater {total_hw_applied} pair(s), linear {total_linear_applied} "
+    f"pair(s) applied; {n_agg_ids} aggregate id(s) "
+    f"(started {n_agg_start}), {n_series_edges} sole-upstream linear edge(s)."
+  )
 
   sentinel_group = basin["agg"].map(lambda a: _is_sentinel_object_id(a, outlet_value))
   if sentinel_group.any():
