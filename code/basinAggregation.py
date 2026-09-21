@@ -1097,29 +1097,6 @@ def _eligible_small_aggregate_ids(
   return out
 
 
-def _frontier_headwater_aggregate_ids(
-  basin: gpd.GeoDataFrame,
-  id_col: str,
-  link_depth: dict[int, int],
-  eligible_small: set[int],
-) -> set[int]:
-  """
-  Most-upstream small aggregates on the vector network for this iteration.
-
-  Recomputed each merge round after prior folds — the ``headwater`` set moves
-  downstream along each branch as upstream units are absorbed.
-  """
-  if not eligible_small:
-    return set()
-  depths = {
-    a: _agg_min_link_depth(basin, id_col, a, link_depth) for a in eligible_small
-  }
-  min_d = min(depths.values())
-  if min_d >= 10**9:
-    return set()
-  return {a for a, d in depths.items() if d == min_d}
-
-
 def _link_is_gauge_pour(
   basin: gpd.GeoDataFrame,
   id_col: str,
@@ -1315,21 +1292,20 @@ def build_headwater_driven_absorb_table(
   """
   One merge wave per call (caller loops until empty):
 
-  * Find all small eligible aggregates, then take the **frontier**: those at the
-    minimum network depth (most upstream on the graph this round).
-  * Each frontier unit walks downstream to the first **confluence** (2+ river
+  * Every aggregate with summed local ``_unitarea`` **below** ``min_sub_area``
+    (and allowed to absorb) is considered **each wave** — not only the global
+    network tips — so previously merged units that are still sub-threshold keep
+    merging in later rounds.
+  * Each such unit walks downstream to the first **confluence** (2+ river
     inflows). It merges into the **neighbor upstream** aggregate on that junction
     (tributary B into stem A at C → ``(A+B) → C``, not B into the pour at C).
-  * Linear stems with no confluence are **not** merged in this pass.
-  * At that pour, only **frontier** aggregates listed for that node merge.
+  * Linear stems with no confluence are **not** merged in this pass (linear wave).
   * **Three or more** upstream reaches at the same downstream link: no merge.
-  * **Two frontier headwaters** at the same 2-way confluence: compare summed
+  * **Two sub-threshold headwaters** at the same 2-way confluence: compare summed
     local basin area (``_unitarea``); the **larger** merges into the **smaller**.
     Equal area → higher ``agg`` id into lower ``agg`` id.
-  * If the neighbor is **not** a frontier headwater at that confluence, the
-    headwater merges into that neighbor with no area comparison.
-
-  After applies, the next iteration rediscovers frontier headwaters further DS.
+  * If the neighbor is **not** sub-threshold at that confluence, the small unit
+    merges into that neighbor with no area comparison.
 
   Gauge units never merge downstream; upstream may merge into a gauge target.
   """
@@ -1338,18 +1314,17 @@ def build_headwater_driven_absorb_table(
   eligible_small = _eligible_small_aggregate_ids(
     basin, agg_basin, id_col, post_lake_subs, min_sub_area
   )
-  frontier = _frontier_headwater_aggregate_ids(
-    basin, id_col, link_depth, eligible_small
-  )
-  if not frontier:
+  if not eligible_small:
     return pd.DataFrame(columns=["aggold", "agg", "aggdown"])
 
   ds_triggers: dict[int, set[int]] = defaultdict(set)
-  for agg_i in sorted(frontier):
-    if _aggregate_outlet_is_confluence(
-      basin, id_col, agg_i, upstream_by_node
-    ):
-      continue
+  for agg_i in sorted(
+    eligible_small,
+    key=lambda a: (
+      _agg_min_link_depth(basin, id_col, int(a), link_depth),
+      int(a),
+    ),
+  ):
     u_link = _agg_survivor_pour_link(basin, id_col, agg_i)
     if u_link is None:
       continue
@@ -1389,10 +1364,6 @@ def build_headwater_driven_absorb_table(
     ):
       if aggold in seen_source:
         continue
-      if _aggregate_outlet_is_confluence(
-        basin, id_col, aggold, upstream_by_node
-      ):
-        continue
       neighbor = _headwater_neighbor_upstream_agg_at_confluence(
         int(ds), aggold, upstream_by_node, pour_agg
       )
@@ -1429,6 +1400,8 @@ def _linear_series_areas_may_merge(
   max_combined_frac: float,
 ) -> bool:
   """Area rules for adjacent main-stem aggregates (summed local ``_unitarea``)."""
+  if area_upstream < min_sub_area:
+    return True
   half_min = min_sub_area * half_min_frac
   cap = min_sub_area * max_combined_frac
   if min(area_upstream, area_downstream) < half_min:
@@ -1922,6 +1895,15 @@ def basin_aggregation(
     f"pair(s) applied; {n_agg_ids} aggregate id(s) "
     f"(started {n_agg_start}), {n_series_edges} sole-upstream linear edge(s)."
   )
+  still_small = _eligible_small_aggregate_ids(
+    basin, agg_basin, id_col, post_lake_subs, min_sub_area
+  )
+  if still_small:
+    print(
+      f"Warning: {len(still_small)} aggregate(s) remain below "
+      f"min_sub_area={min_sub_area:g} km² (barriers, 3-way junctions, or "
+      "no confluence/linear path)."
+    )
 
   sentinel_group = basin["agg"].map(lambda a: _is_sentinel_object_id(a, outlet_value))
   if sentinel_group.any():
