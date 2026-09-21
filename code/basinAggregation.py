@@ -938,6 +938,59 @@ def _distinct_upstream_aggregates_at_node(
   return distinct
 
 
+def _inflow_link_for_agg_at_down_node(
+  ds_link: int,
+  agg_id: int,
+  upstream_by_node: dict[int, list[int]],
+  pour_agg: dict[int, int],
+) -> int | None:
+  hits = [
+    int(u)
+    for u in upstream_by_node.get(int(ds_link), [])
+    if pour_agg.get(int(u)) == int(agg_id)
+  ]
+  if not hits:
+    return None
+  return min(hits)
+
+
+def _confluence_fold_blocked_for_continuing_stem(
+  ds_link: int,
+  aggold: int,
+  upstream_by_node: dict[int, list[int]],
+  pour_agg: dict[int, int],
+) -> bool:
+  """
+  True when ``aggold`` must not fold into a neighbor at ``ds_link``.
+
+  When two or more **continuing** reaches (non-tip inflows) meet, do not dissolve
+  one stem arm into another — even if local area is still below ``MIN_SUB_AREA``.
+  """
+  ds_link = int(ds_link)
+  if _junction_two_inflow_both_continuing(upstream_by_node, ds_link):
+    inflow = _inflow_link_for_agg_at_down_node(
+      ds_link, aggold, upstream_by_node, pour_agg
+    )
+    if inflow is not None and _link_is_continuing_river(
+      inflow, upstream_by_node
+    ):
+      return True
+  ups = upstream_by_node.get(ds_link, [])
+  continuing_ups = [
+    int(u)
+    for u in ups
+    if _link_is_continuing_river(int(u), upstream_by_node)
+  ]
+  if len(continuing_ups) < 2:
+    return False
+  inflow = _inflow_link_for_agg_at_down_node(
+    ds_link, aggold, upstream_by_node, pour_agg
+  )
+  if inflow is None:
+    return False
+  return _link_is_continuing_river(inflow, upstream_by_node)
+
+
 def _headwater_main_channel_by_shared_boundary(
   basin: gpd.GeoDataFrame,
   aggold: int,
@@ -982,9 +1035,15 @@ def _headwater_merge_target_at_confluence(
   if distinct is None or aggold not in distinct:
     return None
 
-  headwaters = {a for a in distinct if int(a) in eligible_small}
-  mains = distinct - headwaters
-  if aggold not in headwaters:
+  headwaters = {
+    a for a in distinct if not _agg_is_main_channel(basin, a, min_sub_area)
+  }
+  mains = {a for a in distinct if _agg_is_main_channel(basin, a, min_sub_area)}
+  if aggold not in eligible_small or aggold not in headwaters:
+    return None
+  if _confluence_fold_blocked_for_continuing_stem(
+    ds_link, aggold, upstream_by_node, pour_agg
+  ):
     return None
 
   if len(mains) == 1:
@@ -1001,6 +1060,8 @@ def _headwater_merge_target_at_confluence(
     others,
     key=lambda a: (_agg_group_unit_area(basin, int(a)), int(a)),
   )
+  if _agg_is_main_channel(basin, target, min_sub_area):
+    return None
   if not _headwater_larger_basin_merges_into_smaller(basin, aggold, target):
     return None
   return int(target)
@@ -1131,6 +1192,15 @@ def _aggregate_outlet_is_confluence(
 def _agg_group_unit_area(basin: gpd.GeoDataFrame, agg_id: int) -> float:
   group = basin.loc[basin["agg"].astype(int) == int(agg_id)]
   return float(group["_unitarea"].sum()) if not group.empty else 0.0
+
+
+def _agg_is_main_channel(
+  basin: gpd.GeoDataFrame,
+  agg_id: int,
+  min_sub_area: float,
+) -> bool:
+  """True when summed local ``_unitarea`` meets or exceeds ``min_sub_area``."""
+  return _agg_group_unit_area(basin, int(agg_id)) >= float(min_sub_area)
 
 
 def _sort_absorb_table_upstream_first(
@@ -1384,10 +1454,10 @@ def build_headwater_driven_absorb_table(
     inflows). It merges into the **neighbor upstream** aggregate on that junction
     (tributary B into stem A at C → ``(A+B) → C``, not B into the pour at C).
   * Linear stems with no confluence are **not** merged in this pass (linear wave).
-  * **N-way (2+) confluences:** one sole main channel → all headwaters merge into
-    it; all headwaters → same rule as 2-way (larger local area into smaller);
-    multiple main channels → headwater merges into the main with the longest
-    shared polygon side boundary.
+  * **N-way (2+) confluences:** one sole main channel → sub-threshold tribs merge
+    into it (not a second continuing stem); all tip headwaters → larger area into
+    smaller; multiple main channels → trib into main by shared boundary; **two or
+    more continuing stem inflows are never folded into each other** at the junction.
 
   Gauge units never merge downstream; upstream may merge into a gauge target.
   """
@@ -1480,6 +1550,8 @@ def _linear_series_areas_may_merge(
   max_combined_frac: float,
 ) -> bool:
   """Area rules for adjacent main-stem aggregates (summed local ``_unitarea``)."""
+  if area_upstream >= min_sub_area and area_downstream >= min_sub_area:
+    return False
   if area_upstream < min_sub_area:
     return True
   half_min = min_sub_area * half_min_frac
@@ -1589,6 +1661,11 @@ def build_linear_main_stem_series_absorb_table(
       basin, id_col, ds_link, agg_d, lake_subs
     ):
       skip["lake_or_gauge_downstream"] += 1
+      continue
+    if _agg_is_main_channel(basin, agg_u, min_sub_area) and _agg_is_main_channel(
+      basin, agg_d, min_sub_area
+    ):
+      skip["both_main_channel"] += 1
       continue
     if not skip_area:
       area_u = _agg_group_unit_area(basin, agg_u)
@@ -1981,8 +2058,9 @@ def basin_aggregation(
   if still_small:
     print(
       f"Warning: {len(still_small)} aggregate(s) remain below "
-      f"min_sub_area={min_sub_area:g} km² (barriers, 3-way junctions, or "
-      "no confluence/linear path)."
+      f"min_sub_area={min_sub_area:g} km² (e.g. gauge/lake/post-lake barriers, "
+      "no downstream confluence on the branch, or linear area rules blocked "
+      "sole-upstream merges)."
     )
 
   sentinel_group = basin["agg"].map(lambda a: _is_sentinel_object_id(a, outlet_value))
