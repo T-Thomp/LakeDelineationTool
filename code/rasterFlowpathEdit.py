@@ -54,7 +54,6 @@ import argparse
 import os
 import heapq
 import numpy as np
-import pandas as pd
 import geopandas as gpd
 from osgeo import gdal, ogr, osr
 from shapely import wkt as shapely_wkt
@@ -95,13 +94,6 @@ CENTERLINE_PENALTY_SCALE = 500.0   # how strongly to avoid lake margins (bank ce
 BACKBONE_COST = 0.01               # near-zero cost on the pre-computed spine
 OFF_BACKBONE_BASE_COST = 10.0      # base cost off the spine (margins penalized further)
 SPINE_STEP_BASE_COST = 0.1         # base step cost when building the spine
-
-# Max steps along the override carve ray before falling back to algorithmic outlet
-# selection. Each step is one cell along the outward direction from the lake shore.
-MAX_OVERRIDE_BREAKOUT_STEPS = 100
-
-# Max outside-lake steps for downstream-basin override short breakout paths.
-MAX_DIRECT_DS_BREAKOUT_STEPS = 5
 
 # Max exterior cells carved along the override ray before algorithmic fallback.
 OVERRIDE_BREAKOUT_STEPS = 10
@@ -896,22 +888,6 @@ def resolve_worker_count(requested_ncores, comm):
     return max(1, requested_ncores)
 
 
-def apply_masked_fdr_patch_old(fdr_band, xoff, yoff, updated_fdr_win, edit_mask):
-    """
-    Merge a lake window into the output raster, touching only edited cells.
-
-    Reads the current output window first so overlapping bounding boxes do not
-    revert cells already modified by other lakes.
-    """
-    if not np.any(edit_mask):
-        return
-
-    h, w = updated_fdr_win.shape
-    current_win = fdr_band.ReadAsArray(xoff, yoff, w, h)
-    current_win[edit_mask] = updated_fdr_win[edit_mask]
-    fdr_band.WriteArray(current_win, xoff, yoff)
-
-
 def apply_masked_fdr_patch(
     fdr_band,
     xoff,
@@ -1023,15 +999,13 @@ def lake_id_for_row(idx, lake_row):
     return str(lake_row.get("Hylak_id", idx)).strip()
 
 
-def serialize_lake_row(idx, lake_row, cell_size, neighbor_wkts=None):
+def serialize_lake_row(idx, lake_row, neighbor_wkts=None):
     """Convert a GeoDataFrame row into a picklable dict for worker processes."""
     geometry = lake_row.geometry
     return {
-        "lake_idx": int(idx),
         "lake_id": lake_id_for_row(idx, lake_row),
         "geometry_wkt": geometry.wkt,
         "bounds": tuple(geometry.bounds),
-        "grid_cells": estimate_lake_grid_cells(geometry, cell_size),
         "neighbor_wkts": neighbor_wkts or [],
     }
 
@@ -1475,7 +1449,7 @@ def process_raster_reservoir_routing(
                 neighbor_lake_wkts(lakes, position, row.geometry) if mode == "override" else None
             )
             lake_cell_counts.append(estimate_lake_grid_cells(row.geometry, cell_size))
-            lake_rows.append(serialize_lake_row(idx, row, cell_size, neighbor_wkts))
+            lake_rows.append(serialize_lake_row(idx, row, neighbor_wkts))
 
         paths = {
             "fdr_raster_path": fdr_raster_path,
