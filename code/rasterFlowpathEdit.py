@@ -37,6 +37,17 @@ Inputs (TauDEM / upstream Python products)
 Output
 ------
   fdr_lakes.tif - flow directions with lake interiors re-routed
+
+Run modes (--option)
+--------------------
+  full (default) - rebuild fdr_lakes.tif from the original FDR for every lake.
+  override       - re-run only the lakes listed in --csv and paste them into the
+                   existing fdr_lakes.tif from a previous full run. Each re-run
+                   lake (plus a small ring for old breakout cells) is first reset
+                   to the original FDR, so edits from the previous outlet choice
+                   do not linger.
+
+  python3 rasterFlowpathEdit.py --option override --csv my_fixes.csv --ncores 4
 """
 
 import argparse
@@ -47,8 +58,8 @@ import pandas as pd
 import geopandas as gpd
 from osgeo import gdal, ogr, osr
 from shapely import wkt as shapely_wkt
-from shapely.geometry import Point
-from scipy.ndimage import distance_transform_edt, binary_erosion
+from shapely.geometry import Point, box
+from scipy.ndimage import distance_transform_edt, binary_erosion, binary_dilation
 
 from outlet_overrides import load_overrides
 from pipeline_paths import (
@@ -939,6 +950,44 @@ def apply_masked_fdr_patch(
     fdr_band.WriteArray(current_win, xoff, yoff)
 
 
+def build_restore_mask(geometry, neighbor_wkts, gt, xoff, yoff, xsize, ysize, raster_proj):
+    """
+    Cells to reset to the original FDR before re-pasting a lake in override mode.
+
+    The lake mask is dilated far enough to cover any breakout carved by a previous
+    run (breakouts never leave the lake window). Cells inside neighbouring lake
+    polygons are excluded so their edits are not reverted.
+    """
+    lake_mask = rasterize_polygon_mask(geometry, gt, xoff, yoff, xsize, ysize, raster_proj)
+    restore_mask = binary_dilation(
+        lake_mask,
+        structure=np.ones((3, 3), dtype=bool),
+        iterations=OVERRIDE_BREAKOUT_STEPS + 1,
+    )
+    if neighbor_wkts:
+        win_gt = (
+            gt[0] + xoff * gt[1], gt[1], gt[2],
+            gt[3] + yoff * gt[5], gt[4], gt[5],
+        )
+        neighbor_mask = np.zeros((ysize, xsize), dtype=np.uint8)
+        for neighbor_wkt in neighbor_wkts:
+            rasterize_geometry(neighbor_mask, shapely_wkt.loads(neighbor_wkt), win_gt, raster_proj)
+        restore_mask &= neighbor_mask == 0
+    return restore_mask
+
+
+def restore_original_fdr(out_band, orig_band, xoff, yoff, restore_mask):
+    """Copy original TauDEM FDR values into the output raster under restore_mask."""
+    if not np.any(restore_mask):
+        return
+
+    h, w = restore_mask.shape
+    current_win = out_band.ReadAsArray(xoff, yoff, w, h)
+    original_win = orig_band.ReadAsArray(xoff, yoff, w, h)
+    current_win[restore_mask] = original_win[restore_mask]
+    out_band.WriteArray(current_win, xoff, yoff)
+
+
 def estimate_lake_grid_cells(geometry, cell_size):
     """Approximate lake raster cell count from polygon area (for load balancing)."""
     return max(1, int(round(float(geometry.area) / (cell_size * cell_size))))
@@ -971,16 +1020,27 @@ def partition_lakes_by_cell_count(lake_cell_counts, n_workers):
     return batches
 
 
-def serialize_lake_row(idx, lake_row, cell_size):
+def lake_id_for_row(idx, lake_row):
+    return str(lake_row.get("Hylak_id", idx)).strip()
+
+
+def serialize_lake_row(idx, lake_row, cell_size, neighbor_wkts=None):
     """Convert a GeoDataFrame row into a picklable dict for worker processes."""
     geometry = lake_row.geometry
     return {
         "lake_idx": int(idx),
-        "lake_id": str(lake_row.get("Hylak_id", idx)).strip(),
+        "lake_id": lake_id_for_row(idx, lake_row),
         "geometry_wkt": geometry.wkt,
         "bounds": tuple(geometry.bounds),
         "grid_cells": estimate_lake_grid_cells(geometry, cell_size),
+        "neighbor_wkts": neighbor_wkts or [],
     }
+
+
+def neighbor_lake_wkts(all_lakes, position, geometry):
+    """WKT of other lakes whose geometry intersects this lake's bounding box."""
+    hits = all_lakes.sindex.query(box(*geometry.bounds), predicate="intersects")
+    return [all_lakes.geometry.iloc[i].wkt for i in hits if i != position]
 
 
 def process_single_lake(
@@ -1079,8 +1139,22 @@ def process_single_lake(
     return xoff, yoff, updated_fdr_win, edit_mask, outlet_record
 
 
-def process_assigned_lakes(rank_id, lake_rows, paths, lookup_tables, gauge_radius_meters, raster_meta, lake_through_linknos):
-    """Process a rank's lake list and return masked patches for merge on rank 0."""
+def process_assigned_lakes(
+    rank_id,
+    lake_rows,
+    paths,
+    lookup_tables,
+    gauge_radius_meters,
+    raster_meta,
+    lake_through_linknos,
+    mode="full",
+):
+    """
+    Process a rank's lake list and return masked patches for merge on rank 0.
+
+    In override mode, also returns a restore mask per lake (even when no outlet
+    is found) so rank 0 can clear the previous run's edits before pasting.
+    """
 
     wsno_to_link, link_to_dout, link_to_accum, link_to_downstream = lookup_tables
     gt, inv_gt, raster_proj, raster_size, cell_size = raster_meta
@@ -1100,6 +1174,7 @@ def process_assigned_lakes(rank_id, lake_rows, paths, lookup_tables, gauge_radiu
 
     patches = []
     outlet_records = []
+    restores = []
     processed_count = 0
     batch_total = len(lake_rows)
 
@@ -1113,6 +1188,12 @@ def process_assigned_lakes(rank_id, lake_rows, paths, lookup_tables, gauge_radiu
         if window is None:
             continue
         xoff, yoff, xsize, ysize = window
+
+        if mode == "override":
+            restore_mask = build_restore_mask(
+                geometry, lake_row["neighbor_wkts"], gt, xoff, yoff, xsize, ysize, raster_proj,
+            )
+            restores.append((xoff, yoff, restore_mask))
 
         result = process_single_lake(
             lake_row["lake_id"],
@@ -1148,7 +1229,7 @@ def process_assigned_lakes(rank_id, lake_rows, paths, lookup_tables, gauge_radiu
     ds_src = None
     ds_acc = None
     ds_w = None
-    return patches, outlet_records
+    return patches, outlet_records, restores
 
 
 def _print_partition_summary(batches, lake_cell_counts):
@@ -1285,9 +1366,15 @@ def process_raster_reservoir_routing(
     gauge_radius_meters=750,
     ncores=1,
     comm=None,
+    mode="full",
 ):
     """
     Main entry point: loop over all lakes and patch the flow-direction raster.
+
+    mode="full" rebuilds output_fdr_path from fdr_raster_path for every lake.
+    mode="override" only re-runs lakes listed in overrides_csv_path and pastes
+    them into the existing output_fdr_path, after resetting each re-run lake's
+    area to the original FDR.
 
     Lakes are partitioned across MPI ranks by estimated grid-cell count, processed
     in parallel, then merged on rank 0 using masked writes (only edited cells).
@@ -1313,26 +1400,42 @@ def process_raster_reservoir_routing(
     rank = comm.Get_rank()
     mpi_size = comm.Get_size()
 
+    if mode not in ("full", "override"):
+        raise ValueError(f"Unknown mode {mode!r}; expected 'full' or 'override'.")
+
     if rank == 0:
+        setup_error = None
+        if mode == "override":
+            if not os.path.exists(output_fdr_path):
+                setup_error = (
+                    f"Override mode needs an existing {output_fdr_path} from a "
+                    "previous full run."
+                )
+            elif not os.path.exists(overrides_csv_path):
+                setup_error = f"Override CSV not found: {overrides_csv_path}"
+
+    if rank == 0 and setup_error is None:
         lookup_tables, streams_gdf = build_vector_lookup_tables(streams_vector_path)
         lakes = gpd.read_file(lakes_vector_path)
-        total_lakes = len(lakes)
 
-        if os.path.exists(output_fdr_path):
-            try:
-                os.remove(output_fdr_path)
-            except OSError:
-                pass
+        if mode == "full":
+            if os.path.exists(output_fdr_path):
+                try:
+                    os.remove(output_fdr_path)
+                except OSError:
+                    pass
 
-        print("Creating mutable working copy of flow directions dataset...")
-        driver = gdal.GetDriverByName("GTiff")
-        src_ds_fdr = gdal.Open(fdr_raster_path)
-        co_options = ["COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=256", "BLOCKYSIZE=256"]
-        out_ds = driver.CreateCopy(output_fdr_path, src_ds_fdr, strict=0, options=co_options)
-        out_ds = None
-        src_ds_fdr = None
+            print("Creating mutable working copy of flow directions dataset...")
+            driver = gdal.GetDriverByName("GTiff")
+            src_ds_fdr = gdal.Open(fdr_raster_path)
+            co_options = ["COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=256", "BLOCKYSIZE=256"]
+            out_ds = driver.CreateCopy(output_fdr_path, src_ds_fdr, strict=0, options=co_options)
+            out_ds = None
+            src_ds_fdr = None
+        else:
+            print(f"Override mode: pasting re-run lakes into existing {output_fdr_path}")
 
-        ds_fdr = gdal.Open(output_fdr_path, gdal.GA_Update)
+        ds_fdr = gdal.Open(output_fdr_path)
         gt = ds_fdr.GetGeoTransform()
         inv_gt = gdal.InvGeoTransform(gt)
         raster_proj = ds_fdr.GetProjection()
@@ -1354,16 +1457,37 @@ def process_raster_reservoir_routing(
                 "skipping manual outlet overrides."
             )
 
+        if mode == "override":
+            override_ids = set(load_overrides(overrides_csv_path, raster_proj)["lake_id"])
+            lake_ids = [lake_id_for_row(idx, row) for idx, row in lakes.iterrows()]
+            missing_ids = sorted(override_ids - set(lake_ids))
+            if missing_ids:
+                print(
+                    f"WARNING: {len(missing_ids)} CSV lake_id(s) not found in "
+                    f"{lakes_vector_path}: {', '.join(missing_ids)}"
+                )
+            selected_positions = [i for i, lake_id in enumerate(lake_ids) if lake_id in override_ids]
+            print(f"Override mode: {len(selected_positions)} lake(s) selected from {overrides_csv_path}.")
+        else:
+            selected_positions = list(range(len(lakes)))
+
         conflict_db = build_lake_conflict_database(
             lakes_vector_path,
             fdr_raster_path,
             lake_id_field="Hylak_id",
         )
 
-        lake_cell_counts = [
-            estimate_lake_grid_cells(row.geometry, cell_size) for _, row in lakes.iterrows()
-        ]
-        lake_rows = [serialize_lake_row(idx, row, cell_size) for idx, row in lakes.iterrows()]
+        total_lakes = len(selected_positions)
+        lake_cell_counts = []
+        lake_rows = []
+        for position in selected_positions:
+            idx = lakes.index[position]
+            row = lakes.iloc[position]
+            neighbor_wkts = (
+                neighbor_lake_wkts(lakes, position, row.geometry) if mode == "override" else None
+            )
+            lake_cell_counts.append(estimate_lake_grid_cells(row.geometry, cell_size))
+            lake_rows.append(serialize_lake_row(idx, row, cell_size, neighbor_wkts))
 
         paths = {
             "fdr_raster_path": fdr_raster_path,
@@ -1383,10 +1507,17 @@ def process_raster_reservoir_routing(
             "raster_meta": raster_meta,
             "lake_through_linknos": lake_through_linknos,
         }
+    elif rank == 0:
+        setup_payload = {"error": setup_error}
     else:
         setup_payload = None
 
     setup_payload = comm.bcast(setup_payload, root=0)
+    if "error" in setup_payload:
+        if rank == 0:
+            print(f"ERROR: {setup_payload['error']}")
+        raise SystemExit(1)
+
     lookup_tables = setup_payload["lookup_tables"]
     total_lakes = setup_payload["total_lakes"]
     lake_cell_counts = setup_payload["lake_cell_counts"]
@@ -1401,7 +1532,21 @@ def process_raster_reservoir_routing(
         return
 
     worker_count = resolve_worker_count(ncores, comm)
-    worker_count = min(worker_count, total_lakes)
+    if worker_count > mpi_size:
+        if rank == 0:
+            print(
+                f"WARNING: Requested {worker_count} core(s) but only {mpi_size} MPI "
+                f"rank(s) were launched; using {mpi_size}. Launch with "
+                f"srun/mpirun -n {worker_count} to use more."
+            )
+        worker_count = mpi_size
+    if worker_count > total_lakes:
+        if rank == 0:
+            print(
+                f"WARNING: Requested {worker_count} core(s) but only {total_lakes} "
+                f"lake(s) to edit; using {total_lakes}."
+            )
+        worker_count = total_lakes
 
     if rank == 0:
         batches = partition_lakes_by_cell_count(lake_cell_counts, worker_count)
@@ -1417,7 +1562,7 @@ def process_raster_reservoir_routing(
     my_lake_indices = comm.scatter(scatter_batches, root=0)
     my_lake_rows = [lake_rows[i] for i in my_lake_indices]
 
-    local_patches, local_outlets = process_assigned_lakes(
+    local_result = process_assigned_lakes(
         rank + 1,
         my_lake_rows,
         paths,
@@ -1425,9 +1570,10 @@ def process_raster_reservoir_routing(
         gauge_radius_meters,
         raster_meta,
         lake_through_linknos,
+        mode=mode,
     )
 
-    gathered = comm.gather((local_patches, local_outlets), root=0)
+    gathered = comm.gather(local_result, root=0)
 
     if rank == 0:
         ds_fdr = gdal.Open(output_fdr_path, gdal.GA_Update)
@@ -1435,10 +1581,23 @@ def process_raster_reservoir_routing(
         outlet_records = []
         patches_written = 0
 
+        if mode == "override":
+            # All restores run before any paste so one re-run lake's ring cannot
+            # wipe another re-run lake's new edits.
+            ds_orig = gdal.Open(fdr_raster_path)
+            orig_band = ds_orig.GetRasterBand(1)
+            restored = 0
+            for rank_result in gathered:
+                for xoff, yoff, restore_mask in rank_result[2]:
+                    restore_original_fdr(fdr_band, orig_band, xoff, yoff, restore_mask)
+                    restored += 1
+            ds_orig = None
+            print(f"Reset {restored} lake area(s) to original flow directions.")
+
         for rank_idx, rank_result in enumerate(gathered):
             if rank_result is None:
                 continue
-            patches, batch_outlets = rank_result
+            patches, batch_outlets, _ = rank_result
             for lake_id, xoff, yoff, updated_fdr_win, edit_mask in patches:
                 apply_masked_fdr_patch(
                     fdr_band, xoff, yoff, updated_fdr_win, edit_mask, lake_id, conflict_db,
@@ -1468,8 +1627,22 @@ if __name__ == "__main__":
         help=(
             "Number of MPI ranks to use for lake processing (default: FLOWPATH_NCORES "
             "env var or 1). Launch with srun/mpirun; capped by the number of ranks "
-            "started."
+            "started and by the number of lakes being edited."
         ),
+    )
+    parser.add_argument(
+        "--option",
+        choices=("full", "override"),
+        default="full",
+        help=(
+            "full (default): rebuild fdr_lakes.tif for every lake. override: re-run "
+            "only lakes listed in --csv and paste them into the existing fdr_lakes.tif."
+        ),
+    )
+    parser.add_argument(
+        "--csv",
+        default="./outlet_overrides.csv",
+        help="Outlet override CSV (lake_id, lat, lon). Default: ./outlet_overrides.csv",
     )
     args = parser.parse_args()
     ensure_output_dirs()
@@ -1483,9 +1656,10 @@ if __name__ == "__main__":
         streams_vector_path=str(PASS1_STREAMS),
         lakes_vector_path=str(PREP_LAKES),
         gauges_vector_path=str(PREP_GAUGES),
-        overrides_csv_path="./outlet_overrides.csv",
+        overrides_csv_path=args.csv,
         output_fdr_path=str(FDR_CENTERLINE),
         output_outlets_path=str(PREP_SELECTED_OUTLETS),
         gauge_radius_meters=750,
         ncores=args.ncores,
+        mode=args.option,
     )

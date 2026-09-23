@@ -265,6 +265,18 @@ outputs/prep/
 └── selected_outlets.shp
 ```
 
+Options:
+
+- `--ncores N` — MPI worker ranks (capped at the `srun` task count and at the number of lakes being edited).
+- `--option full|override` — `full` (default) rebuilds `fdr_lakes.tif` for every lake. `override` re-runs only the lakes listed in `--csv` and pastes them into the existing `fdr_lakes.tif`, first resetting each re-run lake (plus a small ring for old breakout cells) to the original flow directions.
+- `--csv PATH` — outlet override CSV (`lake_id,lat,lon`; default `./outlet_overrides.csv`).
+
+```bash
+srun --ntasks=4 python3 rasterFlowpathEdit.py --option override --csv my_fixes.csv --ncores 4
+```
+
+Re-run TauDEM Pass 2 / Pass 3 after an override-only run.
+
 ---
 
 ## Pass 2 – Corrected Delineation

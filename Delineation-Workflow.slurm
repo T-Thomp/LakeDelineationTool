@@ -317,6 +317,13 @@ gdal_polygonize.py \
 #
 # Serial debug (interactive node, no srun):
 #   python3 rasterFlowpathEdit.py --ncores 1
+#
+# Override-only re-run (fix individual lakes without a full rebuild):
+#   Re-runs only the lakes listed in the CSV and pastes them into the existing
+#   fdr_lakes.tif. Workers are capped at the number of lakes in the CSV.
+#   Re-run TauDEM Pass 2 / Pass 3 afterwards for the change to take effect.
+#   srun --ntasks=4 --cpus-per-task=1 \
+#       python3 rasterFlowpathEdit.py --option override --csv my_fixes.csv --ncores 4
 # -----------------------------------------------------------------------------
 log_section "Python: lake filtering, gauges, and raster flow-path edits"
 
