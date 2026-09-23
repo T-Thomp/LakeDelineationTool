@@ -146,6 +146,21 @@ def main() -> None:
     ],
     {61: {61}, 62: {62}, 63: {63}, 64: {64}, 66: {66}},
   )
+  check(
+    "no sideways merge when the downstream basin is a lake",
+    [
+      {"id": 71, "down": 75, "area": 20, "length_km": 3},
+      {"id": 72, "down": 75, "area": 30, "length_km": 1},
+      {"id": 73, "down": 75, "area": 40, "length_km": 2},
+      {"id": 74, "down": 75, "area": 300},
+      {"id": 76, "down": 74, "area": 300},
+      {"id": 75, "down": OUT, "area": 900, "lake": 1},
+      {"id": 77, "down": 79, "area": 20, "length_km": 3},
+      {"id": 78, "down": 79, "area": 30, "length_km": 1},
+      {"id": 79, "down": OUT, "area": 900, "lake": 1},
+    ],
+    {i: {i} for i in (71, 72, 73, 74, 75, 76, 77, 78, 79)},
+  )
   chain = [
     {"id": 81, "down": 82, "area": 80},
     {"id": 82, "down": 83, "area": 80},

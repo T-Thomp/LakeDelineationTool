@@ -413,7 +413,11 @@ def headwater_pass(g: AggregateGraph, min_sub_area: float, iteration: int, log: 
   def by_length(a: int) -> tuple:
     return (g.length[a], -g.area[a], a)
 
-  junctions = [j for j, ups in g.inflows.items() if len(ups) >= 2]
+  # Inflows to a lake enter at different points on its shoreline, so they are
+  # never merged sideways with each other.
+  junctions = [
+    j for j, ups in g.inflows.items() if len(ups) >= 2 and not g.is_lake[j]
+  ]
   merged = 0
   for junction in g.upstream_first(junctions):
     inflows = list(g.inflows[junction])
