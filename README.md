@@ -62,7 +62,6 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-If `import mpi4py` fails, deactivate, load `mpi4py/4.0.0`, and re-activate the venv.
 
 Day-to-day: `module restore scimods` then `source ~/virtual-envs/scienv/bin/activate`.
 
