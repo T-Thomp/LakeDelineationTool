@@ -104,7 +104,6 @@ PREP_LAKES = PREP / "lakes.shp"
 PREP_LAKES_GPKG = PREP / "lakes.gpkg"
 PREP_GAUGES = PREP / "gauges.shp"
 PREP_GAUGES_GPKG = PREP / "gauges.gpkg"
-PREP_SELECTED_OUTLETS = PREP / "selected_outlets.shp"
 PREP_RESERVOIR_IO_NODES = PREP / "reservoir_io_nodes.shp"
 
 # Post-processing working copies
@@ -140,7 +139,6 @@ PATHS: dict[str, str] = {
     "lakes_gpkg": str(PREP_LAKES_GPKG),
     "gauges": str(PREP_GAUGES),
     "gauges_gpkg": str(PREP_GAUGES_GPKG),
-    "selected_outlets": str(PREP_SELECTED_OUTLETS),
     "reservoir_io_nodes": str(PREP_RESERVOIR_IO_NODES),
     "working_basins_merged": str(WORKING_BASINS_MERGED),
     "working_streams_merged": str(WORKING_STREAMS_MERGED),

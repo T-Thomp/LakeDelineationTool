@@ -68,7 +68,6 @@ from pipeline_paths import (
     PASS1_WATERSHEDS_TIF,
     PREP_GAUGES,
     PREP_LAKES,
-    PREP_SELECTED_OUTLETS,
     TAUDEM_D8,
     ensure_output_dirs,
 )
@@ -1067,7 +1066,7 @@ def process_single_lake(
     lake_through_linknos,
 ):
     """
-    Process one lake and return a raster patch plus optional outlet metadata.
+    Process one lake and return its raster patch (xoff, yoff, updated_fdr_win, edit_mask).
 
     Returns None when the lake is outside the raster or has no valid outlet.
     """
@@ -1128,15 +1127,7 @@ def process_single_lake(
     edit_mask = (
         updated_fdr_win.astype(np.int32) != np.asarray(fdr_win, dtype=np.int32)
     )
-
-    outlet_record = {
-        "lake_id": lake_id,
-        "link_no": int(chosen_outlet.get("link_no", -1)),
-        "sel_type": selection_type,
-        "local_acc": float(chosen_outlet.get("local_accum", -1)),
-        "geometry": chosen_outlet["point"],
-    }
-    return xoff, yoff, updated_fdr_win, edit_mask, outlet_record
+    return xoff, yoff, updated_fdr_win, edit_mask
 
 
 def process_assigned_lakes(
@@ -1173,7 +1164,6 @@ def process_assigned_lakes(
     overrides_gdf = load_overrides(paths["overrides_csv_path"], raster_proj)
 
     patches = []
-    outlet_records = []
     restores = []
     processed_count = 0
     batch_total = len(lake_rows)
@@ -1221,15 +1211,14 @@ def process_assigned_lakes(
         if result is None:
             continue
 
-        xoff, yoff, updated_fdr_win, edit_mask, outlet_record = result
+        xoff, yoff, updated_fdr_win, edit_mask = result
         patches.append((lake_row["lake_id"], xoff, yoff, updated_fdr_win, edit_mask))
-        outlet_records.append(outlet_record)
 
     ds_fdr = None
     ds_src = None
     ds_acc = None
     ds_w = None
-    return patches, outlet_records, restores
+    return patches, restores
 
 
 def _print_partition_summary(batches, lake_cell_counts):
@@ -1362,7 +1351,6 @@ def process_raster_reservoir_routing(
     gauges_vector_path,
     overrides_csv_path,
     output_fdr_path,
-    output_outlets_path,
     gauge_radius_meters=750,
     ncores=1,
     comm=None,
@@ -1578,7 +1566,6 @@ def process_raster_reservoir_routing(
     if rank == 0:
         ds_fdr = gdal.Open(output_fdr_path, gdal.GA_Update)
         fdr_band = ds_fdr.GetRasterBand(1)
-        outlet_records = []
         patches_written = 0
 
         if mode == "override":
@@ -1587,23 +1574,19 @@ def process_raster_reservoir_routing(
             ds_orig = gdal.Open(fdr_raster_path)
             orig_band = ds_orig.GetRasterBand(1)
             restored = 0
-            for rank_result in gathered:
-                for xoff, yoff, restore_mask in rank_result[2]:
+            for _, rank_restores in gathered:
+                for xoff, yoff, restore_mask in rank_restores:
                     restore_original_fdr(fdr_band, orig_band, xoff, yoff, restore_mask)
                     restored += 1
             ds_orig = None
             print(f"Reset {restored} lake area(s) to original flow directions.")
 
-        for rank_idx, rank_result in enumerate(gathered):
-            if rank_result is None:
-                continue
-            patches, batch_outlets, _ = rank_result
+        for rank_idx, (patches, _) in enumerate(gathered):
             for lake_id, xoff, yoff, updated_fdr_win, edit_mask in patches:
                 apply_masked_fdr_patch(
                     fdr_band, xoff, yoff, updated_fdr_win, edit_mask, lake_id, conflict_db,
                 )
                 patches_written += 1
-            outlet_records.extend(batch_outlets)
             if patches:
                 print(f"Merged rank {rank_idx + 1}: {len(patches)} lake patch(es).")
 
@@ -1658,7 +1641,6 @@ if __name__ == "__main__":
         gauges_vector_path=str(PREP_GAUGES),
         overrides_csv_path=args.csv,
         output_fdr_path=str(FDR_CENTERLINE),
-        output_outlets_path=str(PREP_SELECTED_OUTLETS),
         gauge_radius_meters=750,
         ncores=args.ncores,
         mode=args.option,

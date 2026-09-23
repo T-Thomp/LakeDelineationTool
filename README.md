@@ -260,9 +260,6 @@ Produces:
 ```text
 outputs/interim/taudem_d8/
 └── fdr_lakes.tif
-
-outputs/prep/
-└── selected_outlets.shp
 ```
 
 Options:
@@ -487,7 +484,6 @@ Outputs:
 
 ```text
 outputs/interim/taudem_d8/fdr_lakes.tif
-outputs/prep/selected_outlets.shp
 ```
 
 ---

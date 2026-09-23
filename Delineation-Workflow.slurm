@@ -82,7 +82,6 @@
 #       lakes / gauges     -- outputs/prep/lakes.shp, outputs/prep/gauges.shp
 #       outlet_overrides.csv (optional manual lake outlets)
 #       outputs            -- outputs/interim/taudem_d8/fdr_lakes.tif
-#                             outputs/prep/selected_outlets.shp
 #       Launch             -- MUST use srun/mpirun (mpi4py); see FLOWPATH_NCORES
 #
 # [ ] pourPointsPass2.py  (paths from pipeline_paths.py)
@@ -300,7 +299,6 @@ gdal_polygonize.py \
 # Outputs consumed by Pass 2 / Pass 3 / pourPointsPass2:
 #   outputs/interim/taudem_d8/fdr_lakes.tif  -- full-domain FDR copy with
 #                                                      lake interiors patched only
-#   outputs/prep/selected_outlets.shp                 -- chosen outlet per lake
 #
 # MPI launch (required for parallel lake processing):
 #   export FLOWPATH_NCORES=N
