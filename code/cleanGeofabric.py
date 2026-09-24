@@ -283,7 +283,7 @@ def export_hy_features_geofabric(
     waterbodies_path: str | None = None,
     hydro_locations_path: str | None = None,
 ) -> None:
-    """Assemble and export fully HY_Features-conformant geofabric products."""
+    """Assemble and export the HY_Features profile geofabric (geofabric.gpkg + JSON sidecars)."""
     if not hy_features_enabled(default=ENABLE_HY_FEATURES):
         print("HY_Features disabled; skipping geofabric.gpkg assembly.")
         return
@@ -405,16 +405,6 @@ def run_clean_geofabric(*, delete_interim: bool | None = None) -> None:
         output_streams,
         input_gauges,
     )
-
-    if hy_features_enabled(default=ENABLE_HY_FEATURES):
-        from hy_features.export import export_shapefile_legacy
-
-        assembled_layers = gpd.read_file(str(WORKING_GEOFABRIC_GPKG), layer="catchment_area")
-        assembled_streams = gpd.read_file(str(WORKING_GEOFABRIC_GPKG), layer="flowpath")
-        export_shapefile_legacy(assembled_layers, output_basins)
-        export_shapefile_legacy(assembled_streams, output_streams)
-    else:
-        print("HY_Features disabled; using TauDEM-only basins.shp / streams.shp shapefiles.")
 
     delete_interim_outputs(enabled=delete_interim, default=DELETE_INTERIM_FILES)
 

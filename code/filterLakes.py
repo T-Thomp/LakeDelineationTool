@@ -104,8 +104,7 @@ def export_filtered_lakes(lakes: gpd.GeoDataFrame, paths: dict[str, str]) -> Non
         from hy_features.enrich import enrich_waterbodies
         from hy_features.export import export_geopackage
 
-        lakes = enrich_waterbodies(lakes)
-        export_geopackage({"waterbody": lakes}, paths["output_gpkg"])
+        export_geopackage({"waterbody": enrich_waterbodies(lakes)}, paths["output_gpkg"])
 
     print(f"Saving {len(lakes)} filtered lakes to {output_shp}...")
     lakes.to_file(output_shp)

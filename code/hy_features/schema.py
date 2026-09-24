@@ -17,7 +17,7 @@ HYF_NS: Final[str] = "https://www.opengis.net/def/appschema/hy_features/hyf/"
 # ---------------------------------------------------------------------------
 HY_DENDRITIC_CATCHMENT: Final[str] = "HY_DendriticCatchment"
 HY_CATCHMENT_AREA: Final[str] = "HY_CatchmentArea"
-HY_FLOWPATH: Final[str] = "HY_FlowPath"
+HY_FLOWPATH: Final[str] = "HY_Flowpath"
 HY_HYDRO_LOCATION: Final[str] = "HY_HydroLocation"
 HY_HYDROMETRIC_FEATURE: Final[str] = "HY_HydrometricFeature"
 HY_LAKE: Final[str] = "HY_Lake"
@@ -63,6 +63,7 @@ REFERENCE_NEXUS_ID: Final[str] = "reference_nexus_id"
 LINEAR_ELEMENT_ID: Final[str] = "linear_element_id"
 DISTANCE_FROM_OUTLET_M: Final[str] = "distance_from_outlet_m"
 DISTANCE_FROM_OUTLET_PCT: Final[str] = "distance_from_outlet_pct"
+DISTANCE_DESCRIPTION: Final[str] = "distance_description"
 
 # Network and metadata
 DRAINAGE_PATTERN_COL: Final[str] = "drainage_pattern"
@@ -98,18 +99,21 @@ LEGACY_LAKE_TYPE: Final[str] = "Lake_type"
 # Annex B.1 — hydroLocationType vocabulary (subset used by this workflow)
 HYDRO_LOC_POUR_POINT: Final[str] = "pour point"
 HYDRO_LOC_CONFLUENCE: Final[str] = "confluence"
-HYDRO_LOC_OUTLET_STRUCTURE: Final[str] = "outlet structure"
+HYDRO_LOC_RIVER_MOUTH: Final[str] = "river mouth"
 HYDRO_LOC_HYDROMETRIC: Final[str] = "hydrometric station"
 HYDRO_LOC_CATCHMENT_OUTLET: Final[str] = "catchment outlet"
 
 # Map pour-point point_type values to Annex B.1 terms
 POINT_TYPE_TO_HYDRO_LOC: Final[dict[str, str]] = {
-    "inflow": HYDRO_LOC_CONFLUENCE,
+    "inflow": HYDRO_LOC_RIVER_MOUTH,
     "outflow": HYDRO_LOC_CATCHMENT_OUTLET,
     "gauge": HYDRO_LOC_HYDROMETRIC,
 }
 
-# Drainage pattern for the study network
+# Annex B.2 — distanceDescription for positions measured upstream from a reach outlet
+DISTANCE_DESCRIPTION_UPSTREAM: Final[str] = "upstream"
+
+# Drainage pattern of the study channel network (HY_ChannelNetwork.drainagePattern)
 DRAINAGE_PATTERN: Final[str] = "dendritic"
 
 # MESH / WATFLOOD outlet sentinel (documented as nillable outflow nexus)
@@ -151,14 +155,50 @@ def hyf_type_uri(short_code: str) -> str:
     return f"{HYF_NS}{short_code}"
 
 
-def outflow_nexus_id_for(catchment_id: str) -> str:
-    """Standard outflow nexus id for a catchment/reach code (``nx_out_{id}``)."""
+def inflow_nexus_id_for(catchment_id: str) -> str:
+    """Nexus where every upstream catchment drains into ``catchment_id`` (``nx_{id}``)."""
+    return f"nx_{catchment_id}"
+
+
+def terminal_nexus_id_for(catchment_id: str) -> str:
+    """Domain-outlet nexus of a catchment with no receiving catchment (``nx_out_{id}``)."""
     return f"nx_out_{catchment_id}"
 
 
-def inflow_nexus_id_for(catchment_id: str) -> str:
-    """Standard inflow nexus id template (``nx_in_{id}``); reserved for future use."""
-    return f"nx_in_{catchment_id}"
+def outflow_nexus_id_for(catchment_id: str, lower_catchment_id: str | None = None) -> str:
+    """
+    Outflow nexus of ``catchment_id``.
+
+    Catchments draining to the same receiving catchment share one nexus
+    (``nx_{lower}``); domain outlets get a terminal nexus (``nx_out_{id}``).
+    """
+    if lower_catchment_id:
+        return inflow_nexus_id_for(lower_catchment_id)
+    return terminal_nexus_id_for(catchment_id)
+
+
+def normalize_id(value: object) -> str:
+    """Render an identifier as text, collapsing integral floats (``1.0`` -> ``"1"``)."""
+    if value is None:
+        return ""
+    try:
+        if value != value:  # NaN
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, bool):
+        return str(int(value))
+    if isinstance(value, float) or type(value).__name__.startswith("float"):
+        f = float(value)
+        return str(int(f)) if f.is_integer() else str(f)
+    text = str(value).strip()
+    if text.lower() in ("nan", "none", "<na>"):
+        return ""
+    try:
+        f = float(text)
+    except ValueError:
+        return text
+    return str(int(f)) if f.is_integer() and "." in text else text
 
 
 def classify_waterbody(lake_type: int | float | None) -> str:

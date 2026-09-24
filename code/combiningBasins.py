@@ -730,12 +730,11 @@ def process_reservoir_basins():
         waterbodies = gpd.read_file(PATHS["lakes"])
         if waterbodies.crs != target_crs:
             waterbodies = waterbodies.to_crs(target_crs)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"No waterbody layer for HY_Features assembly: {exc}")
 
     if hy_features_enabled(default=ENABLE_HY_FEATURES):
         from hy_features.assemble import assemble_full_geofabric, export_full_geofabric
-        from hy_features.export import export_shapefile_legacy
 
         assembled = assemble_full_geofabric(
             final_geofabric,
@@ -751,11 +750,8 @@ def process_reservoir_basins():
             metadata_path=str(WORKING_HYDRO_NETWORK_JSON),
         )
 
-        export_shapefile_legacy(assembled["layers"]["catchment_area"], str(WORKING_BASINS_MERGED))
-        export_shapefile_legacy(assembled["layers"]["flowpath"], str(WORKING_STREAMS_MERGED))
-    else:
-        export_shapefile(final_geofabric, str(WORKING_BASINS_MERGED))
-        export_shapefile(streams_dissolved, str(WORKING_STREAMS_MERGED))
+    export_shapefile(final_geofabric, str(WORKING_BASINS_MERGED))
+    export_shapefile(streams_dissolved, str(WORKING_STREAMS_MERGED))
     print("Processing complete.")
 
 

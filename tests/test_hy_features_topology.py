@@ -22,6 +22,7 @@ from hy_features.network import (
 from hy_features.schema import (
     CATCHMENT_ID,
     CONTRIBUTING_CATCHMENT_ID,
+    DISTANCE_DESCRIPTION,
     DISTANCE_FROM_OUTLET_M,
     DOWNSTREAM_WATERBODY_ID,
     FLOWPATH_ID,
@@ -40,6 +41,7 @@ from hy_features.schema import (
     OUTFLOW_NEXUS_ID,
     REALIZED_NEXUS_ID,
     REALIZES_CATCHMENT,
+    RECEIVING_CATCHMENT_ID,
     REFERENCE_NEXUS_ID,
     NETWORK_ID,
     FEATURE_ID,
@@ -193,7 +195,8 @@ def test_hydrometric_river_referencing():
     assert hm[CATCHMENT_ID].iloc[0] == "1"
     assert hm[HOST_FLOWPATH_ID].iloc[0] == "1"
     assert hm[LINEAR_ELEMENT_ID].iloc[0] == "1"
-    assert hm[REFERENCE_NEXUS_ID].iloc[0] == "nx_out_1"
+    assert hm[REFERENCE_NEXUS_ID].iloc[0] == "nx_2"
+    assert hm[DISTANCE_DESCRIPTION].iloc[0] == "upstream"
     assert float(hm[DISTANCE_FROM_OUTLET_M].iloc[0]) >= 0
 
 
@@ -284,17 +287,25 @@ def test_waterbody_links_skip_non_lake_catchments():
     assert lower[UPSTREAM_WATERBODY_ID] == "100"
 
 
-def test_registry_nexus_realization_entries():
+def test_registry_realizations_and_nexus_associations():
     basins, streams = _minimal_raw_geofabric()
     assembled = assemble_full_geofabric(basins, streams)
-    nexus_entries = [
-        e for e in assembled["registry"].entries
-        if e.realization_type == HY_HYDRO_NEXUS and e.notes == "nexusRealization"
-    ]
-    assert len(nexus_entries) == 2
-    assert {e.feature_id for e in nexus_entries} == {"nx_out_1", "nx_out_2"}
+    registry = assembled["registry"]
+
+    realization_types = {e.realization_type for e in registry.entries}
+    assert realization_types == {HY_CATCHMENT_AREA, HY_FLOWPATH}
+    assert set(registry.catchments) == {"1", "2"}
+
+    nexus_links = {
+        (a.catchment_id, a.feature_id) for a in registry.associations
+        if a.feature_type == HY_HYDRO_NEXUS
+    }
+    assert nexus_links == {("1", "nx_2"), ("2", "nx_out_2")}
+    assert registry.catchments["1"].outflow_nexus_id == "nx_2"
+    assert registry.catchments["2"].inflow_nexus_id == "nx_2"
+
     catchment_area = assembled["layers"]["catchment_area"]
-    ca_entry = next(e for e in assembled["registry"].entries if e.realization_type == HY_CATCHMENT_AREA)
+    ca_entry = next(e for e in registry.entries if e.realization_type == HY_CATCHMENT_AREA)
     assert ca_entry.feature_id == catchment_area[FEATURE_ID].iloc[0]
 
 
@@ -303,7 +314,7 @@ def test_unplaced_gauges_omitted_from_hydrometric_layer():
     gauges = gpd.GeoDataFrame(
         {
             "STATION_NUMBER": ["far-away"],
-            "geometry": [streams.geometry.iloc[0].centroid.buffer(50_000).centroid],
+            "geometry": [Point(50_000.0, 50_000.0)],
         },
         crs=streams.crs,
     )
@@ -387,3 +398,160 @@ def test_custom_preset_override():
     remapped = apply_field_remap(streams, "flowpath", mapping=mapping)
     assert "WSNO" in remapped.columns
     assert remapped["WSNO"].iloc[0] == 1
+
+
+def _confluence_streams():
+    """Links 1 and 2 join and drain into 3 (domain outlet)."""
+    return gpd.GeoDataFrame(
+        {
+            "LINKNO": [1, 2, 3],
+            "DSLINKNO": [3, 3, -9999],
+            "geometry": [
+                LineString([(1.0, 1.0), (0.0, 2.0)]),
+                LineString([(1.0, 1.0), (2.0, 2.0)]),
+                LineString([(1.0, 0.0), (1.0, 1.0)]),
+            ],
+        },
+        crs="EPSG:3857",
+    )
+
+
+def _confluence_basins():
+    return gpd.GeoDataFrame(
+        {
+            "DN": [1, 2, 3],
+            "is_lake": [1, 1, 1],
+            "lake_id": [100, 200, 300],
+            "lake_area": [1.0, 1.0, 1.0],
+            "frac_lake": [0.5, 0.5, 0.5],
+            "geometry": [
+                Polygon([(0, 1), (1, 1), (1, 3), (0, 3)]),
+                Polygon([(1, 1), (2, 1), (2, 3), (1, 3)]),
+                Polygon([(0, 0), (2, 0), (2, 1), (0, 1)]),
+            ],
+        },
+        crs="EPSG:3857",
+    )
+
+
+def test_confluence_shares_one_nexus():
+    from hy_features.network import build_hydro_nexus_layer
+
+    nexus = build_hydro_nexus_layer(_confluence_streams(), outlet_sentinel=-9999)
+    assert set(nexus[NEXUS_ID]) == {"nx_3", "nx_out_3"}
+    shared = nexus[nexus[NEXUS_ID] == "nx_3"].iloc[0]
+    assert shared[CONTRIBUTING_CATCHMENT_ID] == "1,2"
+    assert shared[RECEIVING_CATCHMENT_ID] == "3"
+    assert REALIZES_CATCHMENT not in nexus.columns
+
+    assembled = assemble_full_geofabric(_confluence_basins(), _confluence_streams())
+    ca = assembled["layers"]["catchment_area"].set_index(CATCHMENT_ID)
+    assert ca.loc["1", OUTFLOW_NEXUS_ID] == "nx_3"
+    assert ca.loc["2", OUTFLOW_NEXUS_ID] == "nx_3"
+    assert ca.loc["3", "inflow_nexus_id"] == "nx_3"
+    assert ca.loc["3", "upper_catchment_id"] == "1,2"
+
+
+def test_upstream_waterbody_lists_every_branch():
+    basins = enrich_catchment_areas(_confluence_basins())
+    streams = enrich_flowpaths(_confluence_streams(), outlet_sentinel=-9999)
+    lakes = enrich_waterbodies(
+        gpd.GeoDataFrame(
+            {"Hylak_id": [100, 200, 300], "Lake_type": [1, 1, 1],
+             "geometry": list(_confluence_basins().geometry)},
+            crs="EPSG:3857",
+        )
+    )
+    linked = link_waterbody_network(lakes, basins, streams, outlet_sentinel=-9999)
+    lower = linked[linked[WATERBODY_ID] == "300"].iloc[0]
+    assert lower[UPSTREAM_WATERBODY_ID] == "100,200"
+
+
+def test_float_ids_are_normalized():
+    basins, streams = _minimal_raw_geofabric()
+    basins["DN"] = basins["DN"].astype(float)
+    streams["LINKNO"] = streams["LINKNO"].astype(float)
+    streams["DSLINKNO"] = streams["DSLINKNO"].astype(float)
+    assert enrich_catchment_areas(basins)[CATCHMENT_ID].tolist() == ["1", "2"]
+    enriched = enrich_flowpaths(streams, outlet_sentinel=-9999)
+    assert enriched[FLOWPATH_ID].tolist() == ["1", "2"]
+    assert enriched[LOWER_CATCHMENT_ID].tolist() == ["2", ""]
+
+
+def test_shapefile_frame_drops_hy_columns_without_collisions():
+    from hy_features.export import check_shapefile_columns, prepare_shapefile_frame
+
+    basins, streams = _minimal_raw_geofabric()
+    assembled = assemble_full_geofabric(basins, streams)
+    for layer in ("catchment_area", "flowpath"):
+        frame = prepare_shapefile_frame(assembled["layers"][layer], f"{layer}.shp")
+        assert CATCHMENT_ID not in frame.columns
+        assert WATERBODY_ID not in frame.columns
+        assert all(len(c) <= 10 for c in frame.columns)
+    assert "DN" in prepare_shapefile_frame(assembled["layers"]["catchment_area"], "b.shp").columns
+
+    clash = gpd.GeoDataFrame(
+        {"distance_a_long": [1], "distance_a_other": [2], "geometry": [Point(0, 0)]},
+        crs="EPSG:3857",
+    )
+    with pytest.raises(ValueError):
+        check_shapefile_columns(clash, "clash.shp")
+
+
+def test_sidecars_serialize_numpy_values():
+    import json
+
+    import numpy as np
+
+    from hy_features.json_export import json_default
+
+    basins, streams = _minimal_raw_geofabric()
+    assembled = assemble_full_geofabric(basins, streams)
+    payload = {
+        "registry": assembled["registry"].to_full_payload(),
+        "network": assembled["hydrographic_network"],
+        "extra": [np.int64(3), np.bool_(True), np.array([1, 2])],
+    }
+    text = json.dumps(payload, default=json_default)
+    assert '"extra": [3, true, [1, 2]]' in text
+
+
+def test_gauge_station_code_read_from_shapefile_name():
+    gauges = gpd.GeoDataFrame(
+        {"STATION_NO": ["05AB001"], "STATION_NM": ["Test Creek"], "geometry": [Point(0.5, 0.5)]},
+        crs="EPSG:3857",
+    )
+    enriched = enrich_hydrometric_features(gauges)
+    assert enriched["station_code"].iloc[0] == "05AB001"
+    assert enriched["feature_name"].iloc[0] == "Test Creek"
+
+
+def test_multilinestring_flowpath_is_merged():
+    from hy_features.network import _as_linestring
+    from shapely.geometry import MultiLineString
+
+    merged = _as_linestring(MultiLineString([[(0, 0), (1, 0)], [(1, 0), (2, 0)]]))
+    assert merged.geom_type == "LineString"
+    assert merged.length == pytest.approx(2.0)
+
+    disjoint = _as_linestring(MultiLineString([[(0, 0), (1, 0)], [(5, 0), (8, 0)]]))
+    assert disjoint.length == pytest.approx(3.0)
+
+
+def test_hydro_locations_realize_network_nexus():
+    basins, streams = _minimal_raw_geofabric()
+    pour_points = gpd.GeoDataFrame(
+        {
+            "name": ["Lake_1", "Lake_1"],
+            "point_type": ["outflow", "inflow"],
+            "geometry": [Point(1.0, 0.5), Point(400.0, 400.0)],
+        },
+        crs="EPSG:3857",
+    )
+    assembled = assemble_full_geofabric(basins, streams, hydro_locations=pour_points)
+    loc = assembled["layers"]["hydro_location"]
+    assert loc["realized_nexus_id"].tolist() == ["nx_2", ""]
+    assert loc["hydro_loc_type"].tolist() == ["catchment outlet", "river mouth"]
+    assert loc[FEATURE_ID].is_unique
+    nexus = assembled["layers"]["hydro_nexus"]
+    assert (nexus[HYF_TYPE] == HY_HYDRO_NEXUS).all()

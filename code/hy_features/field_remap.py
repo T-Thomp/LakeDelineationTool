@@ -20,9 +20,11 @@ from hy_features.schema import (
     CONTRIBUTING_CATCHMENT_ID,
     DEFAULT_LAYER_ALIASES,
     DEFAULT_OUTLET_SENTINEL,
+    DISTANCE_DESCRIPTION,
     DISTANCE_FROM_OUTLET_M,
     DISTANCE_FROM_OUTLET_PCT,
     DRAINAGE_PATTERN_COL,
+    FEATURE_ID,
     FLOWPATH_ID,
     FRAC_LAKE,
     HOST_FLOWPATH_ID,
@@ -41,8 +43,10 @@ from hy_features.schema import (
     LEGACY_LOWER_ID,
     LINEAR_ELEMENT_ID,
     LOWER_CATCHMENT_ID,
+    NETWORK_ID,
     NEXUS_ID,
     OUTFLOW_NEXUS_ID,
+    REALIZED_NEXUS_ID,
     REALIZES_CATCHMENT,
     RECEIVING_CATCHMENT_ID,
     REFERENCE_NEXUS_ID,
@@ -69,11 +73,15 @@ METADATA_COLUMNS = {
     LINEAR_ELEMENT_ID,
     DISTANCE_FROM_OUTLET_M,
     DISTANCE_FROM_OUTLET_PCT,
+    DISTANCE_DESCRIPTION,
     DRAINAGE_PATTERN_COL,
     NEXUS_ID,
+    REALIZED_NEXUS_ID,
     CONTRIBUTING_CATCHMENT_ID,
     RECEIVING_CATCHMENT_ID,
     STATION_CODE,
+    FEATURE_ID,
+    NETWORK_ID,
 }
 
 # Backward-compatible alias
@@ -296,6 +304,16 @@ def remap_vector_file(
     if driver is None:
         suffix = output_path.rsplit(".", 1)[-1].lower()
         driver = "GPKG" if suffix == "gpkg" else "ESRI Shapefile"
+
+    if driver == "ESRI Shapefile":
+        from hy_features.export import HY_ONLY_COLUMNS, check_shapefile_columns
+
+        if mapping is None:
+            mapping, _ = get_model_mapping(layer_kind, preset=preset, preset_path=preset_path)
+        keep = set(mapping.values())
+        drop = [c for c in remapped.columns if c in HY_ONLY_COLUMNS and c not in keep]
+        remapped = remapped.drop(columns=drop)
+        check_shapefile_columns(remapped, output_path)
 
     remapped.to_file(output_path, driver=driver)
     return remapped

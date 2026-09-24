@@ -379,7 +379,7 @@ def _warn_river_cycle(
     """
     Print a GIS-friendly warning for a cyclic DSLINKNO walk and return shapefile rows.
 
-    Each output row is one stream link in the cycle (use LINKNO / aggregate_id to
+    Each output row is one stream link in the cycle (use LINKNO / agg_id to
     select in QGIS alongside outputs/final/streams.shp).
     """
     cycle_key = " -> ".join(str(link) for link in cycle_links)
@@ -405,10 +405,10 @@ def _warn_river_cycle(
         else:
             print(f"    LINKNO {link_no} -> DSLINKNO {ds_link}")
         features.append({
-            "aggregate_id": int(agg_id) if pd.notna(agg_id) else -1,
-            "link_no": int(link_no),
-            "ds_link_no": ds_link,
-            "cycle_links": cycle_key,
+            "agg_id": int(agg_id) if pd.notna(agg_id) else -1,
+            "LINKNO": int(link_no),
+            "DSLINKNO": ds_link,
+            "cycle": cycle_key[:254],
             "geometry": geom,
         })
     print(f"  Cycle links also written to: {TOPOLOGY_CYCLES_SHP}")

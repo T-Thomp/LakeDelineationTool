@@ -1,9 +1,10 @@
 """
-Assemble a fully HY_Features-conformant geofabric from pipeline outputs.
+Assemble a HY_Features (OGC 14-111r6) implementation-schema geofabric from pipeline outputs.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,8 @@ from hy_features.enrich import (
     enrich_waterbodies,
 )
 from hy_features.export import export_geopackage, export_registry_json
-from hy_features.models import Catchment, CatchmentRegistry
+from hy_features.json_export import clean_json_records, json_default
+from hy_features.models import CatchmentRegistry
 from hy_features.network import (
     assign_hydrometric_positions,
     build_dendritic_catchment_table,
@@ -28,10 +30,26 @@ from hy_features.network import (
     filter_placed_hydrometric,
     link_catchment_nexuses,
     link_flowpath_nexuses,
+    link_hydro_locations_to_nexus,
     link_waterbody_network,
-    merge_hydro_locations_into_nexus,
 )
-from hy_features.schema import MESH_OUTLET_SENTINEL
+from hy_features.schema import (
+    CATCHMENT_ID,
+    CONTRIBUTING_CATCHMENT_ID,
+    FEATURE_ID,
+    FLOWPATH_ID,
+    HY_CATCHMENT_AREA,
+    HY_FLOWPATH,
+    HY_HYDRO_NEXUS,
+    HY_HYDROMETRIC_FEATURE,
+    HYF_TYPE,
+    INFLOW_NEXUS_ID,
+    IS_LAKE_CATCHMENT,
+    MESH_OUTLET_SENTINEL,
+    OUTFLOW_NEXUS_ID,
+    UPPER_CATCHMENT_ID,
+    WATERBODY_ID,
+)
 from hy_features.stamp import stamp_geofabric_layers
 
 
@@ -50,7 +68,7 @@ def assemble_full_geofabric(
     Build all HY_Features layers with mandatory associations populated.
 
     Returns dict with keys: layers, dendritic_catchment, hydrographic_network,
-    registry.
+    registry, hydrometric_skipped.
     """
     basins = enrich_catchment_areas(basins)
     streams = enrich_flowpaths(streams, outlet_sentinel=outlet_sentinel)
@@ -60,15 +78,17 @@ def assemble_full_geofabric(
 
     nexus = build_hydro_nexus_layer(streams, outlet_sentinel=outlet_sentinel)
     if hydro_locations is not None and not hydro_locations.empty:
-        hydro_locations = enrich_hydro_locations(hydro_locations)
-        nexus = merge_hydro_locations_into_nexus(nexus, hydro_locations)
+        hydro_locations = link_hydro_locations_to_nexus(
+            enrich_hydro_locations(hydro_locations), streams, outlet_sentinel=outlet_sentinel,
+        )
 
     hydrometric = None
     hydrometric_skipped = 0
     if gauges is not None and not gauges.empty:
         hydrometric = enrich_hydrometric_features(gauges)
         hydrometric = assign_hydrometric_positions(
-            hydrometric, streams, basins=basins, search_radius_m=gauge_search_radius_m,
+            hydrometric, streams, basins=basins,
+            search_radius_m=gauge_search_radius_m, outlet_sentinel=outlet_sentinel,
         )
         hydrometric, hydrometric_skipped = filter_placed_hydrometric(hydrometric)
         if hydrometric_skipped:
@@ -108,6 +128,8 @@ def assemble_full_geofabric(
         layers.get("waterbody"),
         network_id=network_id,
         basins=layers["catchment_area"],
+        nexus=layers["hydro_nexus"],
+        outlet_sentinel=outlet_sentinel,
     )
 
     return {
@@ -119,142 +141,58 @@ def assemble_full_geofabric(
     }
 
 
-def _upsert_realization(
-    registry: CatchmentRegistry,
-    catchment_id: str,
-    realization_type: str,
-    feature_id: str,
-    *,
-    waterbody_id: str | None = None,
-    notes: str = "",
-) -> None:
-    for entry in registry.entries:
-        if entry.catchment_id == catchment_id and entry.realization_type == realization_type:
-            entry.feature_id = feature_id
-            if waterbody_id:
-                entry.waterbody_id = waterbody_id
-            if notes:
-                entry.notes = notes
-            return
-    registry.add(
-        catchment_id,
-        realization_type,
-        feature_id,
-        waterbody_id=waterbody_id,
-        notes=notes,
-    )
-
-
 def _finalize_registry(
     registry: CatchmentRegistry,
     layers: dict[str, gpd.GeoDataFrame],
     dendritic: pd.DataFrame,
 ) -> None:
-    """Sync registry realizations with stamped layers (incl. nexusRealization)."""
-    from hy_features.schema import (
-        CATCHMENT_ID,
-        CONTRIBUTING_CATCHMENT_ID,
-        FEATURE_ID,
-        FLOWPATH_ID,
-        HY_CATCHMENT_AREA,
-        HY_DENDRITIC_CATCHMENT,
-        HY_FLOWPATH,
-        HY_HYDRO_LOCATION,
-        HY_HYDRO_NEXUS,
-        HY_HYDROMETRIC_FEATURE,
-        HYF_TYPE,
-        NEXUS_ID,
-        STATION_CODE,
-        WATERBODY_ID,
-    )
+    """
+    Sync the registry with stamped layers.
 
+    ``realizations`` hold only catchmentRealization links (catchment area, flowpath).
+    Nexuses, water bodies, and hydrometric features are recorded as ``associations``.
+    """
     for _, row in dendritic.iterrows():
-        cid = str(row[CATCHMENT_ID])
-        wb = str(row.get(WATERBODY_ID, ""))
-        wb = wb if wb and wb not in ("", "nan") else None
-        if cid not in registry.catchments:
-            registry.catchments[cid] = Catchment(code=cid, waterbody_id=wb)
-        catchment = registry.catchments[cid]
-        catchment.hyf_type = HY_DENDRITIC_CATCHMENT
-        catchment.outflow_nexus_id = str(row.get("outflow_nexus_id", ""))
-        catchment.inflow_nexus_id = str(row.get("inflow_nexus_id", "")) or None
-        catchment.lower_catchment_id = str(row.get("lower_catchment_id", "")) or None
-        if wb:
-            catchment.waterbody_id = wb
+        catchment = registry.add_catchment(str(row[CATCHMENT_ID]))
+        catchment.outflow_nexus_id = str(row.get(OUTFLOW_NEXUS_ID, "")) or None
+        catchment.inflow_nexus_id = str(row.get(INFLOW_NEXUS_ID, "")) or None
+        ups = str(row.get(UPPER_CATCHMENT_ID, ""))
+        catchment.upper_catchment_ids = [u for u in ups.split(",") if u]
 
-    basins = layers.get("catchment_area")
-    if basins is not None and FEATURE_ID in basins.columns:
-        for _, row in basins.iterrows():
-            cid = str(row[CATCHMENT_ID])
-            _upsert_realization(
-                registry, cid, HY_CATCHMENT_AREA, str(row[FEATURE_ID]),
-            )
+    basins = layers["catchment_area"]
+    for cid, fid in zip(basins[CATCHMENT_ID], basins[FEATURE_ID]):
+        registry.add(str(cid), HY_CATCHMENT_AREA, str(fid), notes="catchmentRealization")
 
-    flowpaths = layers.get("flowpath")
-    if flowpaths is not None and FEATURE_ID in flowpaths.columns:
-        for _, row in flowpaths.iterrows():
-            fid = str(row[FLOWPATH_ID])
-            _upsert_realization(registry, fid, HY_FLOWPATH, str(row[FEATURE_ID]))
+    flowpaths = layers["flowpath"]
+    for cid, fid in zip(flowpaths[FLOWPATH_ID], flowpaths[FEATURE_ID]):
+        registry.add(str(cid), HY_FLOWPATH, str(fid), notes="catchmentRealization")
 
     nexus = layers.get("hydro_nexus")
-    if nexus is not None and FEATURE_ID in nexus.columns:
-        for _, row in nexus.iterrows():
-            hyf = row.get(HYF_TYPE)
-            feature_id = str(row[FEATURE_ID])
-            nexus_id = str(row[NEXUS_ID])
-            contrib = str(row.get(CONTRIBUTING_CATCHMENT_ID, ""))
-            if hyf == HY_HYDRO_NEXUS:
-                _upsert_realization(
-                    registry,
-                    contrib,
-                    HY_HYDRO_NEXUS,
-                    feature_id,
-                    notes="nexusRealization",
-                )
-            elif hyf == HY_HYDRO_LOCATION:
-                owner = contrib if contrib else nexus_id
-                _upsert_realization(
-                    registry,
-                    owner,
-                    HY_HYDRO_LOCATION,
-                    feature_id,
-                    notes="nexusRealization",
-                )
+    if nexus is not None:
+        for nexus_id, contributing in zip(nexus[FEATURE_ID], nexus[CONTRIBUTING_CATCHMENT_ID]):
+            for cid in str(contributing).split(","):
+                if cid:
+                    registry.associate(cid, HY_HYDRO_NEXUS, str(nexus_id), "outflow")
 
     hydrometric = layers.get("hydrometric_feature")
-    if hydrometric is not None and FEATURE_ID in hydrometric.columns:
-        for _, row in hydrometric.iterrows():
-            cid = str(row.get(CATCHMENT_ID, ""))
-            _upsert_realization(
-                registry,
-                cid,
-                HY_HYDROMETRIC_FEATURE,
-                str(row[FEATURE_ID]),
-            )
+    if hydrometric is not None:
+        for cid, fid in zip(hydrometric[CATCHMENT_ID], hydrometric[FEATURE_ID]):
+            registry.associate(str(cid), HY_HYDROMETRIC_FEATURE, str(fid), "positionOnRiver")
 
     waterbodies = layers.get("waterbody")
-    if waterbodies is not None and FEATURE_ID in waterbodies.columns:
-        for _, row in waterbodies.iterrows():
-            wb_id = str(row[WATERBODY_ID])
-            _upsert_realization(
-                registry,
-                wb_id,
-                str(row[HYF_TYPE]),
-                str(row[FEATURE_ID]),
-                waterbody_id=wb_id,
-            )
-
-    hydro_loc = layers.get("hydro_location")
-    if hydro_loc is not None and FEATURE_ID in hydro_loc.columns:
-        for _, row in hydro_loc.iterrows():
-            nexus_id = str(row[NEXUS_ID])
-            _upsert_realization(
-                registry,
-                nexus_id,
-                HY_HYDRO_LOCATION,
-                str(row[FEATURE_ID]),
-                notes="nexusRealization",
-            )
+    if waterbodies is not None:
+        lake_basins = basins[pd.to_numeric(basins[IS_LAKE_CATCHMENT], errors="coerce").fillna(0) > 0]
+        wb_to_catchment = {
+            str(wb): str(cid)
+            for wb, cid in zip(lake_basins[WATERBODY_ID], lake_basins[CATCHMENT_ID])
+            if str(wb)
+        }
+        for wb_id, wb_type, fid in zip(
+            waterbodies[WATERBODY_ID], waterbodies[HYF_TYPE], waterbodies[FEATURE_ID],
+        ):
+            cid = wb_to_catchment.get(str(wb_id))
+            if cid:
+                registry.associate(cid, str(wb_type), str(fid), "networkWaterBody")
 
 
 def export_full_geofabric(
@@ -264,10 +202,6 @@ def export_full_geofabric(
     metadata_path: str | Path | None = None,
 ) -> None:
     """Write GeoPackage, registry JSON, and network metadata."""
-    import json
-
-    from hy_features.json_export import clean_json_records
-
     gpkg_path = Path(gpkg_path)
     export_geopackage(assembled["layers"], gpkg_path)
 
@@ -281,6 +215,8 @@ def export_full_geofabric(
             assembled["dendritic_catchment"].to_dict(orient="records")
         ),
     }
-    Path(meta_path).write_text(json.dumps(meta_payload, indent=2), encoding="utf-8")
+    Path(meta_path).write_text(
+        json.dumps(meta_payload, indent=2, default=json_default), encoding="utf-8",
+    )
 
     print(f"Full HY_Features GeoPackage: {gpkg_path}")
