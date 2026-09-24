@@ -58,6 +58,7 @@ def stamp_geofabric_layers(
     """Add network_id, feature_id, and hyf_type_uri to all profile layers."""
     id_columns = {
         "catchment_area": (CATCHMENT_ID, "ca_"),
+        "catchment_divide": (CATCHMENT_ID, "dv_"),
         "flowpath": (FLOWPATH_ID, "fp_"),
         "hydro_nexus": (NEXUS_ID, ""),
         "waterbody": (WATERBODY_ID, "wb_"),

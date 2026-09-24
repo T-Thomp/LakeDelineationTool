@@ -24,10 +24,10 @@
   "products": {
     "geofabric.gpkg": {
       "description": "Multi-layer GeoPackage; canonical product (spatial layers + attribute tables)",
-      "required_layers": ["catchment_area", "flowpath", "hydro_nexus", "hydro_location", "channel_network"],
-      "required_tables": ["catchment", "catchment_realization", "nexus_contributing_catchment"],
-      "optional_layers": ["waterbody", "hydrometric_feature"],
-      "optional_tables": ["catchment_association", "catchment_containment", "catchment_upper_catchment", "waterbody_upstream_waterbody"]
+      "required_layers": ["catchment_area", "catchment_divide", "flowpath", "hydro_nexus", "hydro_location", "channel_network"],
+      "required_tables": ["catchment", "catchment_realization", "nexus_contributing_catchment", "catchment_divide_adjacency"],
+      "optional_layers": ["waterbody", "hydrometric_feature", "gauge_catchment", "hydrometric_network"],
+      "optional_tables": ["catchment_association", "catchment_containment", "catchment_upper_catchment", "waterbody_upstream_waterbody", "hydrometric_network_station", "feature_name"]
     },
     "geofabric_aggregated.gpkg": {
       "description": "Same schema for the basinAggregation fabric; catchment ids prefixed agg_, catchment_containment links each aggregate to the geofabric.gpkg catchments it contains"
@@ -62,6 +62,44 @@
         { "name": "lake_area_m2", "type": "number", "required": false },
         { "name": "frac_lake", "type": "number", "required": false },
         { "name": "station_code", "type": "string", "required": false, "nillable": true },
+        { "name": "geometry", "type": "geometry", "geometry_type": "Polygon", "required": true, "hy_property": "shape" }
+      ]
+    },
+    "catchment_divide": {
+      "gf_feature": true,
+      "hy_feature_types": ["HY_CatchmentDivide"],
+      "geometry_type": "LineString",
+      "description": "Catchment boundary as a line (polygon ring); neighbours in catchment_divide_adjacency",
+      "columns": [
+        { "name": "feature_id", "type": "string", "required": true, "notes": "Pattern dv_{catchment_id}" },
+        { "name": "network_id", "type": "string", "required": true },
+        { "name": "hyf_type", "type": "string", "required": true, "allowed_values": ["HY_CatchmentDivide"] },
+        { "name": "hyf_type_uri", "type": "string", "required": true, "format": "uri" },
+        { "name": "catchment_id", "type": "string", "required": true, "hy_property": "code" },
+        { "name": "realizes_catchment", "type": "string", "required": true, "hy_property": "realizedCatchment" },
+        { "name": "adjacent_catchment_id", "type": "string", "required": false, "nillable": true, "notes": "Convenience copy of catchment_divide_adjacency" },
+        { "name": "perimeter_m", "type": "number", "required": false },
+        { "name": "geometry", "type": "geometry", "geometry_type": "LineString", "required": true, "hy_property": "shape" }
+      ]
+    },
+    "gauge_catchment": {
+      "gf_feature": true,
+      "hy_feature_types": ["HY_CatchmentArea"],
+      "geometry_type": "Polygon",
+      "description": "Area draining to a hydrometric station (union of the upstream catchment areas, host catchment included)",
+      "columns": [
+        { "name": "feature_id", "type": "string", "required": true, "notes": "Pattern gca_{station_code}" },
+        { "name": "network_id", "type": "string", "required": true },
+        { "name": "hyf_type", "type": "string", "required": true, "allowed_values": ["HY_CatchmentArea"] },
+        { "name": "hyf_type_uri", "type": "string", "required": true, "format": "uri" },
+        { "name": "catchment_id", "type": "string", "required": true, "notes": "gauge_{station_code}" },
+        { "name": "realizes_catchment", "type": "string", "required": true, "hy_property": "realizedCatchment" },
+        { "name": "outflow_nexus_id", "type": "string", "required": true, "hy_property": "realizedCatchment.outflow", "notes": "nx_gauge_{station_code}" },
+        { "name": "station_code", "type": "string", "required": true },
+        { "name": "hydrometric_feature_id", "type": "string", "required": true },
+        { "name": "host_catchment_id", "type": "string", "required": true },
+        { "name": "member_count", "type": "integer", "required": false },
+        { "name": "area_km2", "type": "number", "required": false },
         { "name": "geometry", "type": "geometry", "geometry_type": "Polygon", "required": true, "hy_property": "shape" }
       ]
     },
@@ -153,6 +191,7 @@
         { "name": "distance_from_outlet_m", "type": "number", "required": true, "hy_property": "positionOnRiver.distanceExpression" },
         { "name": "distance_from_outlet_pct", "type": "number", "required": true, "hy_property": "positionOnRiver.distanceExpression" },
         { "name": "distance_description", "type": "string", "required": true, "allowed_values": ["upstream"], "hy_property": "positionOnRiver.distanceDescription" },
+        { "name": "realized_nexus_id", "type": "string", "required": false, "nillable": true, "hy_property": "realizedNexus", "notes": "nx_gauge_{station_code}, the outflow of the gauge catchment (outlet-at-station)" },
         { "name": "geometry", "type": "geometry", "geometry_type": "Point", "required": true, "hy_property": "shape" }
       ]
     }
@@ -193,7 +232,7 @@
       "description": "catchmentRealization: one row per realization feature",
       "columns": [
         { "name": "catchment_id", "type": "string", "required": true },
-        { "name": "realization_type", "type": "string", "required": true, "allowed_values": ["HY_CatchmentArea", "HY_Flowpath", "HY_HydrographicNetwork", "HY_ChannelNetwork"] },
+        { "name": "realization_type", "type": "string", "required": true, "allowed_values": ["HY_CatchmentArea", "HY_CatchmentDivide", "HY_Flowpath", "HY_HydrographicNetwork", "HY_ChannelNetwork", "HY_HydrometricNetwork"] },
         { "name": "feature_id", "type": "string", "required": true }
       ]
     },
@@ -233,6 +272,49 @@
       "columns": [
         { "name": "waterbody_id", "type": "string", "required": true },
         { "name": "upstream_waterbody_id", "type": "string", "required": true, "hy_property": "upstreamWaterBody" }
+      ]
+    },
+    "catchment_divide_adjacency": {
+      "description": "Catchment across each part of a HY_CatchmentDivide; empty adjacent_catchment_id = study-domain boundary",
+      "columns": [
+        { "name": "catchment_id", "type": "string", "required": true },
+        { "name": "adjacent_catchment_id", "type": "string", "required": true, "nillable": true },
+        { "name": "shared_length_m", "type": "number", "required": true }
+      ]
+    },
+    "hydrometric_network": {
+      "gf_feature": true,
+      "hy_feature_types": ["HY_HydrometricNetwork"],
+      "description": "One network per gauge catchment; the outlet station is its outflow (outlet-at-station)",
+      "columns": [
+        { "name": "feature_id", "type": "string", "required": true, "notes": "Pattern hmn_{station_code}" },
+        { "name": "network_id", "type": "string", "required": true },
+        { "name": "hydrometric_network_id", "type": "string", "required": true },
+        { "name": "hyf_type", "type": "string", "required": true, "allowed_values": ["HY_HydrometricNetwork"] },
+        { "name": "hyf_type_uri", "type": "string", "required": true, "format": "uri" },
+        { "name": "realizes_catchment", "type": "string", "required": true, "hy_property": "realizedCatchment" },
+        { "name": "outlet_station_id", "type": "string", "required": true },
+        { "name": "feature_name", "type": "string", "required": false, "nillable": true, "hy_property": "name" }
+      ]
+    },
+    "hydrometric_network_station": {
+      "description": "HY_HydrometricNetwork.networkStation 0..* / HY_HydrometricFeature.hydrometricNetwork 0..*",
+      "columns": [
+        { "name": "hydrometric_network_id", "type": "string", "required": true, "hy_property": "hydrometricNetwork" },
+        { "name": "hydrometric_feature_id", "type": "string", "required": true, "hy_property": "networkStation" }
+      ]
+    },
+    "feature_name": {
+      "description": "HY_HydroFeatureName: one row per name of a feature",
+      "columns": [
+        { "name": "named_feature_id", "type": "string", "required": true, "notes": "feature_id of the named feature" },
+        { "name": "hyf_type", "type": "string", "required": true },
+        { "name": "name", "type": "string", "required": true, "hy_property": "name" },
+        { "name": "language", "type": "string", "required": true, "notes": "Profile extension: ISO 639 code, und when unknown" },
+        { "name": "usage", "type": "string", "required": true, "hy_property": "usage", "allowed_values": ["conventional", "historical", "official", "vernacular"] },
+        { "name": "preferred_by", "type": "string", "required": true, "nillable": true, "hy_property": "preferredBy" },
+        { "name": "names_part", "type": "string", "required": true, "hy_property": "namesPart", "allowed_values": ["true", "false"] },
+        { "name": "variant_spelling", "type": "string", "required": true, "hy_property": "variantSpelling", "allowed_values": ["true", "false"] }
       ]
     }
   },
@@ -307,16 +389,22 @@
       "gauge": "hydrometric station"
     },
     "distance_description_annex_b2": ["upstream"],
-    "drainage_pattern_annex_b3": "dendritic"
+    "drainage_pattern_annex_b3": "dendritic",
+    "name_usage_annex_b4": ["conventional", "historical", "official", "vernacular"]
   },
   "identity_rules": {
     "nexus_id_template": "nx_{receiving_catchment_id}",
     "terminal_nexus_id_template": "nx_out_{catchment_id}",
+    "gauge_nexus_id_template": "nx_gauge_{station_code}",
+    "gauge_catchment_id_template": "gauge_{station_code}",
     "aggregated_catchment_id_template": "agg_{LINKNO}",
     "id_format": "integer strings (no trailing .0)",
     "feature_id_prefixes": {
       "catchment": "cat_",
       "catchment_area": "ca_",
+      "catchment_divide": "dv_",
+      "gauge_catchment": "gca_",
+      "hydrometric_network": "hmn_",
       "flowpath": "fp_",
       "hydro_nexus": "",
       "hydro_location": "hl_",

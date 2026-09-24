@@ -27,6 +27,8 @@ HY_HYDRO_NEXUS: Final[str] = "HY_HydroNexus"
 HY_HYDROGRAPHIC_NETWORK: Final[str] = "HY_HydrographicNetwork"
 HY_CHANNEL_NETWORK: Final[str] = "HY_ChannelNetwork"
 HY_CATCHMENT_AGGREGATE: Final[str] = "HY_CatchmentAggregate"
+HY_CATCHMENT_DIVIDE: Final[str] = "HY_CatchmentDivide"
+HY_HYDROMETRIC_NETWORK: Final[str] = "HY_HydrometricNetwork"
 HY_INDIRECT_POSITION: Final[str] = "HY_IndirectPosition"
 
 # ---------------------------------------------------------------------------
@@ -67,6 +69,31 @@ ASSOCIATION_ROLE: Final[str] = "role"
 
 # HY_ChannelNetwork realization of the study-domain catchment
 CHANNEL_NETWORK_ID: Final[str] = "channel_network_id"
+
+# HY_CatchmentDivide neighbours (catchment_divide_adjacency table)
+ADJACENT_CATCHMENT_ID: Final[str] = "adjacent_catchment_id"
+SHARED_LENGTH_M: Final[str] = "shared_length_m"
+
+# Gauge catchments realized by HY_HydrometricNetwork (Section 7.5)
+HYDROMETRIC_NETWORK_ID: Final[str] = "hydrometric_network_id"
+HYDROMETRIC_FEATURE_ID: Final[str] = "hydrometric_feature_id"
+HOST_CATCHMENT_ID: Final[str] = "host_catchment_id"
+
+# HY_HydroFeatureName (Section 7.3.1, Table 5); ``language`` is a profile extension
+NAMED_FEATURE_ID: Final[str] = "named_feature_id"
+NAME: Final[str] = "name"
+NAME_LANGUAGE: Final[str] = "language"
+NAME_USAGE: Final[str] = "usage"
+NAME_PREFERRED_BY: Final[str] = "preferred_by"
+NAMES_PART: Final[str] = "names_part"
+VARIANT_SPELLING: Final[str] = "variant_spelling"
+UNDETERMINED_LANGUAGE: Final[str] = "und"  # ISO 639-2 "undetermined"
+
+# Annex B.4 — HY_NameUsage vocabulary
+NAME_USAGE_CONVENTIONAL: Final[str] = "conventional"
+NAME_USAGE_HISTORICAL: Final[str] = "historical"
+NAME_USAGE_OFFICIAL: Final[str] = "official"
+NAME_USAGE_VERNACULAR: Final[str] = "vernacular"
 
 # Study domain: HY_CatchmentAggregate of every dendritic catchment in the network,
 # realized by the HY_HydrographicNetwork and HY_ChannelNetwork records.
@@ -181,6 +208,16 @@ def inflow_nexus_id_for(catchment_id: str) -> str:
 def terminal_nexus_id_for(catchment_id: str) -> str:
     """Domain-outlet nexus of a catchment with no receiving catchment (``nx_out_{id}``)."""
     return f"nx_out_{catchment_id}"
+
+
+def gauge_catchment_id_for(station_code: str) -> str:
+    """Catchment upstream of a hydrometric station (``gauge_{station}``)."""
+    return f"gauge_{station_code}"
+
+
+def gauge_nexus_id_for(station_code: str) -> str:
+    """Outflow nexus of a gauge catchment, realized by the station (``nx_gauge_{station}``)."""
+    return f"nx_gauge_{station_code}"
 
 
 def outflow_nexus_id_for(catchment_id: str, lower_catchment_id: str | None = None) -> str:

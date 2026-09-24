@@ -131,8 +131,9 @@ def _check_references(
     catchments = _ids(catchment, "catchment_id") or _ids(area, "catchment_id")
     nexuses = _ids(nexus, "nexus_id")
     flowpaths = _ids(flowpath, "flowpath_id")
-    feature_layers = ("catchment", "catchment_area", "flowpath", "hydro_nexus", "hydro_location",
-                      "channel_network", "waterbody", "hydrometric_feature")
+    feature_layers = ("catchment", "catchment_area", "catchment_divide", "flowpath", "hydro_nexus",
+                      "hydro_location", "channel_network", "waterbody", "hydrometric_feature",
+                      "gauge_catchment", "hydrometric_network")
     feature_ids = set().union(*(_ids(frames.get(name), "feature_id") for name in feature_layers))
     feature_ids |= _ids(catchment, "network_id")
 
@@ -158,7 +159,9 @@ def _check_references(
         expect("hydro_nexus.receiving_catchment_id", _ids(nexus, "receiving_catchment_id"), catchments)
         realized = _ids(location, "realized_nexus_id")
         expect("hydro_location.realized_nexus_id", realized, nexuses)
-        unrealized = _missing(nexuses, realized)
+        station_realized = _ids(hydrometric, "realized_nexus_id")
+        expect("hydrometric_feature.realized_nexus_id", station_realized, nexuses)
+        unrealized = _missing(nexuses, realized | station_realized)
         if unrealized:
             report.warnings.append(
                 f"hydro_nexus: {len(unrealized)} nexus(es) without a HY_HydroLocation realization: "
@@ -173,14 +176,34 @@ def _check_references(
         multi = dendritic.loc[dendritic["outflow_nexus_id"].astype(str).str.contains(","), "catchment_id"]
         if not multi.empty:
             report.errors.append(f"catchment: dendritic catchment(s) with more than one outflow: {_sample(multi.astype(str).tolist())}")
-        expect("catchment.outflow_nexus_id", _ids(dendritic, "outflow_nexus_id"), nexuses)
+        expect("catchment.outflow_nexus_id", _ids(catchment, "outflow_nexus_id"), nexuses)
         realized_ca = _ids(frames.get("catchment_realization"), "catchment_id")
         expect("catchment (without any catchmentRealization)", _ids(dendritic, "catchment_id"), realized_ca)
 
     if hydrometric is not None:
+        # catchment_id is the host dendritic catchment (positionOnRiver), not the gauge catchment
         expect("hydrometric_feature.catchment_id", _ids(hydrometric, "catchment_id"), catchments)
         expect("hydrometric_feature.linear_element_id", _ids(hydrometric, "linear_element_id"), flowpaths)
         expect("hydrometric_feature.reference_nexus_id", _ids(hydrometric, "reference_nexus_id"), nexuses)
+
+    divide = frames.get("catchment_divide")
+    expect("catchment_divide.catchment_id", _ids(divide, "catchment_id"), catchments)
+    adjacency = frames.get("catchment_divide_adjacency")
+    for col in ("catchment_id", "adjacent_catchment_id"):
+        expect(f"catchment_divide_adjacency.{col}", _ids(adjacency, col), catchments)
+
+    gauge_area = frames.get("gauge_catchment")
+    expect("gauge_catchment.catchment_id", _ids(gauge_area, "catchment_id"), catchments)
+    expect("gauge_catchment.outflow_nexus_id", _ids(gauge_area, "outflow_nexus_id"), nexuses)
+    hm_network = frames.get("hydrometric_network")
+    expect("hydrometric_network.realizes_catchment", _ids(hm_network, "realizes_catchment"), catchments)
+    stations = frames.get("hydrometric_network_station")
+    expect("hydrometric_network_station.hydrometric_network_id",
+           _ids(stations, "hydrometric_network_id"), _ids(hm_network, "feature_id"))
+    expect("hydrometric_network_station.hydrometric_feature_id",
+           _ids(stations, "hydrometric_feature_id"), _ids(hydrometric, "feature_id"))
+
+    expect("feature_name.named_feature_id", _ids(frames.get("feature_name"), "named_feature_id"), feature_ids)
 
     if waterbody is not None:
         wbs = _ids(waterbody, "waterbody_id")

@@ -42,6 +42,9 @@ CONTAINMENT_TABLE = "catchment_containment"
 UPPER_TABLE = "catchment_upper_catchment"
 NEXUS_CONTRIBUTING_TABLE = "nexus_contributing_catchment"
 WATERBODY_UPSTREAM_TABLE = "waterbody_upstream_waterbody"
+DIVIDE_ADJACENCY_TABLE = "catchment_divide_adjacency"
+HYDROMETRIC_STATION_TABLE = "hydrometric_network_station"
+FEATURE_NAME_TABLE = "feature_name"
 
 
 def _split(value: object) -> list[str]:

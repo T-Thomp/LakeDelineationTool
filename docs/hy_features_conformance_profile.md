@@ -24,7 +24,8 @@ Shapefiles (`basins.shp`, `streams.shp`, gauges, pour points) are **legacy TauDE
 |------------------|----------|
 | `HY_DendriticCatchment` | `geofabric.gpkg` → `catchment` table (also `hydrographic_network.json` → `dendritic_catchment`) |
 | `HY_CatchmentAggregate` | `geofabric.gpkg` → `catchment` row `domain` (the study domain containing every dendritic catchment) |
-| `HY_CatchmentArea` | `geofabric.gpkg` → `catchment_area` |
+| `HY_CatchmentArea` | `geofabric.gpkg` → `catchment_area`; `gauge_catchment` for gauge catchments |
+| `HY_CatchmentDivide` | `geofabric.gpkg` → `catchment_divide` (catchment boundary line; neighbours in `catchment_divide_adjacency`) |
 | `HY_Flowpath` | `geofabric.gpkg` → `flowpath` |
 | `HY_HydroNexus` | `geofabric.gpkg` → `hydro_nexus` table (topological, no geometry) |
 | `HY_HydroLocation` | `geofabric.gpkg` → `hydro_location` (one or more per nexus as `nexusRealization`, plus pour points) |
@@ -32,9 +33,12 @@ Shapefiles (`basins.shp`, `streams.shp`, gauges, pour points) are **legacy TauDE
 | `HY_ChannelNetwork` | `geofabric.gpkg` → `channel_network` (realizes `domain`, carries `drainagePattern`) |
 | `HY_Lake` / `HY_Impoundment` | `geofabric.gpkg` → `waterbody` (when HydroLAKES supplied) |
 | `HY_HydrometricFeature` | `geofabric.gpkg` → `hydrometric_feature` (when gauges supplied) |
+| `HY_HydrometricNetwork` | `geofabric.gpkg` → `hydrometric_network` table, one per gauge catchment (when gauges supplied) |
+| `HY_CatchmentAggregate` (gauge catchments) | `catchment` rows `gauge_{station}`: the catchments upstream of each station |
 | `HY_IndirectPosition` | Columns on `hydrometric_feature` (river referencing) |
+| `HY_HydroFeatureName` | `geofabric.gpkg` → `feature_name` table (water body and station names) |
 
-Every 0..* association is also stored one link per row in a non-spatial GeoPackage table: `catchment_realization`, `catchment_association`, `catchment_containment`, `catchment_upper_catchment`, `nexus_contributing_catchment`, `waterbody_upstream_waterbody`.
+Every 0..* association is also stored one link per row in a non-spatial GeoPackage table: `catchment_realization`, `catchment_association`, `catchment_containment`, `catchment_upper_catchment`, `nexus_contributing_catchment`, `waterbody_upstream_waterbody`, `hydrometric_network_station`.
 
 When `basinAggregation.py` runs with HY_Features enabled, `geofabric_aggregated.gpkg` carries the same profile for the aggregated basins (ids `agg_{LINKNO}`). Its `catchment_containment` links each aggregate (`containingCatchment`) to the `geofabric.gpkg` catchments merged into it (`containedCatchment`).
 
@@ -46,10 +50,9 @@ Conventions: [`hy_features_implementation_conventions.md`](hy_features_implement
 
 - `HY_Reservoir`, `HY_WaterBodyStratum` (storage model §7.4.4)
 - `HY_River`, `HY_Canal`, `HY_Lagoon`, `HY_Estuary` as **waterbody** polygons (streams use `HY_Flowpath`)
-- `HY_CatchmentDivide`, `HY_CartographicRealization`, `HY_HydroNetwork` (non-dendritic realizations)
+- `HY_CartographicRealization`, `HY_HydroNetwork` (non-dendritic realizations)
 - `HY_InteriorCatchment`, `HY_ExorheicDrainage`, `HY_EndorheicDrainage`, etc.
 - `conjointCatchment`, `encompassingCatchment` and other catchment associations besides `upperCatchment` / `lowerCatchment` / `containing` / `containedCatchment`
-- `HY_HydrometricNetwork` and gauge catchments
 - Groundwater, atmospheric, glacier catchment realizations
 - GML instance encoding
 
@@ -57,6 +60,9 @@ Conventions: [`hy_features_implementation_conventions.md`](hy_features_implement
 
 - Spatial layers keep comma-separated convenience copies of multi-valued associations (`upper_catchment_id`, `contributing_catchment_id`, `upstream_waterbody_id`). The link tables are the normative encoding.
 - The `domain` aggregate's `outflow_nexus_id` in the `catchment` table lists every terminal nexus (comma-separated); dendritic catchments always have exactly one.
+- Gauge catchments are resolved to whole catchments: the host catchment of a station is not split at the station, so the gauge catchment includes all of it (the part below the station too). The gauge nexus `nx_gauge_{station}` has the host catchment as `receiving_catchment_id`.
+- Catchment divides are the boundaries of the raster-derived catchment polygons, so they keep the staircase shape of the DEM grid.
+- `HY_HydroFeatureName` has no language attribute; the `language` column (ISO 639, `und` when unknown) is a profile extension.
 
 ## Automated conformance check
 

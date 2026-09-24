@@ -133,8 +133,43 @@ Status legend:
 | `positionOnRiver` → reference nexus | `reference_nexus_id` | **Done** |
 | `positionOnRiver` → distance | `distance_from_outlet_m`, `distance_from_outlet_pct` | **Done** |
 | Station identifier | `station_code` | **Done** |
-| `hydrometricNetwork` | — | **N/A** (single stations, no network aggregate) |
+| `hydrometricNetwork` (0..*) | `hydrometric_network_station` — the station's own network and every downstream station's | **Done** |
+| `realizedNexus` / outlet-at-station | `realized_nexus_id` = `nx_gauge_{station}`, outflow of the gauge catchment | **Done** (host catchment not split at the station) |
 | Placement coverage | Only placed gauges exported; unplaced omitted with warning | **Done** |
+
+---
+
+## HY_HydrometricNetwork
+
+| UML property | Implementation | Status |
+|--------------|----------------|--------|
+| Feature identifier | `hmn_{station}` | **Done** |
+| `realizedCatchment` | `realizes_catchment` = `gauge_{station}` (`HY_CatchmentAggregate`) | **Done** |
+| `networkStation` (0..*) | `hydrometric_network_station` | **Done** |
+| `shape`, `flowpath`, `catchmentDivide`, `catchmentArea` (inherited) | via the gauge catchment's `gauge_catchment` polygon and member catchments | **Partial** (no own geometry) |
+
+---
+
+## HY_CatchmentDivide
+
+| UML property | Implementation | Status |
+|--------------|----------------|--------|
+| `shape` | catchment polygon boundary (ring) | **Done** |
+| `realizedCatchment` | `realizes_catchment` | **Done** |
+| Adjacent catchments | `catchment_divide_adjacency` | **Done** (profile extension) |
+
+---
+
+## HY_HydroFeatureName
+
+| UML property | Implementation | Status |
+|--------------|----------------|--------|
+| `name` | `feature_name.name` | **Done** |
+| `usage` | `usage` (Annex B.4) | **Done** |
+| `preferredBy` | `preferred_by` | **Done** |
+| `namesPart` | `names_part` = `false` | **Done** |
+| `variantSpelling` | `variant_spelling` = `false` | **Done** |
+| Language | `language` (ISO 639) | **Done** (profile extension) |
 
 ---
 
@@ -165,7 +200,7 @@ Status legend:
 | Concept | Implementation | Status |
 |---------|----------------|--------|
 | Catchment identity | `catchment` table / `catchments` map | **Done** |
-| Realization index | `catchment_realization` / `realizations` (`HY_CatchmentArea`, `HY_Flowpath`, `HY_HydrographicNetwork`, `HY_ChannelNetwork`) | **Done** |
+| Realization index | `catchment_realization` / `realizations` (`HY_CatchmentArea`, `HY_CatchmentDivide`, `HY_Flowpath`, `HY_HydrographicNetwork`, `HY_ChannelNetwork`, `HY_HydrometricNetwork`) | **Done** |
 | Non-realization links | `catchment_association` / `associations` (outflow nexus, `networkWaterBody`, `positionOnRiver`) | **Done** |
 | Nesting | `catchment_containment` / `containments` | **Done** |
 | Referential integrity | `hy_features.validate` | **Done** |

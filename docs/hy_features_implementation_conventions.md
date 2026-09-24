@@ -15,6 +15,10 @@ This document states encoding conventions reviewers use when comparing GeoPackag
 | Nexus vs. location | `hydro_nexus` is a non-spatial table. Its positions are `hydro_location` points with `realized_nexus_id` set: one per distinct place a contributor reaches the nexus (tributaries entering a lake at different shore points give several realizations of one nexus) |
 | Study domain | Catchment `domain` (`HY_CatchmentAggregate`) contains every dendritic catchment; it is realized by the `HY_HydrographicNetwork` (`network_id`) and the `HY_ChannelNetwork` (`channel_network`) |
 | Aggregated basins | Ids `agg_{LINKNO}`, domain `agg_domain`, network `study_hydrographic_network_aggregated`, all in `geofabric_aggregated.gpkg` |
+| Gauge catchments | Catchment `gauge_{station}` (`HY_CatchmentAggregate`) contains the host catchment and every catchment upstream; its outflow `nx_gauge_{station}` is realized by the station (`hydrometric_feature.realized_nexus_id`, outlet-at-station) |
+| Hydrometric networks | `hmn_{station}` realizes `gauge_{station}`; its stations are the outlet station and every station upstream of it (on the host reach, only stations further from the reach outlet) |
+| Catchment divides | `dv_{catchment_id}`: the catchment polygon boundary. Shared pieces shorter than 1 m are ignored as vertex touches |
+| Names | `feature_name` column = preferred name; every name is a `feature_name` table row. Extra `feature_name_<lang>` columns (for example `feature_name_fr`) add alternative names |
 | Outlet sentinel | Raw downstream ids `≤ 0` or equal to the preset sentinel (`-9999` for MESH) mean “domain outlet” |
 | Lake typing | HydroLAKES `Lake_type` 1 → `HY_Lake`; 2/3 → `HY_Impoundment`; OGC `HY_Reservoir` storage model is **out of profile** |
 | `is_lake_catchment` | TauDEM merge flag only; not an HY feature type |
@@ -36,6 +40,8 @@ This document states encoding conventions reviewers use when comparing GeoPackag
 | `network_id` | `study_hydrographic_network` |
 | `domain` catchment id | `domain` |
 | `channel_network.drainage_pattern` | `dendritic` |
+| Name language (`assemble_full_geofabric(name_language=...)`) | `und` (ISO 639-2 undetermined) |
+| Name `usage` (Annex B.4) / `preferred_by` | HydroLAKES names: `conventional` / `HydroLAKES`; HYDAT station names: `official` / `Water Survey of Canada (HYDAT)` |
 | MESH outlet sentinel (legacy remap only) | `-9999` |
 | Gauge snap search radius | `5000` m (geographic inputs are measured in a local UTM zone) |
 | Pour point → nexus snap distance | `250` m |
@@ -52,6 +58,7 @@ Shapefiles written by the pipeline keep only TauDEM / MESH columns (`DN`, `LINKN
 - Input gauges that cannot be snapped to a flowpath within the search radius are **omitted** from `hydrometric_feature`.
 - Every exported `HY_HydrometricFeature` row has complete `positionOnRiver` / `HY_IndirectPosition` columns, including `distance_description = upstream`.
 - Omission count is logged to the console during assembly.
+- Every exported station gets a gauge catchment (`gauge_catchment` polygon, `area_km2`), a gauge nexus, and a hydrometric network.
 
 ### Water bodies
 
@@ -70,7 +77,10 @@ Shapefiles written by the pipeline keep only TauDEM / MESH columns (`DN`, `LINKN
 | Table | HY_Features element |
 |-------|---------------------|
 | `catchment` | Holistic `HY_DendriticCatchment` / `HY_CatchmentAggregate` (`outflow`, `inflow`, `lowerCatchment`, `upperCatchment`) |
-| `catchment_realization` | `catchmentRealization` → `HY_CatchmentArea`, `HY_Flowpath`, `HY_HydrographicNetwork`, `HY_ChannelNetwork` |
+| `catchment_realization` | `catchmentRealization` → `HY_CatchmentArea`, `HY_CatchmentDivide`, `HY_Flowpath`, `HY_HydrographicNetwork`, `HY_ChannelNetwork`, `HY_HydrometricNetwork` |
+| `catchment_divide_adjacency` | Neighbour across each part of a `HY_CatchmentDivide` (empty = domain boundary) |
+| `hydrometric_network_station` | `networkStation` / `hydrometricNetwork` |
+| `feature_name` | `HY_HydroFeatureName` |
 | `catchment_association` | Non-realization links: `outflow` nexus, `networkWaterBody`, hydrometric `positionOnRiver` |
 | `catchment_containment` | `containingCatchment` / `containedCatchment` |
 | `catchment_upper_catchment` | `upperCatchment` (one row per link) |

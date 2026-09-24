@@ -55,11 +55,13 @@ All paths below are relative to `outputs/working/` unless noted.
 | Layer | HY_Features type(s) | Required | Notes |
 |-------|---------------------|----------|-------|
 | `catchment_area` | `HY_CatchmentArea` | yes | Basin polygons |
+| `catchment_divide` | `HY_CatchmentDivide` | yes | Basin boundaries as lines |
 | `flowpath` | `HY_Flowpath` | yes | Stream reaches (TauDEM links) |
 | `hydro_location` | `HY_HydroLocation` | yes | `nexusRealization` of every nexus, plus pour points not already on a nexus |
 | `channel_network` | `HY_ChannelNetwork` | yes | One MultiLineString of all flowpaths realizing the `domain` catchment |
 | `waterbody` | `HY_Lake`, `HY_Impoundment` | no | HydroLAKES polygons when available |
 | `hydrometric_feature` | `HY_HydrometricFeature` | no | Gauges in basin |
+| `gauge_catchment` | `HY_CatchmentArea` | no | Area draining to each gauge |
 
 ### GeoPackage tables (non-spatial)
 
@@ -73,6 +75,10 @@ All paths below are relative to `outputs/working/` unless noted.
 | `catchment_containment` | `containingCatchment` / `containedCatchment` | when non-empty |
 | `catchment_upper_catchment` | `upperCatchment` | when non-empty |
 | `waterbody_upstream_waterbody` | `upstreamWaterBody` | when non-empty |
+| `catchment_divide_adjacency` | Neighbours across each `HY_CatchmentDivide` | yes |
+| `hydrometric_network` | `HY_HydrometricNetwork` | with gauges |
+| `hydrometric_network_station` | `networkStation` | with gauges |
+| `feature_name` | `HY_HydroFeatureName` | when any feature is named |
 
 Every feature (spatial layers, `hydro_nexus`, `catchment`) carries:
 
@@ -227,9 +233,48 @@ Implements `positionOnRiver` via **`HY_IndirectPosition`** (Section 7.3.3).
 | `positionOnRiver` → distanceExpression | `distance_from_outlet_m`, `distance_from_outlet_pct` | Along host flowpath (`catchment_id`) from outlet |
 | `positionOnRiver` → distanceDescription | `distance_description` | `upstream` (Annex B.2) of the reference nexus |
 | Host reach | `host_flowpath_id` | Same as `catchment_id` (not nearest reach) |
+| `realizedNexus` | `realized_nexus_id` | `nx_gauge_{station}`, outflow of the gauge catchment (outlet-at-station) |
 
 **Export policy:** Gauges with no containing catchment fall back to the nearest flowpath within the search radius (default 5 km). Gauges that cannot be linked to a catchment flowpath are **omitted**
 from `hydrometric_feature` so every exported row has a complete `positionOnRiver`.
+
+### Gauge catchments and HY_HydrometricNetwork (Section 7.5)
+
+Each exported station `S` gets:
+
+| Element | Implementation | Notes |
+|---------|----------------|-------|
+| Gauge catchment | `catchment` row `gauge_S` (`HY_CatchmentAggregate`) | `catchment_containment` → host catchment and every catchment upstream |
+| `outflow` (outlet-at-station) | `nx_gauge_S` in `hydro_nexus` | Contributing `gauge_S`; receiving = host catchment; realized by the station |
+| `HY_CatchmentArea` realization | `gauge_catchment` polygon `gca_S` | Union of member areas; `area_km2`, `member_count`, `host_catchment_id` |
+| `HY_HydrometricNetwork` realization | `hydrometric_network` row `hmn_S` | `realizes_catchment` = `gauge_S`; `outlet_station_id` = `hm_S` |
+| `networkStation` (0..*) | `hydrometric_network_station` | `S` plus every station upstream of it |
+
+The host catchment is not split at the station, so `gauge_catchment` covers the whole host catchment.
+
+### HY_CatchmentDivide (`catchment_divide` layer)
+
+| HY_Features property / association | Implementation column | Notes |
+|-----------------------------------|----------------------|-------|
+| Feature type | `hyf_type` = `HY_CatchmentDivide` | |
+| Identifier | `feature_id` | `dv_{catchment_id}` |
+| `realizedCatchment` | `realizes_catchment` | One divide per catchment |
+| `shape` | LineString / MultiLineString | Boundary of the catchment polygon (a polygon ring, as the standard allows); holes add inner rings |
+| Neighbours | `adjacent_catchment_id` (comma-separated) and the `catchment_divide_adjacency` table | `shared_length_m` per neighbour; an empty neighbour is the study-domain boundary |
+
+### HY_HydroFeatureName (`feature_name` table)
+
+| HY_HydroFeatureName attribute | Column | Value |
+|-------------------------------|--------|-------|
+| (named feature) | `named_feature_id`, `hyf_type` | `feature_id` of the water body, station, or hydrometric network |
+| `name` | `name` | `feature_name` of the layer, plus any `feature_name_<lang>` columns |
+| `usage` (Annex B.4) | `usage` | `conventional` for HydroLAKES, `official` for HYDAT stations |
+| `preferredBy` | `preferred_by` | Source authority on the preferred name; empty on alternatives |
+| `namesPart` | `names_part` | `false` |
+| `variantSpelling` | `variant_spelling` | `false` |
+| Language (profile extension) | `language` | ISO 639 code; `und` unless `name_language` is passed to `assemble_full_geofabric` |
+
+Pour-point names (`Lake_1`, …) are generated labels and are not published as names.
 
 ### HY_WaterBody (`waterbody` layer)
 
@@ -272,7 +317,7 @@ JSON record at `hydrographic_network.json` → `hydrographic_network`:
 `catchment_registry.json` separates **holistic catchment identity** from geometric realizations (OGC Section 7.2). The GeoPackage tables carry the same content.
 
 - `catchments` — one entry per `catchment_id` (dendritic catchments and the `domain` aggregate) with nexus and neighbour links
-- `realizations` — `catchmentRealization` rows: `HY_CatchmentArea` and `HY_Flowpath` per catchment; `HY_HydrographicNetwork` and `HY_ChannelNetwork` for `domain`
+- `realizations` — `catchmentRealization` rows: `HY_CatchmentArea`, `HY_CatchmentDivide` and `HY_Flowpath` per catchment; `HY_HydrographicNetwork` and `HY_ChannelNetwork` for `domain`; `HY_CatchmentArea` and `HY_HydrometricNetwork` per gauge catchment
 - `associations` — non-realization links: each catchment's outflow `HY_HydroNexus`, lake catchments' `HY_Lake` / `HY_Impoundment` (`networkWaterBody`), and `HY_HydrometricFeature` positions
 - `containments` — `containingCatchment` → `containedCatchment` pairs
 
@@ -319,6 +364,9 @@ Use `--preset taudem_raw` for minimal TauDEM naming. Add custom presets or `--ov
 | `hy_features/enrich.py` | Add HY columns to pipeline GeoDataFrames |
 | `hy_features/network.py` | Nexuses and their hydro locations, channel network, dendritic table, waterbody links, gauge positioning |
 | `hy_features/tables.py` | Holistic catchment and link tables |
+| `hy_features/divides.py` | Catchment divides and adjacency |
+| `hy_features/gauges.py` | Gauge catchments, gauge nexuses, hydrometric networks |
+| `hy_features/names.py` | `HY_HydroFeatureName` table |
 | `hy_features/assemble.py` | Full layer assembly and export |
 | `hy_features/aggregate.py` | Aggregated-basin product with containment links |
 | `hy_features/validate.py` | Automated conformance check |

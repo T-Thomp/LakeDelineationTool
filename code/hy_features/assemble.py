@@ -44,6 +44,7 @@ from hy_features.schema import (
     FLOWPATH_ID,
     HY_CATCHMENT_AGGREGATE,
     HY_CATCHMENT_AREA,
+    HY_CATCHMENT_DIVIDE,
     HY_CHANNEL_NETWORK,
     HY_FLOWPATH,
     HY_HYDRO_NEXUS,
@@ -54,11 +55,20 @@ from hy_features.schema import (
     IS_LAKE_CATCHMENT,
     MESH_OUTLET_SENTINEL,
     OUTFLOW_NEXUS_ID,
+    UNDETERMINED_LANGUAGE,
     UPPER_CATCHMENT_ID,
     WATERBODY_ID,
 )
+from hy_features.divides import build_catchment_divides
+from hy_features.gauges import build_gauge_catchments, register_gauge_catchments
+from hy_features.names import build_feature_name_table
 from hy_features.stamp import stamp_geofabric_layers
-from hy_features.tables import build_association_tables
+from hy_features.tables import (
+    DIVIDE_ADJACENCY_TABLE,
+    FEATURE_NAME_TABLE,
+    HYDROMETRIC_STATION_TABLE,
+    build_association_tables,
+)
 
 
 def assemble_full_geofabric(
@@ -72,13 +82,17 @@ def assemble_full_geofabric(
     network_id: str = "study_hydrographic_network",
     domain_catchment_id: str = DEFAULT_DOMAIN_CATCHMENT_ID,
     gauge_search_radius_m: float = 5000.0,
+    name_language: str = UNDETERMINED_LANGUAGE,
 ) -> dict[str, Any]:
     """
     Build all HY_Features layers with mandatory associations populated.
 
-    Returns dict with keys: layers (spatial layers + nexus table), tables
-    (link tables), dendritic_catchment, hydrographic_network, registry,
-    hydrometric_skipped.
+    ``name_language`` is the ISO 639 code of the source ``feature_name`` values
+    (``und`` when unknown).
+
+    Returns dict with keys: layers (spatial layers + nexus / hydrometric network
+    tables), tables (link tables), dendritic_catchment, hydrographic_network,
+    registry, hydrometric_skipped.
     """
     basins = enrich_catchment_areas(basins)
     streams = enrich_flowpaths(streams, outlet_sentinel=outlet_sentinel)
@@ -119,11 +133,13 @@ def assemble_full_geofabric(
 
     dendritic = build_dendritic_catchment_table(basins, streams, outlet_sentinel=outlet_sentinel)
     channel = build_channel_network(streams, network_id, domain_catchment_id)
+    divides, divide_adjacency = build_catchment_divides(basins)
 
     registry = build_catchment_registry_from_geofabric(basins, streams)
 
     layers: dict[str, pd.DataFrame] = {
         "catchment_area": basins,
+        "catchment_divide": divides,
         "flowpath": streams,
         "hydro_nexus": nexus,
         "hydro_location": locations,
@@ -136,7 +152,22 @@ def assemble_full_geofabric(
 
     layers = stamp_geofabric_layers(layers, network_id)
     _finalize_registry(registry, layers, dendritic, network_id, domain_catchment_id)
+
+    extra_tables: dict[str, pd.DataFrame] = {DIVIDE_ADJACENCY_TABLE: divide_adjacency}
+    gauges_built = build_gauge_catchments(layers, network_id, outlet_sentinel=outlet_sentinel)
+    if gauges_built is not None:
+        layers["hydrometric_feature"] = gauges_built["hydrometric_feature"]
+        layers["gauge_catchment"] = gauges_built["gauge_catchment"]
+        layers["hydrometric_network"] = gauges_built["hydrometric_network"]
+        layers["hydro_nexus"] = pd.concat(
+            [layers["hydro_nexus"], gauges_built["nexus"]], ignore_index=True,
+        )
+        extra_tables[HYDROMETRIC_STATION_TABLE] = gauges_built["stations"]
+        register_gauge_catchments(registry, gauges_built)
+
     tables = build_association_tables(registry, layers, network_id)
+    tables.update(extra_tables)
+    tables[FEATURE_NAME_TABLE] = build_feature_name_table(layers, language=name_language)
 
     network_meta = build_hydrographic_network_metadata(
         layers["flowpath"],
@@ -200,6 +231,10 @@ def _finalize_registry(
     basins = layers["catchment_area"]
     for cid, fid in zip(basins[CATCHMENT_ID], basins[FEATURE_ID]):
         registry.add(str(cid), HY_CATCHMENT_AREA, str(fid), notes="catchmentRealization")
+
+    divides = layers["catchment_divide"]
+    for cid, fid in zip(divides[CATCHMENT_ID], divides[FEATURE_ID]):
+        registry.add(str(cid), HY_CATCHMENT_DIVIDE, str(fid), notes="catchmentRealization")
 
     flowpaths = layers["flowpath"]
     for cid, fid in zip(flowpaths[FLOWPATH_ID], flowpaths[FEATURE_ID]):

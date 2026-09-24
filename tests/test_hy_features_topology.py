@@ -31,6 +31,7 @@ from hy_features.schema import (
     HYF_TYPE,
     HY_CATCHMENT_AGGREGATE,
     HY_CATCHMENT_AREA,
+    HY_CATCHMENT_DIVIDE,
     HY_CHANNEL_NETWORK,
     HY_DENDRITIC_CATCHMENT,
     HY_FLOWPATH,
@@ -47,6 +48,7 @@ from hy_features.schema import (
     REALIZES_CATCHMENT,
     RECEIVING_CATCHMENT_ID,
     REFERENCE_NEXUS_ID,
+    STATION_CODE,
     NETWORK_ID,
     FEATURE_ID,
     UPSTREAM_WATERBODY_ID,
@@ -299,7 +301,7 @@ def test_registry_realizations_and_nexus_associations():
 
     realization_types = {e.realization_type for e in registry.entries}
     assert realization_types == {
-        HY_CATCHMENT_AREA, HY_FLOWPATH, HY_HYDROGRAPHIC_NETWORK, HY_CHANNEL_NETWORK,
+        HY_CATCHMENT_AREA, HY_CATCHMENT_DIVIDE, HY_FLOWPATH, HY_HYDROGRAPHIC_NETWORK, HY_CHANNEL_NETWORK,
     }
     assert set(registry.catchments) == {"1", "2", "domain"}
     domain = registry.catchments["domain"]
@@ -640,7 +642,7 @@ def test_link_tables():
     assert len(tables[CONTAINMENT_TABLE]) == 3
     realization = tables[REALIZATION_TABLE]
     assert set(realization.loc[realization[CATCHMENT_ID] == "3", "realization_type"]) == {
-        HY_CATCHMENT_AREA, HY_FLOWPATH,
+        HY_CATCHMENT_AREA, HY_CATCHMENT_DIVIDE, HY_FLOWPATH,
     }
 
 
@@ -718,3 +720,101 @@ def test_aggregated_geofabric_contains_fine_catchments():
 
     report = validate_assembled(assembled)
     assert report.ok, report.errors
+
+
+def test_catchment_divides_and_adjacency():
+    from hy_features.tables import DIVIDE_ADJACENCY_TABLE
+
+    assembled = assemble_full_geofabric(_confluence_basins(), _confluence_streams())
+    divides = assembled["layers"]["catchment_divide"].set_index(CATCHMENT_ID)
+    assert set(divides.index) == {"1", "2", "3"}
+    assert (divides[HYF_TYPE] == HY_CATCHMENT_DIVIDE).all()
+    assert divides.loc["1", REALIZES_CATCHMENT] == "1"
+    assert divides.loc["1", FEATURE_ID] == "dv_1"
+    assert divides.loc["3", "adjacent_catchment_id"] == "1,2"
+    assert divides.loc["1"].geometry.length == pytest.approx(6.0)
+
+    adjacency = assembled["tables"][DIVIDE_ADJACENCY_TABLE]
+    shared = {
+        (a, b): length
+        for a, b, length in adjacency[[CATCHMENT_ID, "adjacent_catchment_id", "shared_length_m"]].itertuples(index=False)
+    }
+    assert shared[("1", "2")] == pytest.approx(2.0)
+    assert shared[("2", "1")] == pytest.approx(2.0)
+    assert shared[("1", "3")] == pytest.approx(1.0)
+    assert shared[("3", "")] == pytest.approx(4.0)
+
+
+def test_gauge_catchments_and_hydrometric_networks():
+    from hy_features.tables import CONTAINMENT_TABLE, HYDROMETRIC_STATION_TABLE
+    from hy_features.validate import validate_assembled
+
+    gauges = gpd.GeoDataFrame(
+        {
+            "STATION_NUMBER": ["A", "B", "C"],
+            "geometry": [Point(0.5, 1.5), Point(1.0, 0.2), Point(1.0, 0.8)],
+        },
+        crs="EPSG:3857",
+    )
+    assembled = assemble_full_geofabric(_confluence_basins(), _confluence_streams(), gauges=gauges)
+    layers = assembled["layers"]
+
+    hm = layers["hydrometric_feature"].set_index(STATION_CODE)
+    assert hm.loc["B", CATCHMENT_ID] == "3"
+    assert hm.loc["B", REALIZED_NEXUS_ID] == "nx_gauge_B"
+
+    area = layers["gauge_catchment"].set_index(CATCHMENT_ID)
+    assert area.loc["gauge_A", "member_count"] == 1
+    assert area.loc["gauge_B", "member_count"] == 3
+    assert area.loc["gauge_B", "area_km2"] == pytest.approx(6e-6)
+    assert area.loc["gauge_B", OUTFLOW_NEXUS_ID] == "nx_gauge_B"
+
+    nexus = layers["hydro_nexus"].set_index(NEXUS_ID)
+    assert nexus.loc["nx_gauge_B", CONTRIBUTING_CATCHMENT_ID] == "gauge_B"
+    assert nexus.loc["nx_gauge_B", RECEIVING_CATCHMENT_ID] == "3"
+
+    registry = assembled["registry"]
+    assert registry.catchments["gauge_B"].hyf_type == HY_CATCHMENT_AGGREGATE
+    assert registry.catchments["domain"].outflow_nexus_id == "nx_out_3"
+    containment = assembled["tables"][CONTAINMENT_TABLE]
+    gauge_b_members = containment.loc[containment["containing_catchment_id"] == "gauge_B", "contained_catchment_id"]
+    assert sorted(gauge_b_members) == ["1", "2", "3"]
+
+    stations = assembled["tables"][HYDROMETRIC_STATION_TABLE]
+    members: dict[str, list[str]] = {}
+    for net, station in stations.itertuples(index=False):
+        members.setdefault(net, []).append(station)
+    members = {net: sorted(ids) for net, ids in members.items()}
+    assert members["hmn_A"] == ["hm_A"]
+    assert members["hmn_B"] == ["hm_A", "hm_B", "hm_C"]
+    assert members["hmn_C"] == ["hm_A", "hm_C"]
+
+    report = validate_assembled(assembled)
+    assert report.ok, report.errors
+    assert not report.warnings, report.warnings
+
+
+def test_feature_name_table_with_language_variants():
+    from hy_features.tables import FEATURE_NAME_TABLE
+    from hy_features.validate import validate_assembled
+
+    basins, streams = _minimal_raw_geofabric()
+    lakes = gpd.GeoDataFrame(
+        {
+            "Hylak_id": [100],
+            "Lake_type": [1],
+            "Lake_name": ["Test Lake"],
+            "feature_name_fr": ["Lac Test"],
+            "geometry": [Polygon([(0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8)])],
+        },
+        crs="EPSG:3857",
+    )
+    assembled = assemble_full_geofabric(basins, streams, waterbodies=lakes, name_language="en")
+    names = assembled["tables"][FEATURE_NAME_TABLE].set_index("language")
+    assert names.loc["en", "name"] == "Test Lake"
+    assert names.loc["en", "named_feature_id"] == "wb_100"
+    assert names.loc["en", "usage"] == "conventional"
+    assert names.loc["en", "preferred_by"] == "HydroLAKES"
+    assert names.loc["fr", "name"] == "Lac Test"
+    assert names.loc["fr", "preferred_by"] == ""
+    assert validate_assembled(assembled).ok
