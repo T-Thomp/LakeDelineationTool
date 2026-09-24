@@ -21,8 +21,10 @@
 #        v
 #   [Python] filterLakes.py      -- clip HydroLAKES reservoirs to basin
 #            getGauges.py        -- find stream gauges inside basin
-#            conditionLakes.py -- fix flow dirs inside each lake (MPI-parallel;
+#            conditionLakes.py   -- fix flow dirs inside each lake (MPI-parallel;
 #                                   writes fdr_lakes.tif; see FLOWPATH_NCORES)
+#            conditionStreams.py -- (optional) force flow along CSV valley paths
+#                                   in fdr_lakes.tif
 #        v
 #   [Pass 2] TauDEM -- re-run network using corrected lake flow directions
 #        |
@@ -83,6 +85,11 @@
 #       outlet_overrides.csv (optional manual lake outlets)
 #       outputs            -- outputs/interim/taudem_d8/fdr_lakes.tif
 #       Launch             -- MUST use srun/mpirun (mpi4py); see FLOWPATH_NCORES
+#
+# [ ] conditionStreams.py  (--csv; runs right after conditionLakes.py)
+#       stream_conditioning.csv (optional; id,start_lat,start_lon,end_lat,end_lon)
+#       INPUT_DEM          -- raw DEM used for the valley cost surface
+#       outputs            -- edits outputs/interim/taudem_d8/fdr_lakes.tif in place
 #
 # [ ] pourPointsPass2.py  (paths from pipeline_paths.py)
 #       intermediate streams/watersheds under outputs/interim/taudem_d8/
@@ -279,9 +286,12 @@ gdal_polygonize.py \
 #   filterLakes.py        -- select HydroLAKES polygons inside the Pass 1 basin
 #   getGauges.py          -- locate Hydat stream gauges for outlet ranking
 #
-#   conditionLakes.py -- rewrite D8 flow directions inside each filtered lake
+#   conditionLakes.py     -- rewrite D8 flow directions inside each filtered lake
 #                            so all lake cells drain to one outlet along a
 #                            centerline "spine" (see script header docstring).
+#   conditionStreams.py   -- for each start/end pair in stream_conditioning.csv,
+#                            route the lowest-cost valley path on the DEM and
+#                            point flow along it (lake cells are left alone).
 #
 # Why this step exists:
 #   TauDEM Pass 1 leaves ambiguous flow on flat lake surfaces (many boundary
@@ -322,6 +332,10 @@ gdal_polygonize.py \
 #   Re-run TauDEM Pass 2 / Pass 3 afterwards for the change to take effect.
 #   srun --ntasks=4 --cpus-per-task=1 \
 #       python3 conditionLakes.py --option override --csv my_fixes.csv --ncores 4
+#
+# Stream conditioning (serial; skipped if the CSV does not exist):
+#   python3 conditionStreams.py --csv stream_conditioning.csv
+#   Re-run it after any full conditionLakes.py run, which rebuilds fdr_lakes.tif.
 # -----------------------------------------------------------------------------
 log_section "Python: lake filtering, gauges, and lake/stream conditioning"
 
@@ -335,6 +349,8 @@ srun --ntasks="${FLOWPATH_NCORES}" --cpus-per-task=1 \
 # Serial fallback (interactive debug on a login/compute node):
 # python3 conditionLakes.py --ncores 1
 echo " after conditionLakes.py $(date)"
+
+python3 "$CODE_DIR/conditionStreams.py" --csv "./stream_conditioning.csv"
 
 # -----------------------------------------------------------------------------
 # 3. TauDEM Pass 2 -- network using corrected lake flow directions

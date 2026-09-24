@@ -125,6 +125,10 @@ Python preprocessing
     Outputs:
         fdr_lakes.tif
 
+• conditionStreams.py (optional)
+    Force flow along user-defined valley paths
+    Edits fdr_lakes.tif in place
+
        │
        ▼
 Pass 2 ─ TauDEM
@@ -174,6 +178,7 @@ study-root/                          ← where you run sbatch
 ├── study_settings.py                ← your paths (copy from study_settings.example.py)
 ├── study_settings.example.py
 ├── outlet_overrides.csv             optional
+├── stream_conditioning.csv          optional
 │
 ├── code/                            ← pipeline scripts (do not edit for new studies)
 │   ├── pipeline_paths.py
@@ -273,6 +278,34 @@ srun --ntasks=4 python3 conditionLakes.py --option override --csv my_fixes.csv -
 ```
 
 Re-run TauDEM Pass 2 / Pass 3 after an override-only run.
+
+### `conditionStreams.py`
+
+Fixes streams that TauDEM routes the wrong way (road fills, dams, DEM artifacts). Runs right after `conditionLakes.py` and edits `fdr_lakes.tif` in place.
+
+Each row of `stream_conditioning.csv` is one path, from a start point (upstream) to an end point (downstream):
+
+```csv
+id,start_lat,start_lon,end_lat,end_lon
+bow_fix,51.1784,-115.5708,51.1650,-115.5402
+creek_2,50.9021,-114.8810,50.8893,-114.8467
+```
+
+For each row the script:
+
+1. Reprojects both points to the flow-direction grid. Rows with a point outside the raster are skipped.
+2. Takes the rectangle around the two points plus a buffer (`BUFFER_CELLS`, default 50).
+3. Builds a cost surface from the raw DEM: relative elevation in the window (0 on the valley floor, 1 at the highest cell), an uphill penalty, and a small pull toward the end point.
+4. Finds the lowest-cost 8-direction path from start to end, so the path follows the valley the way water would.
+5. Points each path cell's flow direction at the next cell. The end cell keeps its direction, and lake cells are never changed.
+
+A warning is printed if flow leaving the end point runs back onto the path (move the end point further downstream). Weights are constants at the top of the script. If the CSV does not exist, the step is skipped.
+
+```bash
+python3 conditionStreams.py --csv stream_conditioning.csv
+```
+
+Re-run it after any full `conditionLakes.py` run, which rebuilds `fdr_lakes.tif`.
 
 ---
 
@@ -484,6 +517,20 @@ Outputs:
 
 ```text
 outputs/interim/taudem_d8/fdr_lakes.tif
+```
+
+## `conditionStreams.py`
+
+Verify:
+
+- `stream_conditioning.csv` (optional; step is skipped without it)
+- Raw DEM on the same grid as `fdr_lakes.tif`
+- Filtered lakes (lake cells are protected)
+
+Outputs:
+
+```text
+outputs/interim/taudem_d8/fdr_lakes.tif   (edited in place)
 ```
 
 ---
