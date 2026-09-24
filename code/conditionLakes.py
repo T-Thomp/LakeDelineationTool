@@ -1,5 +1,5 @@
 """
-Raster flow-path editor for instream reservoirs.
+Lake flow-direction conditioning for instream reservoirs.
 
 Called by Delineation-Workflow.slurm after TauDEM Pass 1 and the
 filterLakes / getGauges steps. It reads the original TauDEM flow-direction
@@ -47,7 +47,7 @@ Run modes (--option)
                    to the original FDR, so edits from the previous outlet choice
                    do not linger.
 
-  python3 rasterFlowpathEdit.py --option override --csv my_fixes.csv --ncores 4
+  python3 conditionLakes.py --option override --csv my_fixes.csv --ncores 4
 """
 
 import argparse

@@ -21,7 +21,7 @@
 #        v
 #   [Python] filterLakes.py      -- clip HydroLAKES reservoirs to basin
 #            getGauges.py        -- find stream gauges inside basin
-#            rasterFlowpathEdit.py -- fix flow dirs inside each lake (MPI-parallel;
+#            conditionLakes.py -- fix flow dirs inside each lake (MPI-parallel;
 #                                   writes fdr_lakes.tif; see FLOWPATH_NCORES)
 #        v
 #   [Pass 2] TauDEM -- re-run network using corrected lake flow directions
@@ -62,7 +62,7 @@
 #       PATH to TauDEM     -- export PATH="$HOME/taudem-build/taudem:$PATH" (§0)
 #       VENV               -- Python venv activate (pip install -r requirements.txt)
 #       STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
-#       FLOWPATH_NCORES    -- MPI worker ranks for rasterFlowpathEdit.py (see §0)
+#       FLOWPATH_NCORES    -- MPI worker ranks for conditionLakes.py (see §0)
 #       HY_FEATURES_ENABLED -- unset/off by default; export =1 to enable HY geofabric
 #       #SBATCH --account / --ntasks / --mem-per-cpu / --time
 #
@@ -75,7 +75,7 @@
 #       Pass-1 watersheds under outputs/interim/taudem_d8/
 #       output             -- outputs/prep/gauges.shp
 #
-# [ ] rasterFlowpathEdit.py  (defaults in __main__ / --ncores)
+# [ ] conditionLakes.py  (defaults in __main__ / --ncores)
 #       Requires Pass 1 + filterLakes + getGauges first (see §2 below).
 #       FDR / SRC / AD8 / watershed rasters under outputs/interim/taudem_d8/
 #       streams            -- outputs/interim/taudem_d8/original-delineated-streams.shp
@@ -120,8 +120,8 @@
 #
 # HPC modules (this script: module restore scimods) — FIR-tested:
 #   GDAL        -- gdal_polygonize.py (must match GDAL==3.9.1 in requirements.txt)
-#   mpi4py      -- rasterFlowpathEdit.py MPI (FIR: module load only; not in requirements.txt)
-#   Slurm       -- sbatch / srun (self-built TauDEM MPI + rasterFlowpathEdit MPI)
+#   mpi4py      -- conditionLakes.py MPI (FIR: module load only; not in requirements.txt)
+#   Slurm       -- sbatch / srun (self-built TauDEM MPI + conditionLakes MPI)
 #
 # TauDEM (not a cluster module): compile with MPI; add install dir to PATH in §0.
 #
@@ -188,9 +188,9 @@ FINAL_DIR="$OUTPUT_ROOT/final"                 # Deliverables (basins, pour poin
 # Applied identically in all three TauDEM passes.
 STREAM_THRESHOLD=5555
 
-# Worker MPI ranks for rasterFlowpathEdit.py (lake flow-path edits).
+# Worker MPI ranks for conditionLakes.py (lake flow-path edits).
 #
-# rasterFlowpathEdit.py uses mpi4py: each rank processes a batch of lakes in
+# conditionLakes.py uses mpi4py: each rank processes a batch of lakes in
 # parallel (partitioned by estimated lake cell count). Rank 0 builds the output
 # GeoTIFF and merges masked FDR patches from all workers.
 #
@@ -279,7 +279,7 @@ gdal_polygonize.py \
 #   filterLakes.py        -- select HydroLAKES polygons inside the Pass 1 basin
 #   getGauges.py          -- locate Hydat stream gauges for outlet ranking
 #
-#   rasterFlowpathEdit.py -- rewrite D8 flow directions inside each filtered lake
+#   conditionLakes.py -- rewrite D8 flow directions inside each filtered lake
 #                            so all lake cells drain to one outlet along a
 #                            centerline "spine" (see script header docstring).
 #
@@ -288,7 +288,7 @@ gdal_polygonize.py \
 #   exits). Pass 2 and Pass 3 must use a corrected flow-direction raster or
 #   streamnet will split basins incorrectly through reservoirs.
 #
-# Prerequisites (must exist before rasterFlowpathEdit runs):
+# Prerequisites (must exist before conditionLakes runs):
 #   outputs/interim/taudem_d8/stream-network_elv-{fdir,src,ad8}.tif
 #   outputs/interim/taudem_d8/original-delineated-watersheds.tif
 #   outputs/interim/taudem_d8/original-delineated-streams.shp
@@ -302,7 +302,7 @@ gdal_polygonize.py \
 #
 # MPI launch (required for parallel lake processing):
 #   export FLOWPATH_NCORES=N
-#   srun --ntasks=N --cpus-per-task=1 python3 rasterFlowpathEdit.py --ncores N
+#   srun --ntasks=N --cpus-per-task=1 python3 conditionLakes.py --ncores N
 #
 #   --ncores caps active workers at min(N, srun task count). If you omit srun,
 #   mpi4py sees a single rank and runs serially regardless of --ncores.
@@ -311,30 +311,30 @@ gdal_polygonize.py \
 #   source "$VENV"
 #   export FLOWPATH_NCORES=16
 #   srun --ntasks=16 --cpus-per-task=1 \
-#       python3 rasterFlowpathEdit.py --ncores 16
+#       python3 conditionLakes.py --ncores 16
 #
 # Serial debug (interactive node, no srun):
-#   python3 rasterFlowpathEdit.py --ncores 1
+#   python3 conditionLakes.py --ncores 1
 #
 # Override-only re-run (fix individual lakes without a full rebuild):
 #   Re-runs only the lakes listed in the CSV and pastes them into the existing
 #   fdr_lakes.tif. Workers are capped at the number of lakes in the CSV.
 #   Re-run TauDEM Pass 2 / Pass 3 afterwards for the change to take effect.
 #   srun --ntasks=4 --cpus-per-task=1 \
-#       python3 rasterFlowpathEdit.py --option override --csv my_fixes.csv --ncores 4
+#       python3 conditionLakes.py --option override --csv my_fixes.csv --ncores 4
 # -----------------------------------------------------------------------------
-log_section "Python: lake filtering, gauges, and raster flow-path edits"
+log_section "Python: lake filtering, gauges, and lake/stream conditioning"
 
 python3 "$CODE_DIR/filterLakes.py"
 python3 "$CODE_DIR/getGauges.py"
 
-echo " before rasterFlowpathEdit.py $(date)"
+echo " before conditionLakes.py $(date)"
 export FLOWPATH_NCORES
 srun --ntasks="${FLOWPATH_NCORES}" --cpus-per-task=1 \
-    python3 "$CODE_DIR/rasterFlowpathEdit.py" --ncores "${FLOWPATH_NCORES}"
+    python3 "$CODE_DIR/conditionLakes.py" --ncores "${FLOWPATH_NCORES}"
 # Serial fallback (interactive debug on a login/compute node):
-# python3 rasterFlowpathEdit.py --ncores 1
-echo " after rasterFlowpathEdit.py $(date)"
+# python3 conditionLakes.py --ncores 1
+echo " after conditionLakes.py $(date)"
 
 # -----------------------------------------------------------------------------
 # 3. TauDEM Pass 2 -- network using corrected lake flow directions

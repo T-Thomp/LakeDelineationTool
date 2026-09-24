@@ -46,10 +46,10 @@ module save scimods    # optional; restored by Delineation-Workflow.slurm
 | Software | Purpose (FIR) |
 |----------|----------------|
 | **GDAL 3.9.1** | `gdal_polygonize.py`; pip `GDAL==3.9.1` must match the loaded module |
-| **mpi4py 4.0.0** | `rasterFlowpathEdit.py` MPI — module load only |
-| **Slurm** | `sbatch`, `srun` — TauDEM MPI passes and `rasterFlowpathEdit.py` |
+| **mpi4py 4.0.0** | `conditionLakes.py` MPI — module load only |
+| **Slurm** | `sbatch`, `srun` — TauDEM MPI passes and `conditionLakes.py` |
 
-TauDEM Pass 1–3 invoke MPI tools via `srun` with `#SBATCH --ntasks=250`. `rasterFlowpathEdit.py` uses a **separate** smaller `srun` launch (`FLOWPATH_NCORES`).
+TauDEM Pass 1–3 invoke MPI tools via `srun` with `#SBATCH --ntasks=250`. `conditionLakes.py` uses a **separate** smaller `srun` launch (`FLOWPATH_NCORES`).
 
 ### Python venv (FIR)
 
@@ -81,18 +81,18 @@ Adapt `module restore scimods` in `Delineation-Workflow.slurm` to your site’s 
 
 | Package | Version | Used by |
 |---------|---------|---------|
-| **GDAL** | 3.9.1 | `osgeo` raster I/O (`rasterFlowpathEdit.py`, `pourPointsPass2.py`) |
+| **GDAL** | 3.9.1 | `osgeo` raster I/O (`conditionLakes.py`, `pourPointsPass2.py`) |
 | **geopandas** | 1.0.1 | Vector scripts; shapefile / GeoPackage I/O |
 | **pandas** | 2.2.3 | Attribute tables, registry JSON |
 | **numpy** | 1.26.4 | Raster arrays, basin metrics |
-| **scipy** | 1.15.2 | `ndimage` in `rasterFlowpathEdit.py`, `pourPointsPass2.py` |
+| **scipy** | 1.15.2 | `ndimage` in `conditionLakes.py`, `pourPointsPass2.py` |
 | **shapely** | 2.0.7 | Geometry ops |
 | **fiona** | 1.10.1 | Shapefile driver (geopandas) |
 | **pyogrio** | 0.10.0 | GeoPackage / fast vector I/O (geopandas) |
 | **pyproj** | 3.7.1 | CRS transforms (geopandas) |
 | **pytest** | 8.3.4 | `tests/test_hy_features_topology.py` (optional) |
 
-**mpi4py 4.0.0** — required by `rasterFlowpathEdit.py`. On **FIR**: `module load mpi4py/4.0.0` (not pip). Elsewhere: `pip install mpi4py` or your site’s equivalent.
+**mpi4py 4.0.0** — required by `conditionLakes.py`. On **FIR**: `module load mpi4py/4.0.0` (not pip). Elsewhere: `pip install mpi4py` or your site’s equivalent.
 
 Stdlib only (no pip): `sqlite3` in `getGauges.py`, `hy_features/` JSON export.
 
@@ -120,7 +120,7 @@ Python preprocessing
 • getGauges.py
     Find stream gauges inside the basin
 
-• rasterFlowpathEdit.py
+• conditionLakes.py
     Correct flow directions through reservoirs
     Outputs:
         fdr_lakes.tif
@@ -243,7 +243,7 @@ outputs/prep/
 
 ---
 
-### `rasterFlowpathEdit.py`
+### `conditionLakes.py`
 
 Corrects TauDEM D8 flow directions across flat lake surfaces.
 
@@ -269,7 +269,7 @@ Options:
 - `--csv PATH` — outlet override CSV (`lake_id,lat,lon`; default `./outlet_overrides.csv`).
 
 ```bash
-srun --ntasks=4 python3 rasterFlowpathEdit.py --option override --csv my_fixes.csv --ncores 4
+srun --ntasks=4 python3 conditionLakes.py --option override --csv my_fixes.csv --ncores 4
 ```
 
 Re-run TauDEM Pass 2 / Pass 3 after an override-only run.
@@ -467,7 +467,7 @@ outputs/prep/gauges.shp
 
 ---
 
-## `rasterFlowpathEdit.py`
+## `conditionLakes.py`
 
 Verify:
 
