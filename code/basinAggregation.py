@@ -18,14 +18,18 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 
+from hy_features.config import hy_features_enabled
 from pipeline_paths import (
-    FINAL_BASINS,
-    FINAL_BASINS_AGG,
-    FINAL_STREAMS,
-    FINAL_STREAMS_AGG,
-    WORKING,
-    ensure_output_dirs,
+  FINAL_BASINS,
+  FINAL_BASINS_AGG,
+  FINAL_STREAMS,
+  FINAL_STREAMS_AGG,
+  WORKING,
+  WORKING_GEOFABRIC_AGG_GPKG,
+  ensure_output_dirs,
 )
+
+ENABLE_HY_FEATURES = False  # overridden by HY_FEATURES_ENABLED env var if set
 
 
 # ==============================================================================
@@ -601,13 +605,15 @@ def basin_aggregation(
   min_riv_slope: float,
   min_riv_length: float,
   outlet_value: int = OUTLET_VALUE,
-) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+  return_membership: bool = False,
+):
   """
   Aggregate basins and rivers based on drainage area, slope, and reservoir masking.
 
   Returns aggregated basin and river GeoDataFrames. Each basin is identified by
   BASIN_ID. Gauge IDs, lake flags/IDs, lake area, and fractional lake area are
-  pour-point attributes only.
+  pour-point attributes only. With ``return_membership`` a third DataFrame maps
+  every input basin (``member``) to the aggregate that absorbed it (``agg``).
 
   Terminal basins receive ``outlet_value`` in ``DSLINKNO`` (default ``OUTLET_VALUE``).
   """
@@ -730,6 +736,11 @@ def basin_aggregation(
   pour_down = _one_row_per_agg(basin, id_col, ["aggdown"])
   basin = basin.drop(columns=["aggdown"]).merge(pour_down, on="agg", how="left")
 
+  membership = pd.DataFrame({
+    "member": basin[id_col].astype("int64").to_numpy(),
+    "agg": basin["agg"].astype("int64").to_numpy(),
+  })
+
   attr_cols = ["aggdown", "_uparea"] + _basin_attr_cols(basin)
   pour_attrs = _one_row_per_agg(basin, id_col, attr_cols)
 
@@ -811,6 +822,8 @@ def basin_aggregation(
     outlet_value=outlet_value,
   )
 
+  if return_membership:
+    return agg_basin, agg_river, membership
   return agg_basin, agg_river
 
 
@@ -830,13 +843,14 @@ def run_aggregation(
   print(f"Loading rivers: {rivers_path}")
   rivers = gpd.read_file(rivers_path)
 
-  agg_basins, agg_rivers = basin_aggregation(
+  agg_basins, agg_rivers, membership = basin_aggregation(
     basins,
     rivers,
     min_sub_area,
     min_riv_slope,
     min_riv_length,
     outlet_value=outlet_value,
+    return_membership=True,
   )
 
   os.makedirs(os.path.dirname(output_basins_path) or ".", exist_ok=True)
@@ -848,6 +862,14 @@ def run_aggregation(
   export_shapefile_legacy(agg_basins, output_basins_path)
   print(f"Writing aggregated rivers ({len(agg_rivers)} features): {output_rivers_path}")
   export_shapefile_legacy(agg_rivers, output_rivers_path)
+
+  if hy_features_enabled(default=ENABLE_HY_FEATURES):
+    from hy_features.aggregate import export_aggregated_geofabric
+
+    export_aggregated_geofabric(
+      agg_basins, agg_rivers, membership, WORKING_GEOFABRIC_AGG_GPKG,
+      outlet_sentinel=outlet_value,
+    )
 
   return agg_basins, agg_rivers
 

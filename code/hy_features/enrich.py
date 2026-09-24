@@ -179,6 +179,11 @@ def enrich_hydro_locations(
     if LEGACY_LAKE_ID in out.columns:
         out[WATERBODY_ID] = out[LEGACY_LAKE_ID].map(_positive_id)
 
+    from hy_features.schema import FEATURE_NAME
+
+    if "name" in out.columns:
+        out[FEATURE_NAME] = out["name"].fillna("").astype(str)
+
     return out
 
 

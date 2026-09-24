@@ -576,9 +576,10 @@ TauDEM rasters and pass-specific vectors (single copy — not duplicated elsewhe
 
 Merged geofabric before final clean, plus HY sidecars when enabled:
 
-- **`geofabric.gpkg`** — HY_Features profile GeoPackage
+- **`geofabric.gpkg`** — HY_Features profile GeoPackage (spatial layers plus catchment, nexus and link tables)
 - **`catchment_registry.json`** — catchment identity, realization links, and associations
 - **`hydrographic_network.json`** — dendritic catchment table + network metadata
+- **`geofabric_aggregated.gpkg`** (+ `catchment_registry_aggregated.json`, `hydrographic_network_aggregated.json`) — same profile for the `basinAggregation.py` output, linked to `geofabric.gpkg` by containment
 
 ## `outputs/prep/`
 
@@ -597,6 +598,14 @@ export HY_FEATURES_ENABLED=1   # or set ENABLE_HY_FEATURES = True in a script
 When enabled, outputs implement a scoped subset of the [OGC HY_Features conceptual model (14-111r6)](https://docs.ogc.org/is/14-111r6/14-111r6.html) as an **implementation schema** under profile **`LakeDelineationTool-DendriticGeofabric-1.0`** (self-assessed against conformance class `/conf/hy_features_conceptual_model`).
 
 See [`docs/hy_features_conformance_profile.md`](docs/hy_features_conformance_profile.md), [`docs/hy_features_mapping.md`](docs/hy_features_mapping.md), and [`docs/hy_features_implementation_conventions.md`](docs/hy_features_implementation_conventions.md).
+
+Every export ends with an automated conformance check. To re-run it on existing products:
+
+```bash
+cd code
+python -m hy_features.validate ../outputs/working/geofabric.gpkg
+python -m hy_features.validate ../outputs/working/geofabric_aggregated.gpkg --external ../outputs/working/geofabric.gpkg
+```
 
 ## Downstream model remapping
 

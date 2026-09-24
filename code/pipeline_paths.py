@@ -113,6 +113,7 @@ WORKING_STREAMS_MERGED = WORKING / "streams_merged.shp"
 WORKING_GEOFABRIC_GPKG = WORKING / "geofabric.gpkg"
 WORKING_CATCHMENT_REGISTRY = WORKING / "catchment_registry.json"
 WORKING_HYDRO_NETWORK_JSON = WORKING / "hydrographic_network.json"
+WORKING_GEOFABRIC_AGG_GPKG = WORKING / "geofabric_aggregated.gpkg"
 
 # Final deliverables
 FINAL_BASINS = FINAL / "basins.shp"
@@ -147,6 +148,7 @@ PATHS: dict[str, str] = {
     "geofabric_gpkg": str(WORKING_GEOFABRIC_GPKG),
     "catchment_registry": str(WORKING_CATCHMENT_REGISTRY),
     "hydro_network_json": str(WORKING_HYDRO_NETWORK_JSON),
+    "geofabric_aggregated_gpkg": str(WORKING_GEOFABRIC_AGG_GPKG),
     "final_basins": str(FINAL_BASINS),
     "final_streams": str(FINAL_STREAMS),
     "final_basins_aggregated": str(FINAL_BASINS_AGG),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import geopandas as gpd
+import pandas as pd
 import pytest
 from shapely.geometry import LineString, Point, Polygon
 
@@ -28,9 +29,12 @@ from hy_features.schema import (
     FLOWPATH_ID,
     HOST_FLOWPATH_ID,
     HYF_TYPE,
+    HY_CATCHMENT_AGGREGATE,
     HY_CATCHMENT_AREA,
+    HY_CHANNEL_NETWORK,
     HY_DENDRITIC_CATCHMENT,
     HY_FLOWPATH,
+    HY_HYDROGRAPHIC_NETWORK,
     HY_HYDRO_NEXUS,
     HY_HYDROMETRIC_FEATURE,
     HY_IMPOUNDMENT,
@@ -157,9 +161,9 @@ def test_hydro_nexus_covers_all_flowpaths():
     assert contributing == {"1", "2"}
 
 
-def test_hydro_nexus_at_topologic_outlet_when_line_is_reversed():
+def test_nexus_realization_at_topologic_outlet_when_line_is_reversed():
     """TauDEM lines often store the pour point at the first vertex."""
-    from hy_features.network import build_hydro_nexus_layer
+    from hy_features.network import build_hydro_nexus_layer, build_nexus_hydro_locations
 
     streams = gpd.GeoDataFrame(
         {
@@ -174,10 +178,11 @@ def test_hydro_nexus_at_topologic_outlet_when_line_is_reversed():
         crs="EPSG:3857",
     )
     nexus = build_hydro_nexus_layer(streams, outlet_sentinel=-9999)
-    n1 = nexus[nexus[CONTRIBUTING_CATCHMENT_ID] == "1"].iloc[0]
-    n2 = nexus[nexus[CONTRIBUTING_CATCHMENT_ID] == "2"].iloc[0]
-    assert n1.geometry.equals_exact(Point(1.0, 0.5), tolerance=1e-6)
-    assert n2.geometry.equals_exact(Point(2.0, 0.5), tolerance=1e-6)
+    assert "geometry" not in nexus.columns
+
+    loc = build_nexus_hydro_locations(streams, outlet_sentinel=-9999).set_index(REALIZED_NEXUS_ID)
+    assert loc.loc["nx_2"].geometry.equals_exact(Point(1.0, 0.5), tolerance=1e-6)
+    assert loc.loc["nx_out_2"].geometry.equals_exact(Point(2.0, 0.5), tolerance=1e-6)
 
 
 def test_hydrometric_river_referencing():
@@ -293,8 +298,18 @@ def test_registry_realizations_and_nexus_associations():
     registry = assembled["registry"]
 
     realization_types = {e.realization_type for e in registry.entries}
-    assert realization_types == {HY_CATCHMENT_AREA, HY_FLOWPATH}
-    assert set(registry.catchments) == {"1", "2"}
+    assert realization_types == {
+        HY_CATCHMENT_AREA, HY_FLOWPATH, HY_HYDROGRAPHIC_NETWORK, HY_CHANNEL_NETWORK,
+    }
+    assert set(registry.catchments) == {"1", "2", "domain"}
+    domain = registry.catchments["domain"]
+    assert domain.hyf_type == HY_CATCHMENT_AGGREGATE
+    assert domain.outflow_nexus_id == "nx_out_2"
+    assert set(registry.containments) == {("domain", "1"), ("domain", "2")}
+    domain_realizations = {
+        e.realization_type for e in registry.entries if e.catchment_id == "domain"
+    }
+    assert domain_realizations == {HY_HYDROGRAPHIC_NETWORK, HY_CHANNEL_NETWORK}
 
     nexus_links = {
         (a.catchment_id, a.feature_id) for a in registry.associations
@@ -538,7 +553,17 @@ def test_multilinestring_flowpath_is_merged():
     assert disjoint.length == pytest.approx(3.0)
 
 
-def test_hydro_locations_realize_network_nexus():
+def test_every_nexus_has_a_hydro_location_realization():
+    basins, streams = _minimal_raw_geofabric()
+    assembled = assemble_full_geofabric(basins, streams)
+    nexus = assembled["layers"]["hydro_nexus"]
+    loc = assembled["layers"]["hydro_location"]
+    assert (nexus[HYF_TYPE] == HY_HYDRO_NEXUS).all()
+    assert set(loc[REALIZED_NEXUS_ID]) == set(nexus[NEXUS_ID]) == {"nx_2", "nx_out_2"}
+    assert set(loc["hydro_loc_type"]) == {"catchment outlet"}
+
+
+def test_pour_points_on_a_nexus_are_not_duplicated():
     basins, streams = _minimal_raw_geofabric()
     pour_points = gpd.GeoDataFrame(
         {
@@ -550,8 +575,146 @@ def test_hydro_locations_realize_network_nexus():
     )
     assembled = assemble_full_geofabric(basins, streams, hydro_locations=pour_points)
     loc = assembled["layers"]["hydro_location"]
-    assert loc["realized_nexus_id"].tolist() == ["nx_2", ""]
-    assert loc["hydro_loc_type"].tolist() == ["catchment outlet", "river mouth"]
+    assert len(loc) == 3
+    assert loc[REALIZED_NEXUS_ID].tolist() == ["nx_2", "nx_out_2", ""]
+    assert loc["hydro_loc_type"].iloc[2] == "river mouth"
     assert loc[FEATURE_ID].is_unique
-    nexus = assembled["layers"]["hydro_nexus"]
-    assert (nexus[HYF_TYPE] == HY_HYDRO_NEXUS).all()
+
+
+def test_lake_inflow_location_is_river_mouth_and_confluence_elsewhere():
+    from hy_features.network import build_nexus_hydro_locations
+
+    basins = enrich_catchment_areas(_confluence_basins())
+    streams = enrich_flowpaths(_confluence_streams(), outlet_sentinel=-9999)
+    loc = build_nexus_hydro_locations(streams, basins, outlet_sentinel=-9999).set_index(REALIZED_NEXUS_ID)
+    assert loc.loc["nx_3", "hydro_loc_type"] == "river mouth"
+    assert loc.loc["nx_3", CONTRIBUTING_CATCHMENT_ID] == "1,2"
+    assert loc.loc["nx_3", WATERBODY_ID] == "300"
+
+    no_lakes = _confluence_basins()
+    no_lakes["is_lake"] = 0
+    basins = enrich_catchment_areas(no_lakes)
+    loc = build_nexus_hydro_locations(streams, basins, outlet_sentinel=-9999).set_index(REALIZED_NEXUS_ID)
+    assert loc.loc["nx_3", "hydro_loc_type"] == "confluence"
+
+
+def test_channel_network_realizes_domain():
+    basins, streams = _minimal_raw_geofabric()
+    assembled = assemble_full_geofabric(basins, streams)
+    channel = assembled["layers"]["channel_network"]
+    assert len(channel) == 1
+    row = channel.iloc[0]
+    assert row[HYF_TYPE] == HY_CHANNEL_NETWORK
+    assert row[REALIZES_CATCHMENT] == "domain"
+    assert row["drainage_pattern"] == "dendritic"
+    assert row.geometry.geom_type == "MultiLineString"
+    assert assembled["hydrographic_network"]["realized_catchment"] == "domain"
+
+
+def test_link_tables():
+    from hy_features.tables import (
+        CATCHMENT_TABLE,
+        CONTAINMENT_TABLE,
+        NEXUS_CONTRIBUTING_TABLE,
+        REALIZATION_TABLE,
+        UPPER_TABLE,
+    )
+
+    assembled = assemble_full_geofabric(_confluence_basins(), _confluence_streams())
+    tables = assembled["tables"]
+
+    catchment = tables[CATCHMENT_TABLE].set_index(CATCHMENT_ID)
+    assert set(catchment.index) == {"1", "2", "3", "domain"}
+    assert catchment.loc["3", HYF_TYPE] == HY_DENDRITIC_CATCHMENT
+    assert catchment.loc["domain", HYF_TYPE] == HY_CATCHMENT_AGGREGATE
+    assert catchment[FEATURE_ID].is_unique
+
+    contributing = tables[NEXUS_CONTRIBUTING_TABLE]
+    shared = contributing[contributing[NEXUS_ID] == "nx_3"]
+    assert sorted(shared[CONTRIBUTING_CATCHMENT_ID]) == ["1", "2"]
+    assert set(shared[RECEIVING_CATCHMENT_ID]) == {"3"}
+
+    upper = tables[UPPER_TABLE]
+    assert sorted(upper.loc[upper[CATCHMENT_ID] == "3", "upper_catchment_id"]) == ["1", "2"]
+
+    assert len(tables[CONTAINMENT_TABLE]) == 3
+    realization = tables[REALIZATION_TABLE]
+    assert set(realization.loc[realization[CATCHMENT_ID] == "3", "realization_type"]) == {
+        HY_CATCHMENT_AREA, HY_FLOWPATH,
+    }
+
+
+def test_validator_passes_assembled_geofabric():
+    from hy_features.validate import validate_assembled
+
+    basins, streams = _minimal_raw_geofabric()
+    gauges = gpd.GeoDataFrame(
+        {"STATION_NUMBER": ["05AB001"], "geometry": [Point(0.75, 0.5)]},
+        crs="EPSG:3857",
+    )
+    assembled = assemble_full_geofabric(basins, streams, gauges=gauges)
+    assert "hydrometric_feature" in assembled["layers"]
+    report = validate_assembled(assembled)
+    assert report.ok, report.errors
+    assert not report.warnings, report.warnings
+
+
+def test_validator_flags_broken_references():
+    from hy_features.validate import validate_assembled
+
+    basins, streams = _minimal_raw_geofabric()
+    assembled = assemble_full_geofabric(basins, streams)
+    fp = assembled["layers"]["flowpath"]
+    fp.loc[fp.index[0], LOWER_CATCHMENT_ID] = "999"
+    assembled["layers"]["hydro_nexus"] = assembled["layers"]["hydro_nexus"].iloc[:0]
+    report = validate_assembled(assembled)
+    assert not report.ok
+    assert any("hydro_nexus" in e for e in report.errors)
+    assert any("flowpath.lower_catchment_id" in e for e in report.errors)
+
+
+def test_aggregate_ids_are_parsed_as_downstream_ids():
+    from hy_features.network import _parse_downstream_id
+
+    assert _parse_downstream_id("agg_12", -9999) == "agg_12"
+    assert _parse_downstream_id(-9999, -9999) == ""
+    assert _parse_downstream_id(12.0, -9999) == "12"
+
+
+def test_aggregated_geofabric_contains_fine_catchments():
+    from hy_features.aggregate import assemble_aggregated_geofabric
+    from hy_features.tables import CONTAINMENT_TABLE
+    from hy_features.validate import validate_assembled
+
+    agg_basins = gpd.GeoDataFrame(
+        {
+            "LINKNO": [3],
+            "DSLINKNO": [-9999],
+            "is_lake": [0],
+            "lake_id": [-1],
+            "lake_area": [0.0],
+            "frac_lake": [0.0],
+            "geometry": [Polygon([(0, 0), (2, 0), (2, 3), (0, 3)])],
+        },
+        crs="EPSG:3857",
+    )
+    agg_rivers = gpd.GeoDataFrame(
+        {
+            "LINKNO": [3],
+            "DSLINKNO": [-9999],
+            "geometry": [LineString([(1.0, 2.0), (1.0, 0.0)])],
+        },
+        crs="EPSG:3857",
+    )
+    membership = pd.DataFrame({"member": [1, 2, 3], "agg": [3, 3, 3]})
+    assembled = assemble_aggregated_geofabric(agg_basins, agg_rivers, membership)
+
+    ca = assembled["layers"]["catchment_area"]
+    assert ca[CATCHMENT_ID].tolist() == ["agg_3"]
+    assert assembled["layers"]["flowpath"][OUTFLOW_NEXUS_ID].iloc[0] == "nx_out_agg_3"
+
+    containment = set(map(tuple, assembled["tables"][CONTAINMENT_TABLE].to_numpy()))
+    assert {("agg_3", "1"), ("agg_3", "2"), ("agg_3", "3"), ("agg_domain", "agg_3")} == containment
+
+    report = validate_assembled(assembled)
+    assert report.ok, report.errors

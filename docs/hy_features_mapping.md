@@ -33,6 +33,7 @@ from hy_features.assemble import assemble_full_geofabric, export_full_geofabric
 |--------|-------------------|-----------------|
 | `combiningBasins.py` | After reservoir merge | Gauges, HydroLAKES polygons |
 | `cleanGeofabric.py` | After phantom-stream cleanup | Gauges, HydroLAKES, pour points (`outputs/final/pour_points.shp`) |
+| `basinAggregation.py` | After aggregation | — (writes `geofabric_aggregated.gpkg`) |
 
 `pourPointsPass2.py`, `filterLakes.py`, and `getGauges.py` only write intermediate GeoPackage layers; they do not run full assembly.
 
@@ -44,22 +45,36 @@ All paths below are relative to `outputs/working/` unless noted.
 
 | File | HY_Features role | Produced by |
 |------|------------------|-------------|
-| `geofabric.gpkg` | Spatial realization layers | `combiningBasins.py`, `cleanGeofabric.py` |
-| `catchment_registry.json` | Catchment identity ↔ realization index | same |
+| `geofabric.gpkg` | Spatial realization layers + holistic catchment and link tables | `combiningBasins.py`, `cleanGeofabric.py` |
+| `catchment_registry.json` | Catchment identity ↔ realization index (mirrors the GeoPackage tables) | same |
 | `hydrographic_network.json` | `HY_HydrographicNetwork` metadata + `HY_DendriticCatchment` table | same |
+| `geofabric_aggregated.gpkg` (+ `*_aggregated.json`) | Same profile for the aggregated basins, with containment links to `geofabric.gpkg` | `basinAggregation.py` |
 
-### GeoPackage layers
+### GeoPackage layers (spatial)
 
 | Layer | HY_Features type(s) | Required | Notes |
 |-------|---------------------|----------|-------|
 | `catchment_area` | `HY_CatchmentArea` | yes | Basin polygons |
 | `flowpath` | `HY_Flowpath` | yes | Stream reaches (TauDEM links) |
-| `hydro_nexus` | `HY_HydroNexus` | yes | One nexus per receiving catchment, plus one terminal nexus per domain outlet |
+| `hydro_location` | `HY_HydroLocation` | yes | `nexusRealization` of every nexus, plus pour points not already on a nexus |
+| `channel_network` | `HY_ChannelNetwork` | yes | One MultiLineString of all flowpaths realizing the `domain` catchment |
 | `waterbody` | `HY_Lake`, `HY_Impoundment` | no | HydroLAKES polygons when available |
 | `hydrometric_feature` | `HY_HydrometricFeature` | no | Gauges in basin |
-| `hydro_location` | `HY_HydroLocation` | no | Separate pour-point layer; only when `cleanGeofabric.py` receives pour points |
 
-Every spatial feature carries:
+### GeoPackage tables (non-spatial)
+
+| Table | HY_Features element | Required |
+|-------|---------------------|----------|
+| `hydro_nexus` | `HY_HydroNexus` | yes |
+| `catchment` | `HY_DendriticCatchment`, `HY_CatchmentAggregate` (holistic catchments) | yes |
+| `catchment_realization` | `catchmentRealization` | yes |
+| `nexus_contributing_catchment` | `contributingCatchment` / `receivingCatchment` | yes |
+| `catchment_association` | outflow nexus, `networkWaterBody`, `positionOnRiver` | when non-empty |
+| `catchment_containment` | `containingCatchment` / `containedCatchment` | when non-empty |
+| `catchment_upper_catchment` | `upperCatchment` | when non-empty |
+| `waterbody_upstream_waterbody` | `upstreamWaterBody` | when non-empty |
+
+Every feature (spatial layers, `hydro_nexus`, `catchment`) carries:
 
 | Column | Implements |
 |--------|------------|
@@ -83,9 +98,9 @@ Every spatial feature carries:
 
 ## Feature type mappings
 
-### HY_DendriticCatchment (non-spatial)
+### HY_DendriticCatchment (`catchment` table)
 
-Stored in `hydrographic_network.json` → `dendritic_catchment` and summarized in `catchment_registry.json` → `catchments`.
+Stored in the `catchment` table (`feature_id` = `cat_{catchment_id}`), and repeated in `hydrographic_network.json` → `dendritic_catchment` and `catchment_registry.json` → `catchments`.
 
 | HY_Features property / association | Implementation column | Notes |
 |-----------------------------------|----------------------|-------|
@@ -97,6 +112,20 @@ Stored in `hydrographic_network.json` → `dendritic_catchment` and summarized i
 | Linked water body (profile extension) | `waterbody_id` | Set for lake-merged catchments |
 
 Lake-dominated catchments link to a water body via `waterbody_id` and carry `waterbody_class` derived from the same HydroLAKES `Lake_type` as the polygon layer. The registry records the water body as an **association** (`networkWaterBody`), not as a catchment realization.
+
+### HY_CatchmentAggregate (study domain)
+
+The `catchment` row `domain` (`hyf_type` = `HY_CatchmentAggregate`) is the encompassing catchment of the dendritic network.
+
+| HY_Features property / association | Implementation |
+|-----------------------------------|----------------|
+| `containedCatchment` | `catchment_containment` rows `domain` → every dendritic catchment |
+| `outflow` | `outflow_nexus_id` = every terminal `nx_out_*` nexus (comma-separated) |
+| `catchmentRealization` | `catchment_realization` rows → `HY_HydrographicNetwork` (`network_id`) and `HY_ChannelNetwork` (`channel_network`) |
+
+### Aggregated basins (`geofabric_aggregated.gpkg`)
+
+Each aggregated basin is an `HY_DendriticCatchment` with id `agg_{LINKNO}`, in a network `study_hydrographic_network_aggregated` whose domain is `agg_domain`. `catchment_containment` rows `agg_{LINKNO}` → fine `catchment_id` implement `containedCatchment`; the fine catchments are defined in `geofabric.gpkg`.
 
 ### HydroLAKES `Lake_type` → HY_Features
 
@@ -142,15 +171,17 @@ Types `2` and `3` map to **`HY_Impoundment`**, an OGC **`HY_WaterBody` subtype**
 | `inflow` | `inflow_nexus_id` | derived |
 | `upperCatchment` | `upper_catchment_id` | derived |
 
-### HY_HydroNexus (`hydro_nexus` layer)
+### HY_HydroNexus (`hydro_nexus` table)
+
+The nexus is topological (Section 7.3.2) and has no geometry; its positions are the `hydro_location` points that realize it.
 
 | HY_Features property / association | Implementation column | Notes |
 |-----------------------------------|----------------------|-------|
 | Identifier | `nexus_id` | `nx_{receiving_catchment_id}`; `nx_out_{catchment_id}` for a domain outlet |
 | Feature type | `hyf_type` = `HY_HydroNexus` | |
-| `contributingCatchment` (0..*) | `contributing_catchment_id` | Every catchment draining to this nexus (comma-separated); also listed per link in `hydrographic_network.json` |
+| `contributingCatchment` (0..*) | `nexus_contributing_catchment` table | One row per link; `contributing_catchment_id` on the nexus row is a comma-separated copy |
 | `receivingCatchment` | `receiving_catchment_id` | Downstream catchment; empty at domain outlet |
-| Geometry | point | Topologic outflow endpoint of the first contributing reach (from `DSLINKNO` / upstream links; TauDEM may store the pour point at line start) |
+| `nexusRealization` (0..*) | `hydro_location.realized_nexus_id` | At least one per nexus |
 
 ### HY_HydroLocation (`hydro_location` layer)
 
@@ -158,9 +189,21 @@ Types `2` and `3` map to **`HY_Impoundment`**, an OGC **`HY_WaterBody` subtype**
 |-----------------------------------|----------------------|-------|
 | Feature type | `hyf_type` = `HY_HydroLocation` | |
 | Identifier | `feature_id` | `hl_{n}` |
-| `hydroLocationType` | `hydro_loc_type` | Annex B.1 vocabulary (see table) |
-| `realizedNexus` | `realized_nexus_id` | Outflow nexus of the nearest reach outlet within 250 m; empty otherwise |
-| Linked water body | `waterbody_id` | From pour-point `lake_id` when present |
+| `hydroLocationType` | `hydro_loc_type` | Annex B.1 vocabulary (see tables) |
+| `realizedNexus` | `realized_nexus_id` | Set on network-derived locations; empty on pour points not near a nexus |
+| Contributors at this point | `contributing_catchment_id` | Network-derived locations only |
+| Linked water body | `waterbody_id` | Receiving lake for `river mouth`; pour-point `lake_id` otherwise |
+| Name | `feature_name` | Pour-point `name` |
+
+Network-derived locations sit at the topologic outlet of the contributing reaches (from `DSLINKNO` / upstream links; TauDEM may store the pour point at line start). Contributors that meet at the same point share one location; contributors that enter a lake catchment at different shore points each get their own realization of the same nexus.
+
+| Network situation | `hydro_loc_type` |
+|-------------------|------------------|
+| Receiving catchment is lake-dominated | `river mouth` |
+| Two or more contributors meet | `confluence` |
+| Single contributor, or domain outlet | `catchment outlet` |
+
+Pour points within 250 m of a network location are dropped as duplicates; the rest are typed by `point_type`:
 
 | Pour-point `point_type` | `hydro_loc_type` (Annex B.1) |
 |-------------------------|-------------------------------|
@@ -206,19 +249,41 @@ JSON record at `hydrographic_network.json` → `hydrographic_network`:
 |--------------------|------------|
 | Network identifier | `network_id` (default `study_hydrographic_network`) |
 | Feature type | `hyf_type` = `HY_HydrographicNetwork` |
-| `realizedCatchment` | `realized_catchment` (domain-outlet catchment id(s)) |
+| `realizedCatchment` | `realized_catchment` = `domain` |
+| Domain outlets | `outlet_catchments` |
 | Flowpath members | `flowpath_members` |
 | Water-body members | `waterbody_members` |
+| Channel network | `channel_network_id` |
 | `HY_HydroNexus.contributingCatchment` links | `nexus_contributing_catchment` |
-| `HY_ChannelNetwork.drainagePattern` (profile extension) | `channel_network_drainage_pattern` = `dendritic` |
+
+### HY_ChannelNetwork (`channel_network` layer)
+
+| HY_Features property / association | Implementation column | Notes |
+|-----------------------------------|----------------------|-------|
+| Feature type | `hyf_type` = `HY_ChannelNetwork` | |
+| Identifier | `channel_network_id` = `feature_id` | `{network_id}_channels` |
+| `realizedCatchment` | `realizes_catchment` | `domain` |
+| `drainagePattern` | `drainage_pattern` | `dendritic` (Annex B.3) |
+| Member count | `flowpath_count` | |
+| Shape | MultiLineString | All flowpath geometries |
 
 ## Catchment registry
 
-`catchment_registry.json` separates **holistic catchment identity** from geometric realizations (OGC Section 7.2):
+`catchment_registry.json` separates **holistic catchment identity** from geometric realizations (OGC Section 7.2). The GeoPackage tables carry the same content.
 
-- `catchments` — one entry per `catchment_id` with nexus and neighbour links
-- `realizations` — `catchmentRealization` rows linking each catchment to its `HY_CatchmentArea` and `HY_Flowpath` feature ids
+- `catchments` — one entry per `catchment_id` (dendritic catchments and the `domain` aggregate) with nexus and neighbour links
+- `realizations` — `catchmentRealization` rows: `HY_CatchmentArea` and `HY_Flowpath` per catchment; `HY_HydrographicNetwork` and `HY_ChannelNetwork` for `domain`
 - `associations` — non-realization links: each catchment's outflow `HY_HydroNexus`, lake catchments' `HY_Lake` / `HY_Impoundment` (`networkWaterBody`), and `HY_HydrometricFeature` positions
+- `containments` — `containingCatchment` → `containedCatchment` pairs
+
+## Conformance check
+
+```bash
+python -m hy_features.validate outputs/working/geofabric.gpkg
+python -m hy_features.validate outputs/working/geofabric_aggregated.gpkg --external outputs/working/geofabric.gpkg
+```
+
+The check also runs after every export and prints `PASS` / `FAIL` with each error and warning.
 
 ## Downstream model remapping
 
@@ -252,8 +317,11 @@ Use `--preset taudem_raw` for minimal TauDEM naming. Add custom presets or `--ov
 |--------|------|
 | `hy_features/schema.py` | Column names, type codes, vocabulary |
 | `hy_features/enrich.py` | Add HY columns to pipeline GeoDataFrames |
-| `hy_features/network.py` | Nexuses, dendritic table, waterbody links, gauge positioning |
+| `hy_features/network.py` | Nexuses and their hydro locations, channel network, dendritic table, waterbody links, gauge positioning |
+| `hy_features/tables.py` | Holistic catchment and link tables |
 | `hy_features/assemble.py` | Full layer assembly and export |
+| `hy_features/aggregate.py` | Aggregated-basin product with containment links |
+| `hy_features/validate.py` | Automated conformance check |
 | `hy_features/implementation_schema.json` | Machine-readable layer/column schema |
 | `hy_features/stamp.py` | Profile metadata (`network_id`, `feature_id`, URIs) |
 | `hy_features/field_remap.py` | Canonical → model-specific export |

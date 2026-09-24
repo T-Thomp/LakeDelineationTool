@@ -48,6 +48,12 @@ class CatchmentRegistry:
     entries: list[CatchmentRealization] = field(default_factory=list)
     associations: list[CatchmentAssociation] = field(default_factory=list)
     catchments: dict[str, Catchment] = field(default_factory=dict)
+    containments: list[tuple[str, str]] = field(default_factory=list)
+
+    def contain(self, containing_id: str, contained_id: str) -> None:
+        """Record ``containing_id`` containedCatchment ``contained_id`` (both must exist)."""
+        if containing_id in self.catchments and contained_id in self.catchments:
+            self.containments.append((containing_id, contained_id))
 
     def add_catchment(
         self,
@@ -140,6 +146,10 @@ class CatchmentRegistry:
                     "role": a.role,
                 }
                 for a in self.associations
+            ],
+            "containments": [
+                {"containing_catchment_id": parent, "contained_catchment_id": child}
+                for parent, child in self.containments
             ],
         }
 

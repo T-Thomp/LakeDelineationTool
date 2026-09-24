@@ -103,7 +103,7 @@ def _parse_downstream_id(down_val: object, outlet_sentinel: int) -> str:
     try:
         down_num = float(text)
     except ValueError:
-        return ""
+        return text
     if down_num <= 0 or down_num == outlet_sentinel:
         return ""
     return text
@@ -230,32 +230,154 @@ def build_reach_outlets(
 def build_hydro_nexus_layer(
     streams: gpd.GeoDataFrame,
     outlet_sentinel: int = DEFAULT_OUTLET_SENTINEL,
-) -> gpd.GeoDataFrame:
+) -> pd.DataFrame:
     """
-    Build HY_HydroNexus points (HY_Features Section 7.3.2).
+    Build the HY_HydroNexus table (HY_Features Section 7.3.2).
 
     One nexus per receiving catchment, shared by every catchment that drains into
     it (``contributingCatchment`` 0..*), plus one terminal nexus per domain outlet.
-    The point is the outlet of the first contributing reach (by id).
+    Nexuses are topological and carry no geometry; their locations are the
+    ``HY_HydroLocation`` realizations from :func:`build_nexus_hydro_locations`.
     """
-    outlets = build_reach_outlets(streams, outlet_sentinel)
-    columns = [NEXUS_ID, HYF_TYPE, HYF_TYPE_URI, CONTRIBUTING_CATCHMENT_ID,
-               RECEIVING_CATCHMENT_ID, "geometry"]
-    if outlets.empty:
-        return gpd.GeoDataFrame(columns=columns, geometry="geometry", crs=streams.crs)
+    lower_map = build_lower_map(streams, outlet_sentinel)
+    columns = [NEXUS_ID, HYF_TYPE, HYF_TYPE_URI, CONTRIBUTING_CATCHMENT_ID, RECEIVING_CATCHMENT_ID]
 
-    records: list[dict] = []
-    for nexus_id, group in outlets.groupby(NEXUS_ID, sort=False):
-        group = group.sort_values(CATCHMENT_ID, key=lambda s: s.map(_id_sort_key))
-        records.append({
+    contributors: dict[str, list[str]] = defaultdict(list)
+    receiving: dict[str, str] = {}
+    for cid, lower in lower_map.items():
+        nexus_id = outflow_nexus_id_for(cid, lower)
+        contributors[nexus_id].append(cid)
+        receiving[nexus_id] = lower
+
+    records = [
+        {
             NEXUS_ID: nexus_id,
             HYF_TYPE: HY_HYDRO_NEXUS,
             HYF_TYPE_URI: hyf_type_uri(HY_HYDRO_NEXUS),
-            CONTRIBUTING_CATCHMENT_ID: ",".join(group[CATCHMENT_ID]),
-            RECEIVING_CATCHMENT_ID: group[RECEIVING_CATCHMENT_ID].iloc[0],
+            CONTRIBUTING_CATCHMENT_ID: ",".join(sorted(cids, key=_id_sort_key)),
+            RECEIVING_CATCHMENT_ID: receiving[nexus_id],
+        }
+        for nexus_id, cids in contributors.items()
+    ]
+    return pd.DataFrame(records, columns=columns)
+
+
+def _lake_catchments(basins: gpd.GeoDataFrame | None) -> dict[str, str]:
+    """Lake-merged catchment id -> waterbody id."""
+    from hy_features.schema import IS_LAKE_CATCHMENT
+
+    if basins is None or IS_LAKE_CATCHMENT not in basins.columns or WATERBODY_ID not in basins.columns:
+        return {}
+    lakes = basins[pd.to_numeric(basins[IS_LAKE_CATCHMENT], errors="coerce").fillna(0) > 0]
+    return {
+        normalize_id(cid): normalize_id(wb)
+        for cid, wb in zip(lakes[CATCHMENT_ID], lakes[WATERBODY_ID])
+        if normalize_id(wb)
+    }
+
+
+def build_nexus_hydro_locations(
+    streams: gpd.GeoDataFrame,
+    basins: gpd.GeoDataFrame | None = None,
+    outlet_sentinel: int = DEFAULT_OUTLET_SENTINEL,
+) -> gpd.GeoDataFrame:
+    """
+    HY_HydroLocation points realizing every nexus (``nexusRealization``).
+
+    Contributing reach outlets that coincide are merged into one location. A nexus
+    whose contributors reach it at different places (tributaries entering a lake
+    catchment along its shore) gets one location per distinct point. Types follow
+    Annex B.1: ``confluence``, ``river mouth`` (flow entering a lake catchment), or
+    ``catchment outlet``.
+    """
+    from hy_features.schema import (
+        FEATURE_NAME,
+        HY_HYDRO_LOCATION,
+        HYDRO_LOC_CATCHMENT_OUTLET,
+        HYDRO_LOC_CONFLUENCE,
+        HYDRO_LOC_RIVER_MOUTH,
+        HYDRO_LOC_TYPE,
+    )
+
+    columns = [HYF_TYPE, HYF_TYPE_URI, HYDRO_LOC_TYPE, REALIZED_NEXUS_ID,
+               CONTRIBUTING_CATCHMENT_ID, WATERBODY_ID, FEATURE_NAME, "geometry"]
+    outlets = build_reach_outlets(streams, outlet_sentinel)
+    if outlets.empty:
+        return gpd.GeoDataFrame(columns=columns, geometry="geometry", crs=streams.crs)
+
+    lake_wb = _lake_catchments(basins)
+    outlets = outlets.assign(
+        _x=outlets.geometry.x.round(3),
+        _y=outlets.geometry.y.round(3),
+    )
+
+    records: list[dict] = []
+    for (nexus_id, _, _), group in outlets.groupby([NEXUS_ID, "_x", "_y"], sort=False):
+        cids = sorted(group[CATCHMENT_ID], key=_id_sort_key)
+        receiving = group[RECEIVING_CATCHMENT_ID].iloc[0]
+        if not receiving:
+            loc_type = HYDRO_LOC_CATCHMENT_OUTLET
+        elif receiving in lake_wb:
+            loc_type = HYDRO_LOC_RIVER_MOUTH
+        elif len(cids) >= 2:
+            loc_type = HYDRO_LOC_CONFLUENCE
+        else:
+            loc_type = HYDRO_LOC_CATCHMENT_OUTLET
+
+        if loc_type == HYDRO_LOC_RIVER_MOUTH:
+            wb = lake_wb[receiving]
+        else:
+            wb = next((lake_wb[c] for c in cids if c in lake_wb), "")
+
+        records.append({
+            HYF_TYPE: HY_HYDRO_LOCATION,
+            HYF_TYPE_URI: hyf_type_uri(HY_HYDRO_LOCATION),
+            HYDRO_LOC_TYPE: loc_type,
+            REALIZED_NEXUS_ID: nexus_id,
+            CONTRIBUTING_CATCHMENT_ID: ",".join(cids),
+            WATERBODY_ID: wb,
+            FEATURE_NAME: "",
             "geometry": group.geometry.iloc[0],
         })
     return gpd.GeoDataFrame(records, columns=columns, geometry="geometry", crs=streams.crs)
+
+
+def build_channel_network(
+    streams: gpd.GeoDataFrame,
+    network_id: str,
+    domain_catchment_id: str,
+) -> gpd.GeoDataFrame:
+    """Single HY_ChannelNetwork feature realizing the study-domain catchment."""
+    from shapely.geometry import MultiLineString
+
+    from hy_features.schema import (
+        CHANNEL_NETWORK_ID,
+        HY_CHANNEL_NETWORK,
+        REALIZES_CATCHMENT,
+    )
+
+    parts: list[LineString] = []
+    for geom in streams.geometry:
+        if geom is None or geom.is_empty:
+            continue
+        if geom.geom_type == "LineString":
+            parts.append(geom)
+        elif geom.geom_type == "MultiLineString":
+            parts.extend(geom.geoms)
+
+    return gpd.GeoDataFrame(
+        [{
+            CHANNEL_NETWORK_ID: f"{network_id}_channels",
+            HYF_TYPE: HY_CHANNEL_NETWORK,
+            HYF_TYPE_URI: hyf_type_uri(HY_CHANNEL_NETWORK),
+            REALIZES_CATCHMENT: domain_catchment_id,
+            "drainage_pattern": DRAINAGE_PATTERN,
+            "flowpath_count": len(streams),
+            "geometry": MultiLineString(parts) if parts else None,
+        }],
+        geometry="geometry",
+        crs=streams.crs,
+    )
 
 
 def _link_nexuses(
@@ -519,41 +641,50 @@ def filter_placed_hydrometric(
     return placed, skipped
 
 
-def link_hydro_locations_to_nexus(
-    hydro_locations: gpd.GeoDataFrame,
-    streams: gpd.GeoDataFrame,
-    outlet_sentinel: int = DEFAULT_OUTLET_SENTINEL,
+def merge_pour_points_into_hydro_locations(
+    network_locations: gpd.GeoDataFrame,
+    pour_points: gpd.GeoDataFrame,
     snap_distance_m: float = HYDRO_LOCATION_SNAP_M,
-) -> gpd.GeoDataFrame:
+) -> tuple[gpd.GeoDataFrame, int]:
     """
-    Set ``realized_nexus_id`` on pour points (``HY_HydroLocation.realizedNexus``).
+    Add pour points that are not already represented by a nexus realization.
 
-    Each point realizes the outflow nexus of the reach whose outlet is nearest,
-    when that outlet lies within ``snap_distance_m``; otherwise it is left empty
-    (a hydro location need not realize a nexus).
+    A pour point within ``snap_distance_m`` of a network hydro location realizes
+    the same nexus and is dropped as a duplicate. The others are kept with an
+    empty ``realized_nexus_id`` (a hydro location need not realize a nexus).
+    Returns ``(combined_locations, n_duplicates_dropped)``.
     """
-    out = hydro_locations.copy()
-    out[REALIZED_NEXUS_ID] = ""
-    if out.empty:
-        return out
+    extra = pour_points.copy()
+    extra[REALIZED_NEXUS_ID] = ""
+    if extra.empty:
+        return network_locations, 0
 
-    outlets = build_reach_outlets(streams, outlet_sentinel)
-    if outlets.empty:
-        return out
-    outlets_w = _projected(outlets)
-    locs_w = _projected(hydro_locations, outlets_w.crs)
+    duplicate = pd.Series(False, index=extra.index)
+    if not network_locations.empty:
+        net_w = _projected(network_locations)
+        pts_w = _projected(pour_points, net_w.crs)
+        valid = pts_w.geometry.notna() & ~pts_w.geometry.is_empty
+        positions = [i for i, ok in enumerate(valid) if ok]
+        if positions:
+            (pt_idx, _), dists = net_w.sindex.nearest(
+                pts_w.geometry.iloc[positions].values, return_all=False, return_distance=True,
+            )
+            for p, d in zip(pt_idx, dists):
+                if float(d) <= snap_distance_m:
+                    duplicate.iloc[positions[int(p)]] = True
 
-    valid = locs_w.geometry.notna() & ~locs_w.geometry.is_empty
-    positions = [i for i, ok in enumerate(valid) if ok]
-    if not positions:
-        return out
-    (pt_idx, outlet_idx), dists = outlets_w.sindex.nearest(
-        locs_w.geometry.iloc[positions].values, return_all=False, return_distance=True,
+    kept = extra[~duplicate.to_numpy()]
+    if network_locations.crs is not None and kept.crs != network_locations.crs:
+        kept = kept.to_crs(network_locations.crs)
+    for col in network_locations.columns:
+        if col not in kept.columns:
+            kept[col] = ""
+    combined = gpd.GeoDataFrame(
+        pd.concat([network_locations, kept[list(network_locations.columns)]], ignore_index=True),
+        geometry="geometry",
+        crs=network_locations.crs,
     )
-    for p, o, d in zip(pt_idx, outlet_idx, dists):
-        if float(d) <= snap_distance_m:
-            out.at[out.index[positions[int(p)]], REALIZED_NEXUS_ID] = outlets_w.iloc[int(o)][NEXUS_ID]
-    return out
+    return combined, int(duplicate.sum())
 
 
 def build_dendritic_catchment_table(
@@ -589,8 +720,10 @@ def build_hydrographic_network_metadata(
     waterbodies: gpd.GeoDataFrame | None,
     network_id: str = "study_hydrographic_network",
     basins: gpd.GeoDataFrame | None = None,
-    nexus: gpd.GeoDataFrame | None = None,
+    nexus: pd.DataFrame | None = None,
     outlet_sentinel: int = DEFAULT_OUTLET_SENTINEL,
+    domain_catchment_id: str = "domain",
+    channel_network_id: str | None = None,
 ) -> dict:
     """HY_HydrographicNetwork metadata record (Section 7.4.2)."""
     link_col = _link_col(streams)
@@ -623,8 +756,9 @@ def build_hydrographic_network_metadata(
         NETWORK_ID: network_id,
         "hyf_type": HY_HYDROGRAPHIC_NETWORK,
         "hyf_type_uri": hyf_type_uri(HY_HYDROGRAPHIC_NETWORK),
-        "realized_catchment": outlet_catchments,
-        "channel_network_drainage_pattern": DRAINAGE_PATTERN,
+        "realized_catchment": domain_catchment_id,
+        "outlet_catchments": outlet_catchments,
+        "channel_network_id": channel_network_id,
         "flowpath_members": flowpath_ids,
         "waterbody_members": wb_list,
         "flowpath_count": len(flowpath_ids),

@@ -25,6 +25,8 @@ HY_IMPOUNDMENT: Final[str] = "HY_Impoundment"
 HY_RESERVOIR: Final[str] = "HY_Reservoir"
 HY_HYDRO_NEXUS: Final[str] = "HY_HydroNexus"
 HY_HYDROGRAPHIC_NETWORK: Final[str] = "HY_HydrographicNetwork"
+HY_CHANNEL_NETWORK: Final[str] = "HY_ChannelNetwork"
+HY_CATCHMENT_AGGREGATE: Final[str] = "HY_CatchmentAggregate"
 HY_INDIRECT_POSITION: Final[str] = "HY_IndirectPosition"
 
 # ---------------------------------------------------------------------------
@@ -53,6 +55,22 @@ RECEIVING_CATCHMENT_ID: Final[str] = "receiving_catchment_id"
 
 # HY_DendriticCatchment neighbour association
 UPPER_CATCHMENT_ID: Final[str] = "upper_catchment_id"
+
+# HY_Catchment containingCatchment / containedCatchment ("is-in" hierarchy)
+CONTAINING_CATCHMENT_ID: Final[str] = "containing_catchment_id"
+CONTAINED_CATCHMENT_ID: Final[str] = "contained_catchment_id"
+
+# Registry tables (catchmentRealization and non-realization links)
+REALIZATION_TYPE: Final[str] = "realization_type"
+FEATURE_TYPE: Final[str] = "feature_type"
+ASSOCIATION_ROLE: Final[str] = "role"
+
+# HY_ChannelNetwork realization of the study-domain catchment
+CHANNEL_NETWORK_ID: Final[str] = "channel_network_id"
+
+# Study domain: HY_CatchmentAggregate of every dendritic catchment in the network,
+# realized by the HY_HydrographicNetwork and HY_ChannelNetwork records.
+DEFAULT_DOMAIN_CATCHMENT_ID: Final[str] = "domain"
 
 # HY_WaterBody network navigation (Section 7.4.2)
 UPSTREAM_WATERBODY_ID: Final[str] = "upstream_waterbody_id"

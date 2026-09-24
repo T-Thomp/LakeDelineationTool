@@ -171,22 +171,41 @@ def prepare_shapefile_frame(gdf: gpd.GeoDataFrame, filename: str | Path) -> gpd.
     return out
 
 
+def _has_geometry(frame: pd.DataFrame) -> bool:
+    if not isinstance(frame, gpd.GeoDataFrame):
+        return False
+    try:
+        frame.geometry  # noqa: B018
+    except AttributeError:
+        return False
+    return True
+
+
 def export_geopackage(
-    layers: dict[str, gpd.GeoDataFrame],
+    layers: dict[str, pd.DataFrame],
     output_path: str | Path,
 ) -> None:
-    """Write multiple named layers to a single GeoPackage."""
+    """Write named spatial layers and attribute-only tables to a single GeoPackage."""
+    import pyogrio
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.exists():
         output_path.unlink()
 
     written = 0
-    for layer_name, gdf in layers.items():
-        if gdf is None or gdf.empty:
+    for layer_name, frame in layers.items():
+        if frame is None or frame.empty:
             continue
-        mode = "w" if written == 0 else "a"
-        gdf.to_file(output_path, layer=layer_name, driver="GPKG", mode=mode)
+        if _has_geometry(frame):
+            frame.to_file(output_path, layer=layer_name, driver="GPKG", mode="w" if written == 0 else "a")
+        else:
+            table = pd.DataFrame(frame).copy()
+            for col in table.select_dtypes(include=["object"]).columns:
+                table[col] = table[col].fillna("").astype(str)
+            pyogrio.write_dataframe(
+                table, output_path, layer=layer_name, driver="GPKG", append=written > 0,
+            )
         written += 1
 
 
