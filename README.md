@@ -576,8 +576,8 @@ TauDEM rasters and pass-specific vectors (single copy — not duplicated elsewhe
 
 Merged geofabric before final clean, plus HY sidecars when enabled:
 
-- **`geofabric.gpkg`** — full HY_Features GeoPackage
-- **`catchment_registry.json`** — catchment identity ↔ realization links
+- **`geofabric.gpkg`** — HY_Features profile GeoPackage
+- **`catchment_registry.json`** — catchment identity, realization links, and associations
 - **`hydrographic_network.json`** — dendritic catchment table + network metadata
 
 ## `outputs/prep/`
@@ -588,15 +588,15 @@ Intermediate prep layers: lakes, gauges, selected outlets, reservoir IO nodes.
 
 # OGC HY_Features alignment (in development / work in progress)
 
-HY_Features enrichment is **off by default**. Enable it for `geofabric.gpkg`, HY columns, and JSON sidecars:
+HY_Features enrichment is **off by default**. Enable it for `geofabric.gpkg` and JSON sidecars (shapefiles always keep TauDEM / MESH column names only):
 
 ```bash
 export HY_FEATURES_ENABLED=1   # or set ENABLE_HY_FEATURES = True in a script
 ```
 
-When enabled, outputs implement the [OGC HY_Features conceptual model (14-111r6)](https://docs.ogc.org/is/14-111r6/14-111r6.html) as an **implementation schema** under profile **`LakeDelineationTool-DendriticGeofabric-1.0`**.
+When enabled, outputs implement a scoped subset of the [OGC HY_Features conceptual model (14-111r6)](https://docs.ogc.org/is/14-111r6/14-111r6.html) as an **implementation schema** under profile **`LakeDelineationTool-DendriticGeofabric-1.0`** (self-assessed against conformance class `/conf/hy_features_conceptual_model`).
 
-See [`docs/hy_features_mapping.md`](docs/hy_features_mapping.md) and [`docs/hy_features_implementation_conventions.md`](docs/hy_features_implementation_conventions.md).
+See [`docs/hy_features_conformance_profile.md`](docs/hy_features_conformance_profile.md), [`docs/hy_features_mapping.md`](docs/hy_features_mapping.md), and [`docs/hy_features_implementation_conventions.md`](docs/hy_features_implementation_conventions.md).
 
 ## Downstream model remapping
 
