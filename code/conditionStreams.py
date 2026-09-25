@@ -4,8 +4,10 @@ Stream flow-direction conditioning along user-defined valley paths.
 Called by Delineation-Workflow.slurm right after conditionLakes.py and before
 TauDEM Pass 2. For each start/end coordinate pair in a CSV, it finds the
 lowest-cost 8-direction path between the two points across a DEM cost surface
-that favours valley bottoms and downhill steps, then rewrites flow directions
-in ``fdr_lakes.tif`` so water follows that path from start to end.
+that favours valley bottoms, downhill steps, and keeping a steady direction,
+then rewrites flow directions in ``fdr_lakes.tif`` so water follows that path
+from start to end. Cells on either side of the path are pointed into it, so
+flow cannot jump across a diagonal step.
 
 Use it where TauDEM routes a stream the wrong way (e.g. through a road fill,
 dam, or DEM artifact) and you know where the stream should go.
@@ -68,6 +70,9 @@ UPHILL_PENALTY = 1000.0
 # Small pull toward the end point so the path does not wander on flat ground.
 # Added per cell as DIST_WEIGHT * distance_to_end / max_distance. Set to 0 to disable.
 DIST_WEIGHT = 0.5
+# Extra cost for changing D8 direction. A stair-step is otherwise cheaper than a
+# straight diagonal, which makes the channel look jagged.
+TURN_PENALTY = 0.75
 
 # Max D8 steps traced downstream from the end cell when checking for flow loops.
 MAX_LOOP_TRACE_STEPS = 1000
@@ -164,60 +169,117 @@ def route_valley_path(dem, valid, start_rc, end_rc):
     Lowest-cost 8-direction path from start_rc to end_rc (Dijkstra).
 
     Step cost = entry cell cost * step length, plus an uphill penalty scaled by
-    the elevation gained relative to the window relief. Returns the list of
-    (row, col) cells from start to end, or None if the end is unreachable.
+    the elevation gained relative to the window relief, plus TURN_PENALTY when
+    the step changes direction. Returns the list of (row, col) cells from start
+    to end, or None if the end is unreachable.
     """
     h, w = dem.shape
+    n_dir = len(D8_STEPS)
     cell_cost, z_range = build_cell_cost(dem, valid, end_rc)
     uphill_scale = UPHILL_PENALTY / z_range
 
-    dist = np.full((h, w), np.inf)
-    parent = np.full((h, w), -1, dtype=np.int64)
+    dist = np.full((h, w, n_dir), np.inf)
+    parent_flat = np.full((h, w, n_dir), -1, dtype=np.int64)
+    parent_dir = np.full((h, w, n_dir), -1, dtype=np.int8)
     sr, sc = start_rc
-    dist[sr, sc] = 0.0
-    pq = [(0.0, sr, sc)]
+    pq = []
 
+    def consider(r, c, cdir, prev_flat, prev_dir, step_cost, z_here):
+        nr, nc = r + D8_STEPS[cdir][0], c + D8_STEPS[cdir][1]
+        if not (0 <= nr < h and 0 <= nc < w) or not valid[nr, nc]:
+            return
+        step = cell_cost[nr, nc] * D8_STEPS[cdir][2] + step_cost
+        rise = dem[nr, nc] - z_here
+        if rise > 0:
+            step += uphill_scale * rise
+        new_d = (0.0 if prev_flat < 0 else dist[r, c, prev_dir]) + step
+        if prev_flat < 0:
+            new_d = step
+        if new_d < dist[nr, nc, cdir]:
+            dist[nr, nc, cdir] = new_d
+            parent_flat[nr, nc, cdir] = prev_flat if prev_flat >= 0 else r * w + c
+            parent_dir[nr, nc, cdir] = prev_dir
+            heapq.heappush(pq, (new_d, nr, nc, cdir))
+
+    z_start = dem[sr, sc]
+    for i in range(n_dir):
+        consider(sr, sc, i, -1, -1, 0.0, z_start)
+
+    end_dir = None
     while pq:
-        curr_d, r, c = heapq.heappop(pq)
-        if (r, c) == end_rc:
-            break
-        if curr_d > dist[r, c]:
+        curr_d, r, c, pdir = heapq.heappop(pq)
+        if curr_d > dist[r, c, pdir]:
             continue
+        if (r, c) == end_rc:
+            end_dir = pdir
+            break
         z_here = dem[r, c]
-        for dr, dc, step_len in D8_STEPS:
-            nr, nc = r + dr, c + dc
-            if not (0 <= nr < h and 0 <= nc < w) or not valid[nr, nc]:
-                continue
-            step = cell_cost[nr, nc] * step_len
-            rise = dem[nr, nc] - z_here
-            if rise > 0:
-                step += uphill_scale * rise
-            new_d = curr_d + step
-            if new_d < dist[nr, nc]:
-                dist[nr, nc] = new_d
-                parent[nr, nc] = r * w + c
-                heapq.heappush(pq, (new_d, nr, nc))
+        for i in range(n_dir):
+            turn = 0.0 if i == pdir else TURN_PENALTY
+            consider(r, c, i, r * w + c, pdir, turn, z_here)
 
-    if not np.isfinite(dist[end_rc]):
+    if end_dir is None:
         return None
 
     path = [end_rc]
-    while path[-1] != start_rc:
-        flat = parent[path[-1]]
+    r, c, d = end_rc[0], end_rc[1], end_dir
+    while (r, c) != start_rc:
+        flat = parent_flat[r, c, d]
+        prev_d = int(parent_dir[r, c, d])
         if flat < 0:
             return None
-        path.append(divmod(int(flat), w))
+        r, c = divmod(int(flat), w)
+        path.append((r, c))
+        if prev_d < 0:
+            break
+        d = prev_d
     path.reverse()
     return path
 
 
+def flanking_cells(curr, nxt):
+    """Cells on either side of one path step.
+
+    A diagonal step's other two corners can flow across the channel. An
+    orthogonal step uses the cells directly beside it.
+    """
+    dr = nxt[0] - curr[0]
+    dc = nxt[1] - curr[1]
+    if dr != 0 and dc != 0:
+        return [(curr[0] + dr, curr[1]), (curr[0], curr[1] + dc)]
+    return [
+        (curr[0] - dc, curr[1] + dr),
+        (curr[0] + dc, curr[1] - dr),
+        (nxt[0] - dc, nxt[1] + dr),
+        (nxt[0] + dc, nxt[1] - dr),
+    ]
+
+
 def apply_path_to_fdr(fdr_win, path, lake_mask):
-    """Point each path cell (except the end and lake cells) at the next path cell."""
+    """Point the path downstream, then point both banks into the path."""
     updated = fdr_win.copy()
     for current_rc, next_rc in zip(path[:-1], path[1:]):
         if lake_mask[current_rc]:
             continue
         updated[current_rc] = get_d8_direction(current_rc, next_rc)
+
+    on_path = set(path)
+    order = {rc: i for i, rc in enumerate(path)}
+    h, w = updated.shape
+    for curr, nxt in zip(path[:-1], path[1:]):
+        for side in flanking_cells(curr, nxt):
+            r, c = side
+            if not (0 <= r < h and 0 <= c < w) or lake_mask[r, c] or side in on_path:
+                continue
+            choices = [
+                (r + dr, c + dc)
+                for dr, dc in D8_DIRS
+                if (r + dr, c + dc) in order
+            ]
+            if not choices:
+                continue
+            target = max(choices, key=order.get)
+            updated[r, c] = get_d8_direction(side, target)
     return updated
 
 
