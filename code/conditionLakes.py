@@ -387,11 +387,9 @@ def compute_override_breakout_path(
             lake_mask,
             max_trace_steps,
         )
+        # A tip that never reaches the stream network is a sink (or leaves the
+        # window). Keep carving so that cell is given a direction downstream.
         if hit_link is None:
-            # Flow no longer re-enters the lake but the tip is still off-network;
-            # accept when anchored to a nearby stream exit (same as legacy short breakout).
-            if ref_link > 0:
-                return breakout_path, True, ref_link
             continue
 
         if is_acceptable_outflow_link(
