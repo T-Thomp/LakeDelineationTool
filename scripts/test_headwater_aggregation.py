@@ -76,13 +76,13 @@ def check(name: str, rows: list[dict], expected: dict[int, set[int]], **kwargs) 
 
 def main() -> None:
   check(
-    "two headwaters: longer into shorter",
+    "two headwaters: shorter into longer",
     [
       {"id": 1, "down": 3, "area": 30, "length_km": 5},
       {"id": 2, "down": 3, "area": 200, "length_km": 2},
       {"id": 3, "down": OUT, "area": 500},
     ],
-    {2: {1, 2}, 3: {3}},
+    {1: {1, 2}, 3: {3}},
   )
   check(
     "3+ inflows, one non-headwater",
@@ -108,14 +108,14 @@ def main() -> None:
     {20: {20}, 21: {21}, 22: {22}, 23: {23, 24}, 26: {26}},
   )
   check(
-    "3+ all headwaters: into shortest",
+    "3+ all headwaters: into longest",
     [
       {"id": 31, "down": 34, "area": 40, "length_km": 3},
       {"id": 32, "down": 34, "area": 150, "length_km": 1},
       {"id": 33, "down": 34, "area": 60, "length_km": 2},
       {"id": 34, "down": OUT, "area": 500},
     ],
-    {32: {31, 32, 33}, 34: {34}},
+    {31: {31, 33}, 32: {32}, 34: {34}},
   )
   check(
     "gauge headwater is not merged sideways",
@@ -187,7 +187,7 @@ def main() -> None:
       {"id": 94, "down": 95, "area": 300, "length_km": 5},
       {"id": 95, "down": OUT, "area": 500},
     ],
-    {93: {91, 92, 93, 94}, 95: {95}},
+    {94: {91, 92, 93, 94}, 95: {95}},
   )
   print("All tests passed.")
 
