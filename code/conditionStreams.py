@@ -4,7 +4,7 @@ Stream flow-direction conditioning along user-defined valley paths.
 Called by Delineation-Workflow.slurm right after conditionLakes.py and before
 TauDEM Pass 2. For each start/end coordinate pair in a CSV, it finds the
 lowest-cost 8-direction path between the two points across a DEM cost surface
-that favours valley bottoms, downhill steps, and keeping a steady direction,
+that favours valley bottoms and downhill steps,
 then rewrites flow directions in ``fdr_lakes.tif`` so water follows that path
 from start to end. Cells on either side of the path are pointed into it, so
 flow cannot jump across a diagonal step.
@@ -62,7 +62,7 @@ BUFFER_CELLS = 50            # cells added around the start/end bounding box
 # so the new path leaves the existing channel. Farther points are used as given.
 INFLOW_SNAP_CELLS = 10
 BASE_COST = 1.0              # cost of one straight step on the valley floor
-VALLEY_SCALE = 100.0         # how strongly high ground is avoided
+VALLEY_SCALE = 400.0         # how strongly high ground is avoided
 VALLEY_POWER = 2.0           # >1 keeps the valley floor cheap and walls steep
 # Climbing costs UPHILL_PENALTY per full window relief, so water-like downhill
 # routes win over shortcuts that go up and over a rise.
@@ -70,9 +70,6 @@ UPHILL_PENALTY = 1000.0
 # Small pull toward the end point so the path does not wander on flat ground.
 # Added per cell as DIST_WEIGHT * distance_to_end / max_distance. Set to 0 to disable.
 DIST_WEIGHT = 0.5
-# Extra cost for changing D8 direction. A stair-step is otherwise cheaper than a
-# straight diagonal, which makes the channel look jagged.
-TURN_PENALTY = 0.75
 
 # Max D8 steps traced downstream from the end cell when checking for flow loops.
 MAX_LOOP_TRACE_STEPS = 1000
@@ -169,70 +166,49 @@ def route_valley_path(dem, valid, start_rc, end_rc):
     Lowest-cost 8-direction path from start_rc to end_rc (Dijkstra).
 
     Step cost = entry cell cost * step length, plus an uphill penalty scaled by
-    the elevation gained relative to the window relief, plus TURN_PENALTY when
-    the step changes direction. Returns the list of (row, col) cells from start
-    to end, or None if the end is unreachable.
+    the elevation gained relative to the window relief. Returns the list of
+    (row, col) cells from start to end, or None if the end is unreachable.
     """
     h, w = dem.shape
-    n_dir = len(D8_STEPS)
     cell_cost, z_range = build_cell_cost(dem, valid, end_rc)
     uphill_scale = UPHILL_PENALTY / z_range
 
-    dist = np.full((h, w, n_dir), np.inf)
-    parent_flat = np.full((h, w, n_dir), -1, dtype=np.int64)
-    parent_dir = np.full((h, w, n_dir), -1, dtype=np.int8)
+    dist = np.full((h, w), np.inf)
+    parent = np.full((h, w), -1, dtype=np.int64)
     sr, sc = start_rc
-    pq = []
+    dist[sr, sc] = 0.0
+    pq = [(0.0, sr, sc)]
 
-    def consider(r, c, cdir, prev_flat, prev_dir, step_cost, z_here):
-        nr, nc = r + D8_STEPS[cdir][0], c + D8_STEPS[cdir][1]
-        if not (0 <= nr < h and 0 <= nc < w) or not valid[nr, nc]:
-            return
-        step = cell_cost[nr, nc] * D8_STEPS[cdir][2] + step_cost
-        rise = dem[nr, nc] - z_here
-        if rise > 0:
-            step += uphill_scale * rise
-        new_d = (0.0 if prev_flat < 0 else dist[r, c, prev_dir]) + step
-        if prev_flat < 0:
-            new_d = step
-        if new_d < dist[nr, nc, cdir]:
-            dist[nr, nc, cdir] = new_d
-            parent_flat[nr, nc, cdir] = prev_flat if prev_flat >= 0 else r * w + c
-            parent_dir[nr, nc, cdir] = prev_dir
-            heapq.heappush(pq, (new_d, nr, nc, cdir))
-
-    z_start = dem[sr, sc]
-    for i in range(n_dir):
-        consider(sr, sc, i, -1, -1, 0.0, z_start)
-
-    end_dir = None
     while pq:
-        curr_d, r, c, pdir = heapq.heappop(pq)
-        if curr_d > dist[r, c, pdir]:
-            continue
+        curr_d, r, c = heapq.heappop(pq)
         if (r, c) == end_rc:
-            end_dir = pdir
             break
+        if curr_d > dist[r, c]:
+            continue
         z_here = dem[r, c]
-        for i in range(n_dir):
-            turn = 0.0 if i == pdir else TURN_PENALTY
-            consider(r, c, i, r * w + c, pdir, turn, z_here)
+        for dr, dc, step_len in D8_STEPS:
+            nr, nc = r + dr, c + dc
+            if not (0 <= nr < h and 0 <= nc < w) or not valid[nr, nc]:
+                continue
+            step = cell_cost[nr, nc] * step_len
+            rise = dem[nr, nc] - z_here
+            if rise > 0:
+                step += uphill_scale * rise
+            new_d = curr_d + step
+            if new_d < dist[nr, nc]:
+                dist[nr, nc] = new_d
+                parent[nr, nc] = r * w + c
+                heapq.heappush(pq, (new_d, nr, nc))
 
-    if end_dir is None:
+    if not np.isfinite(dist[end_rc]):
         return None
 
     path = [end_rc]
-    r, c, d = end_rc[0], end_rc[1], end_dir
-    while (r, c) != start_rc:
-        flat = parent_flat[r, c, d]
-        prev_d = int(parent_dir[r, c, d])
+    while path[-1] != start_rc:
+        flat = parent[path[-1]]
         if flat < 0:
             return None
-        r, c = divmod(int(flat), w)
-        path.append((r, c))
-        if prev_d < 0:
-            break
-        d = prev_d
+        path.append(divmod(int(flat), w))
     path.reverse()
     return path
 
