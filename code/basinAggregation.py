@@ -89,6 +89,7 @@ UP_AREA = "DSContArea"            # cumulative drainage area at the pour point (
 US_AREA = "USContArea"            # cumulative area at the upstream end of the reach (m²)
 SLOPE = "Slope"
 LENGTH = "Length"                 # reach length (m)
+STRAIGHT_LEN = "StraightL"        # straight-line distance between reach endpoints (m)
 STRM_DROP = "strmDrop"            # reach elevation drop (m)
 US_LINK_COLS = ("USLINKNO1", "USLINKNO2")
 
@@ -593,6 +594,22 @@ def _merge_lines(geom):
   return merged if not merged.is_empty else geom
 
 
+def _straight_length(geom) -> float:
+  """Distance between the first and last vertex of a reach."""
+  if geom is None or geom.is_empty:
+    return 0.0
+  if geom.geom_type == "MultiLineString":
+    coords = [xy for part in geom.geoms for xy in part.coords]
+  elif geom.geom_type == "LineString":
+    coords = list(geom.coords)
+  else:
+    return 0.0
+  if len(coords) < 2:
+    return 0.0
+  (x0, y0), (x1, y1) = coords[0][:2], coords[-1][:2]
+  return float(((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5)
+
+
 def _validate_topology(
   basins: gpd.GeoDataFrame, rivers: gpd.GeoDataFrame, outlet_value: int
 ) -> None:
@@ -663,6 +680,8 @@ def build_outputs(
   agg_river = river.dissolve(by="agg", aggfunc=_stream_dissolve_aggfunc(river), as_index=False)
   agg_river = agg_river.rename(columns={"agg": RIVER_ID})
   agg_river["geometry"] = agg_river.geometry.map(_merge_lines)
+  if STRAIGHT_LEN in agg_river.columns:
+    agg_river[STRAIGHT_LEN] = agg_river.geometry.map(_straight_length)
   agg_river[NEXT_DOWN_ID] = agg_river[RIVER_ID].map(g.down).astype("int64")
   agg_river[SLOPE] = _slope_from_strm_drop_and_length(
     agg_river[LENGTH], agg_river[STRM_DROP], min_riv_slope
