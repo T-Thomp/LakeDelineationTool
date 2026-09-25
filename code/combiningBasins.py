@@ -38,6 +38,7 @@ C. INTERNAL LINK IDENTIFICATION ("swallow" set)
 
 D. STREAM TOPOLOGY REWIRING & HYDROMETRIC AGGREGATION
    dissolve() internal links by merged_ID (winning outlet LINKNO)
+   StraightL is set afterward from the merged line's endpoints
    compute_lake_path_metrics() traces the longest inflow-to-outlet path through
      each lake and recalculates Length, strmDrop, StraightL, DOUTEND/START/MID,
      and Slope for the merged link
@@ -68,6 +69,7 @@ import os
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import shapely
 from shapely.geometry import Point
 
 from outlet_overrides import load_overrides
@@ -406,8 +408,6 @@ def compute_lake_path_metrics(links, target_exit, streams_work, down_map):
 
       Length    - sum of segment lengths along the path
       strmDrop  - sum of segment strmDrop values
-      StraightL - straight-line distance from upstream end (coords[-1]) of the first
-                  segment to downstream end (coords[0]) of the last segment
       DOUTEND   - minimum DOUTEND among path segments (most downstream point)
       DOUTSTART - DOUTEND + Length
       DOUTMID   - average of DOUTSTART and DOUTEND
@@ -423,7 +423,6 @@ def compute_lake_path_metrics(links, target_exit, streams_work, down_map):
     best_path_metrics = {
         "Length": 0.0,
         "strmDrop": 0.0,
-        "StraightL": 0.0,
         "DOUTEND": 0.0,
         "DOUTSTART": 0.0,
         "DOUTMID": 0.0,
@@ -452,10 +451,6 @@ def compute_lake_path_metrics(links, target_exit, streams_work, down_map):
             else 0.0
         )
 
-        start_geom = path_segments[0].geometry
-        end_geom = path_segments[-1].geometry
-        path_straight = Point(start_geom.coords[-1]).distance(Point(end_geom.coords[0]))
-
         path_dout_end = (
             min(seg["DOUTEND"] for seg in path_segments)
             if "DOUTEND" in path_segments[0]
@@ -469,7 +464,6 @@ def compute_lake_path_metrics(links, target_exit, streams_work, down_map):
             best_path_metrics = {
                 "Length": path_length,
                 "strmDrop": path_drop,
-                "StraightL": path_straight,
                 "DOUTEND": path_dout_end,
                 "DOUTSTART": path_dout_start,
                 "DOUTMID": path_dout_mid,
@@ -493,6 +487,26 @@ def build_stream_agg_logic(streams):
         "strmOrder": "max",
     })
     return agg_logic
+
+
+def straight_length(geom):
+    """Distance between the first and last vertex of a reach."""
+    if geom is None or geom.is_empty:
+        return 0.0
+    if geom.geom_type == "MultiLineString":
+        merged = shapely.line_merge(geom)
+        if not merged.is_empty:
+            geom = merged
+    if geom.geom_type == "MultiLineString":
+        coords = [xy for part in geom.geoms for xy in part.coords]
+    elif geom.geom_type == "LineString":
+        coords = list(geom.coords)
+    else:
+        return 0.0
+    if len(coords) < 2:
+        return 0.0
+    (x0, y0), (x1, y1) = coords[0][:2], coords[-1][:2]
+    return float(((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5)
 
 
 def apply_lake_metrics(streams_dissolved, lake_metrics):
@@ -701,6 +715,8 @@ def process_reservoir_basins():
     # Redirect any DSLINKNO that pointed to a swallowed link to the merged winner ID
     streams_dissolved["DSLINKNO"] = streams_dissolved["DSLINKNO"].replace(swallowed_map)
     streams_dissolved = streams_dissolved.drop(columns=["USLINKNO1", "USLINKNO2"], errors="ignore")
+    if "StraightL" in streams_dissolved.columns:
+        streams_dissolved["StraightL"] = streams_dissolved.geometry.map(straight_length)
 
     # --- E. Assemble final basin fabric ---
     # Drop every swallowed subbasin, then append one merged reservoir polygon per lake.
