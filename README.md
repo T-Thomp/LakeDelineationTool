@@ -46,10 +46,10 @@ module save scimods    # optional; restored by Delineation-Workflow.slurm
 | Software | Purpose (FIR) |
 |----------|----------------|
 | **GDAL 3.9.1** | `gdal_polygonize.py`; pip `GDAL==3.9.1` must match the loaded module |
-| **mpi4py 4.0.0** | `rasterFlowpathEdit.py` MPI — module load only |
-| **Slurm** | `sbatch`, `srun` — TauDEM MPI passes and `rasterFlowpathEdit.py` |
+| **mpi4py 4.0.0** | `conditionLakes.py` MPI — module load only |
+| **Slurm** | `sbatch`, `srun` — TauDEM MPI passes and `conditionLakes.py` |
 
-TauDEM Pass 1–3 invoke MPI tools via `srun` with `#SBATCH --ntasks=250`. `rasterFlowpathEdit.py` uses a **separate** smaller `srun` launch (`FLOWPATH_NCORES`).
+TauDEM Pass 1–3 invoke MPI tools via `srun` with `#SBATCH --ntasks=250`. `conditionLakes.py` uses a **separate** smaller `srun` launch (`FLOWPATH_NCORES`).
 
 ### Python venv (FIR)
 
@@ -81,18 +81,18 @@ Adapt `module restore scimods` in `Delineation-Workflow.slurm` to your site’s 
 
 | Package | Version | Used by |
 |---------|---------|---------|
-| **GDAL** | 3.9.1 | `osgeo` raster I/O (`rasterFlowpathEdit.py`, `pourPointsPass2.py`) |
+| **GDAL** | 3.9.1 | `osgeo` raster I/O (`conditionLakes.py`, `pourPointsPass2.py`) |
 | **geopandas** | 1.0.1 | Vector scripts; shapefile / GeoPackage I/O |
 | **pandas** | 2.2.3 | Attribute tables, registry JSON |
 | **numpy** | 1.26.4 | Raster arrays, basin metrics |
-| **scipy** | 1.15.2 | `ndimage` in `rasterFlowpathEdit.py`, `pourPointsPass2.py` |
+| **scipy** | 1.15.2 | `ndimage` in `conditionLakes.py`, `pourPointsPass2.py` |
 | **shapely** | 2.0.7 | Geometry ops |
 | **fiona** | 1.10.1 | Shapefile driver (geopandas) |
 | **pyogrio** | 0.10.0 | GeoPackage / fast vector I/O (geopandas) |
 | **pyproj** | 3.7.1 | CRS transforms (geopandas) |
 | **pytest** | 8.3.4 | `tests/test_hy_features_topology.py` (optional) |
 
-**mpi4py 4.0.0** — required by `rasterFlowpathEdit.py`. On **FIR**: `module load mpi4py/4.0.0` (not pip). Elsewhere: `pip install mpi4py` or your site’s equivalent.
+**mpi4py 4.0.0** — required by `conditionLakes.py`. On **FIR**: `module load mpi4py/4.0.0` (not pip). Elsewhere: `pip install mpi4py` or your site’s equivalent.
 
 Stdlib only (no pip): `sqlite3` in `getGauges.py`, `hy_features/` JSON export.
 
@@ -120,10 +120,14 @@ Python preprocessing
 • getGauges.py
     Find stream gauges inside the basin
 
-• rasterFlowpathEdit.py
+• conditionLakes.py
     Correct flow directions through reservoirs
     Outputs:
         fdr_lakes.tif
+
+• conditionStreams.py (optional)
+    Force flow along user-defined valley paths
+    Edits fdr_lakes.tif in place
 
        │
        ▼
@@ -174,6 +178,7 @@ study-root/                          ← where you run sbatch
 ├── study_settings.py                ← your paths (copy from study_settings.example.py)
 ├── study_settings.example.py
 ├── outlet_overrides.csv             optional
+├── stream_conditioning.csv          optional
 │
 ├── code/                            ← pipeline scripts (do not edit for new studies)
 │   ├── pipeline_paths.py
@@ -243,7 +248,7 @@ outputs/prep/
 
 ---
 
-### `rasterFlowpathEdit.py`
+### `conditionLakes.py`
 
 Corrects TauDEM D8 flow directions across flat lake surfaces.
 
@@ -260,10 +265,47 @@ Produces:
 ```text
 outputs/interim/taudem_d8/
 └── fdr_lakes.tif
-
-outputs/prep/
-└── selected_outlets.shp
 ```
+
+Options:
+
+- `--ncores N` — MPI worker ranks (capped at the `srun` task count and at the number of lakes being edited).
+- `--option full|override` — `full` (default) rebuilds `fdr_lakes.tif` for every lake. `override` re-runs only the lakes listed in `--csv` and pastes them into the existing `fdr_lakes.tif`, first resetting each re-run lake (plus a small ring for old breakout cells) to the original flow directions.
+- `--csv PATH` — outlet override CSV (`lake_id,lat,lon`; default `./outlet_overrides.csv`).
+
+```bash
+srun --ntasks=4 python3 conditionLakes.py --option override --csv my_fixes.csv --ncores 4
+```
+
+Re-run TauDEM Pass 2 / Pass 3 after an override-only run.
+
+### `conditionStreams.py`
+
+Fixes streams that TauDEM routes the wrong way (road fills, dams, DEM artifacts). Runs right after `conditionLakes.py` and edits `fdr_lakes.tif` in place.
+
+Each row of `stream_conditioning.csv` is one path, from a start point (upstream) to an end point (downstream):
+
+```csv
+id,start_lat,start_lon,end_lat,end_lon
+bow_fix,51.1784,-115.5708,51.1650,-115.5402
+creek_2,50.9021,-114.8810,50.8893,-114.8467
+```
+
+For each row the script:
+
+1. Reprojects both points to the flow-direction grid. Rows with a point outside the raster are skipped.
+2. Takes the rectangle around the two points plus a buffer (`BUFFER_CELLS`, default 50).
+3. Builds a cost surface from the raw DEM: relative elevation in the window (0 on the valley floor, 1 at the highest cell), an uphill penalty, and a small pull toward the end point.
+4. Finds the lowest-cost 8-direction path from start to end, so the path follows the valley the way water would.
+5. Points each path cell's flow direction at the next cell. The end cell keeps its direction, and lake cells are never changed.
+
+A warning is printed if flow leaving the end point runs back onto the path (move the end point further downstream). Weights are constants at the top of the script. If the CSV does not exist, the step is skipped.
+
+```bash
+python3 conditionStreams.py --csv stream_conditioning.csv
+```
+
+Re-run it after any full `conditionLakes.py` run, which rebuilds `fdr_lakes.tif`.
 
 ---
 
@@ -458,7 +500,7 @@ outputs/prep/gauges.shp
 
 ---
 
-## `rasterFlowpathEdit.py`
+## `conditionLakes.py`
 
 Verify:
 
@@ -475,7 +517,20 @@ Outputs:
 
 ```text
 outputs/interim/taudem_d8/fdr_lakes.tif
-outputs/prep/selected_outlets.shp
+```
+
+## `conditionStreams.py`
+
+Verify:
+
+- `stream_conditioning.csv` (optional; step is skipped without it)
+- Raw DEM on the same grid as `fdr_lakes.tif`
+- Filtered lakes (lake cells are protected)
+
+Outputs:
+
+```text
+outputs/interim/taudem_d8/fdr_lakes.tif   (edited in place)
 ```
 
 ---

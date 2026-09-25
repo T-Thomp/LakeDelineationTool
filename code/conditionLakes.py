@@ -1,5 +1,5 @@
 """
-Raster flow-path editor for instream reservoirs.
+Lake flow-direction conditioning for instream reservoirs.
 
 Called by Delineation-Workflow.slurm after TauDEM Pass 1 and the
 filterLakes / getGauges steps. It reads the original TauDEM flow-direction
@@ -37,18 +37,28 @@ Inputs (TauDEM / upstream Python products)
 Output
 ------
   fdr_lakes.tif - flow directions with lake interiors re-routed
+
+Run modes (--option)
+--------------------
+  full (default) - rebuild fdr_lakes.tif from the original FDR for every lake.
+  override       - re-run only the lakes listed in --csv and paste them into the
+                   existing fdr_lakes.tif from a previous full run. Each re-run
+                   lake (plus a small ring for old breakout cells) is first reset
+                   to the original FDR, so edits from the previous outlet choice
+                   do not linger.
+
+  python3 conditionLakes.py --option override --csv my_fixes.csv --ncores 4
 """
 
 import argparse
 import os
 import heapq
 import numpy as np
-import pandas as pd
 import geopandas as gpd
 from osgeo import gdal, ogr, osr
 from shapely import wkt as shapely_wkt
-from shapely.geometry import Point
-from scipy.ndimage import distance_transform_edt, binary_erosion
+from shapely.geometry import Point, box
+from scipy.ndimage import distance_transform_edt, binary_erosion, binary_dilation
 
 from outlet_overrides import load_overrides
 from pipeline_paths import (
@@ -57,7 +67,6 @@ from pipeline_paths import (
     PASS1_WATERSHEDS_TIF,
     PREP_GAUGES,
     PREP_LAKES,
-    PREP_SELECTED_OUTLETS,
     TAUDEM_D8,
     ensure_output_dirs,
 )
@@ -86,15 +95,11 @@ BACKBONE_COST = 0.01               # near-zero cost on the pre-computed spine
 OFF_BACKBONE_BASE_COST = 10.0      # base cost off the spine (margins penalized further)
 SPINE_STEP_BASE_COST = 0.1         # base step cost when building the spine
 
-# Max steps along the override carve ray before falling back to algorithmic outlet
-# selection. Each step is one cell along the outward direction from the lake shore.
-MAX_OVERRIDE_BREAKOUT_STEPS = 100
+# Max exterior cells carved along the override ray before algorithmic fallback.
+OVERRIDE_BREAKOUT_STEPS = 10
 
-# Max outside-lake steps for downstream-basin override short breakout paths.
-MAX_DIRECT_DS_BREAKOUT_STEPS = 5
-
-# Temporary override breakout length until target-link + DEM validation is implemented.
-OVERRIDE_BREAKOUT_STEPS = 3
+# Max D8 steps when tracing from a breakout tip to the stream network.
+MAX_BREAKOUT_TRACE_STEPS = 500
 
 
 def get_d8_offset(fdr_val):
@@ -140,42 +145,27 @@ def _lookup_tables_from_streams_gdf(streams_gdf):
     )
 
 
-def build_lake_through_stream_wsnos(lakes_gdf, streams_gdf):
+def build_lake_through_stream_linknos(lakes_gdf, streams_gdf):
     """
-    Map each lake_id to WSNO values for stream links that intersect the lake.
+    Map each lake_id to LINKNO values for stream links that intersect the lake.
 
-    Used for manual overrides that cannot snap to a nearby exit: if the override
-    coordinate lies in one of these basins, the stream already passes through the
-    lake and a carved breakout path may be needed. Otherwise the override sits in
-    a downstream basin and the outlet can be placed directly.
+    Used to reject override breakout paths that trace to an inflow branch still
+    upstream of the reservoir on the vector stream graph.
     """
     if lakes_gdf.crs != streams_gdf.crs:
         streams_gdf = streams_gdf.to_crs(lakes_gdf.crs)
 
-    lake_through_wsnos = {}
+    lake_through_linknos = {}
     for idx, lake in lakes_gdf.iterrows():
         lake_id = str(lake.get('Hylak_id', idx)).strip()
         intersecting = streams_gdf[streams_gdf.intersects(lake.geometry)]
-        wsnos = {
-            int(wsno)
-            for wsno in intersecting['WSNO'].dropna().unique()
-            if int(wsno) > 0
+        linknos = {
+            int(link)
+            for link in intersecting['LINKNO'].dropna().unique()
+            if int(link) > 0
         }
-        lake_through_wsnos[lake_id] = wsnos
-    return lake_through_wsnos
-
-
-def sample_wsno_at_point(w_band, point, inv_gt, raster_size):
-    """Return watershed ID (WSNO) at a map coordinate, or -1 if off-raster."""
-    px, py = gdal.ApplyGeoTransform(inv_gt, point.x, point.y)
-    col = int(round(px))
-    row = int(round(py))
-    if not (0 <= col < raster_size[0] and 0 <= row < raster_size[1]):
-        return -1
-    value = w_band.ReadAsArray(col, row, 1, 1)
-    if value is None:
-        return -1
-    return int(value[0, 0])
+        lake_through_linknos[lake_id] = linknos
+    return lake_through_linknos
 
 
 def trace_flow_enters_lake(start_rc, fdr_win, lake_mask):
@@ -205,7 +195,7 @@ def _override_outward_ray(target_rc, lake_mask):
     """
     Unit step vector from a shoreline cell outward, away from local lake interior.
 
-    Shared by temporary breakout carve and legacy helpers below.
+    Shared by override breakout carve helpers.
     """
     target_r, target_c = target_rc
     interior = [
@@ -227,109 +217,6 @@ def _override_outward_ray(target_rc, lake_mask):
     return dr_vec / vec_len, dc_vec / vec_len
 
 
-def compute_override_breakout_path(
-    target_rc,
-    lake_mask,
-    max_steps=OVERRIDE_BREAKOUT_STEPS,
-):
-    """
-    Temporary override breakout: carve exterior cells along the outward ray from
-    the local lake centroid. Does not check WSNO or lake re-entry (see legacy
-    helpers below).
-    """
-    ray = _override_outward_ray(target_rc, lake_mask)
-    if ray is None:
-        return [], False
-
-    step_r, step_c = ray
-    ysize, xsize = lake_mask.shape
-    curr_r, curr_c = float(target_rc[0]), float(target_rc[1])
-    breakout_path = []
-    last_fixed_rc = target_rc
-    outside_steps = 0
-
-    while outside_steps < max_steps:
-        curr_r += step_r
-        curr_c += step_c
-        next_r, next_c = int(np.round(curr_r)), int(np.round(curr_c))
-
-        if not (0 <= next_r < ysize and 0 <= next_c < xsize):
-            break
-
-        if lake_mask[next_r, next_c]:
-            continue
-
-        breakout_path.append((last_fixed_rc, (next_r, next_c)))
-        last_fixed_rc = (next_r, next_c)
-        outside_steps += 1
-
-    return breakout_path, outside_steps == max_steps
-
-
-# --- Legacy breakout (disabled until target-link + DEM path fix) ----------------
-#
-# def compute_direct_ds_breakout_path(
-#     target_rc,
-#     lake_mask,
-#     fdr_win,
-#     max_steps=MAX_DIRECT_DS_BREAKOUT_STEPS,
-# ):
-#     """
-#     Build a short breakout path from the override-adjacent shore point.
-#
-#     Uses the same shore-to-centroid ray as the long override carve, but adds one
-#     outside-lake cell at a time (up to max_steps). After each cell, checks whether
-#     downstream flow still re-enters the lake; stops early when flow stays outside.
-#     """
-#     target_r, target_c = target_rc
-#     ysize, xsize = lake_mask.shape
-#     interior = [
-#         (np.hypot(r - target_r, c - target_c), r, c)
-#         for r, c in np.argwhere(lake_mask)
-#         if (r, c) != target_rc
-#     ]
-#     if not interior:
-#         return [], False
-#
-#     interior.sort(key=lambda item: item[0])
-#     centroid_r = np.mean([p[1] for p in interior[:10]])
-#     centroid_c = np.mean([p[2] for p in interior[:10]])
-#     dr_vec = target_r - centroid_r
-#     dc_vec = target_c - centroid_c
-#     vec_len = np.hypot(dr_vec, dc_vec)
-#     if vec_len == 0:
-#         return [], False
-#
-#     step_r, step_c = dr_vec / vec_len, dc_vec / vec_len
-#     curr_r, curr_c = float(target_r), float(target_c)
-#     breakout_path = []
-#     last_fixed_rc = target_rc
-#     temp_fdr = fdr_win.copy()
-#     outside_steps = 0
-#
-#     while outside_steps < max_steps:
-#         curr_r += step_r
-#         curr_c += step_c
-#         next_r, next_c = int(np.round(curr_r)), int(np.round(curr_c))
-#
-#         if not (0 <= next_r < ysize and 0 <= next_c < xsize):
-#             return breakout_path, False
-#
-#         if lake_mask[next_r, next_c]:
-#             continue
-#
-#         breakout_path.append((last_fixed_rc, (next_r, next_c)))
-#         fixed_r, fixed_c = last_fixed_rc
-#         temp_fdr[fixed_r, fixed_c] = get_d8_direction(last_fixed_rc, (next_r, next_c))
-#         last_fixed_rc = (next_r, next_c)
-#         outside_steps += 1
-#
-#         if not trace_flow_enters_lake((next_r, next_c), temp_fdr, lake_mask):
-#             return breakout_path, True
-#
-#     return breakout_path, False
-
-
 def is_link_upstream_of(link_a, link_b, link_to_downstream):
     """
     Return True if stream link_a eventually flows into link_b.
@@ -346,11 +233,245 @@ def is_link_upstream_of(link_a, link_b, link_to_downstream):
     return False
 
 
+def trace_fdr_to_stream_link(
+    start_rc,
+    fdr_win,
+    src_win,
+    w_win,
+    wsno_to_link,
+    lake_mask,
+    max_steps=MAX_BREAKOUT_TRACE_STEPS,
+):
+    """Follow D8 downstream until a stream-network cell; return (LINKNO, hit_rc) or (None, None)."""
+    height, width = lake_mask.shape
+    row, col = start_rc
+    visited = set()
+
+    for _ in range(max_steps):
+        if (row, col) in visited:
+            return None, None
+        visited.add((row, col))
+
+        if lake_mask[row, col]:
+            return None, None
+
+        if int(src_win[row, col]) == 1:
+            link_no = wsno_to_link.get(int(w_win[row, col]), -1)
+            if link_no > 0:
+                return link_no, (row, col)
+
+        dr, dc = get_d8_offset(fdr_win[row, col])
+        if dr == 0 and dc == 0:
+            return None, None
+
+        nrow, ncol = row + dr, col + dc
+        if not (0 <= nrow < height and 0 <= ncol < width):
+            return None, None
+        row, col = nrow, ncol
+
+    return None, None
+
+
+def is_acceptable_outflow_link(
+    link_no,
+    hit_rc,
+    through_linknos,
+    link_to_downstream,
+    acc_win,
+    ref_accum,
+    ref_link=-1,
+):
+    """
+    True when the traced stream link is an acceptable override outflow.
+
+    When ref_link is known (from a stream exit near the override), anchor checks
+    on that link: reject inflow-side hits, accept same-link hits with sufficient
+    local_accum, accept downstream hits on the vector graph.
+
+    Without ref_link, fall back to rejecting links upstream of any lake-intersecting
+    link and comparing local_accum on shared through-lake stems.
+    """
+    if link_no <= 0 or hit_rc is None:
+        return False
+
+    hit_accum = float(acc_win[hit_rc[0], hit_rc[1]])
+
+    if ref_link > 0:
+        if is_link_upstream_of(link_no, ref_link, link_to_downstream):
+            return False
+        if link_no == ref_link:
+            if ref_accum <= 0:
+                return True
+            return hit_accum >= ref_accum
+        if is_link_upstream_of(ref_link, link_no, link_to_downstream):
+            return True
+        return False
+
+    if link_no in through_linknos:
+        if ref_accum <= 0:
+            return False
+        return hit_accum >= ref_accum
+
+    if not through_linknos:
+        return True
+
+    for through_link in through_linknos:
+        if through_link <= 0:
+            continue
+        if is_link_upstream_of(link_no, through_link, link_to_downstream):
+            return False
+    return True
+
+
+def compute_override_breakout_path(
+    target_rc,
+    lake_mask,
+    fdr_win,
+    src_win,
+    w_win,
+    acc_win,
+    wsno_to_link,
+    link_to_downstream,
+    lake_through_linknos,
+    ref_accum,
+    ref_link=-1,
+    max_steps=OVERRIDE_BREAKOUT_STEPS,
+    max_trace_steps=MAX_BREAKOUT_TRACE_STEPS,
+):
+    """
+    Carve outward one exterior cell at a time along the local-centroid ray.
+
+    After each new cell the temporary FDR is updated and flow is traced to the
+    stream network. Success when the hit link passes vector-graph and (when
+    needed) local_accum checks relative to the override reference outlet.
+    """
+    ray = _override_outward_ray(target_rc, lake_mask)
+    if ray is None:
+        return [], False, -1
+
+    step_r, step_c = ray
+    ysize, xsize = lake_mask.shape
+    curr_r, curr_c = float(target_rc[0]), float(target_rc[1])
+    breakout_path = []
+    last_fixed_rc = target_rc
+    temp_fdr = fdr_win.copy()
+    outside_steps = 0
+
+    while outside_steps < max_steps:
+        curr_r += step_r
+        curr_c += step_c
+        next_r, next_c = int(np.round(curr_r)), int(np.round(curr_c))
+
+        if not (0 <= next_r < ysize and 0 <= next_c < xsize):
+            break
+
+        if lake_mask[next_r, next_c]:
+            continue
+
+        breakout_path.append((last_fixed_rc, (next_r, next_c)))
+        cr, cc = last_fixed_rc
+        temp_fdr[cr, cc] = get_d8_direction(last_fixed_rc, (next_r, next_c))
+        last_fixed_rc = (next_r, next_c)
+        outside_steps += 1
+
+        tip_rc = (next_r, next_c)
+        if trace_flow_enters_lake(tip_rc, temp_fdr, lake_mask):
+            continue
+
+        hit_link, hit_rc = trace_fdr_to_stream_link(
+            tip_rc,
+            temp_fdr,
+            src_win,
+            w_win,
+            wsno_to_link,
+            lake_mask,
+            max_trace_steps,
+        )
+        if hit_link is None:
+            # Flow no longer re-enters the lake but the tip is still off-network;
+            # accept when anchored to a nearby stream exit (same as legacy short breakout).
+            if ref_link > 0:
+                return breakout_path, True, ref_link
+            continue
+
+        if is_acceptable_outflow_link(
+            hit_link,
+            hit_rc,
+            lake_through_linknos,
+            link_to_downstream,
+            acc_win,
+            ref_accum,
+            ref_link,
+        ):
+            return breakout_path, True, hit_link
+
+    return breakout_path, False, -1
+
+
 def pixel_to_point(gt, xoff, yoff, row, col):
     """Convert a row/col within a raster window to a projected map coordinate."""
     x = gt[0] + (xoff + col) * gt[1] + (yoff + row) * gt[2]
     y = gt[3] + (xoff + col) * gt[4] + (yoff + row) * gt[5]
     return Point(x, y)
+
+
+def reference_accum_near_point(acc_win, src_win, point, gt, xoff, yoff):
+    """
+    Contributing area at the stream cell nearest a map point.
+
+    Uses the same local_accum source as find_stream_exit_candidates.
+    """
+    stream_cells = np.argwhere(src_win == 1)
+    if stream_cells.size == 0:
+        return -1.0
+
+    best_rc = None
+    best_dist = float('inf')
+    for r, c in stream_cells:
+        pt = pixel_to_point(gt, xoff, yoff, int(r), int(c))
+        dist = pt.distance(point)
+        if dist < best_dist:
+            best_dist = dist
+            best_rc = (int(r), int(c))
+
+    if best_rc is None:
+        return -1.0
+    return float(acc_win[best_rc[0], best_rc[1]])
+
+
+def reference_outflow_for_override(
+    override_pt,
+    surviving_candidates,
+    acc_win,
+    src_win,
+    gt,
+    xoff,
+    yoff,
+    cell_size,
+):
+    """
+    Reference link/accum for override validation.
+
+    Prefer cleaned stream exits near the override (same data as override_snapped).
+    Fall back to the nearest stream cell in the lake window.
+    """
+    snap_threshold = cell_size * 3.0
+    nearby = sorted(
+        (
+            c for c in surviving_candidates
+            if c['point'].distance(override_pt) <= snap_threshold
+        ),
+        key=lambda c: c['point'].distance(override_pt),
+    )
+    if nearby:
+        best = nearby[0]
+        return float(best['local_accum']), int(best['link_no'])
+
+    if surviving_candidates:
+        best = min(surviving_candidates, key=lambda c: c['point'].distance(override_pt))
+        return float(best['local_accum']), int(best['link_no'])
+
+    return reference_accum_near_point(acc_win, src_win, override_pt, gt, xoff, yoff), -1
 
 
 def raster_window_from_bounds(geom_bounds, inv_gt, raster_size):
@@ -628,90 +749,6 @@ def filter_upstream_duplicates(candidates, link_to_downstream):
     return surviving
 
 
-def _source_basin_wsno(target_rc, w_win, lake_mask):
-    """
-    WSNO of the basin the override outlet currently sits in.
-
-    Uses the watershed ID at the shoreline target cell. If that cell is
-    unassigned (<= 0), falls back to the most common valid WSNO among lake
-    boundary pixels.
-    """
-    r, c = target_rc
-    wsno = int(w_win[r, c])
-    if wsno > 0:
-        return wsno
-
-    boundary_wsnos = [int(w_win[r, c]) for r, c in np.argwhere(lake_mask) if int(w_win[r, c]) > 0]
-    if boundary_wsnos:
-        return max(set(boundary_wsnos), key=boundary_wsnos.count)
-    return wsno
-
-
-# def compute_override_breakout_path_by_wsno(target_rc, lake_mask, w_win, max_steps=MAX_OVERRIDE_BREAKOUT_STEPS):
-#     """
-#     Build a forced-exit path for manual override carve cases.
-#
-#     When a user-supplied outlet coordinate does not snap to any clean stream
-#     exit, we place the outlet on the nearest shoreline pixel and carve flow
-#     through the lake wall:
-#
-#       1. Find the 10 lake interior pixels closest to the target (shoreline) point.
-#       2. Their mean position approximates the local lake interior centroid.
-#       3. Step outward from the target along the vector away from that centroid.
-#       4. For each step outside lake_mask, record a (cell, parent) pair for FDR
-#          edits and check w_win (WSNO) to see if we have entered a different basin.
-#       5. Stop when a cell outside the lake has a valid WSNO different from the
-#          source basin, or when max_steps is reached.
-#
-#     Returns:
-#         (breakout_path, succeeded) where breakout_path is a list of
-#         (current_rc, parent_rc) pairs and succeeded is True only if another
-#         basin was reached within max_steps.
-#     """
-#     target_r, target_c = target_rc
-#     ysize, xsize = lake_mask.shape
-#     interior = [
-#         (np.hypot(r - target_r, c - target_c), r, c)
-#         for r, c in np.argwhere(lake_mask)
-#         if (r, c) != target_rc
-#     ]
-#     if not interior:
-#         return [], False
-#
-#     interior.sort(key=lambda item: item[0])
-#     centroid_r = np.mean([p[1] for p in interior[:10]])
-#     centroid_c = np.mean([p[2] for p in interior[:10]])
-#     dr_vec = target_r - centroid_r
-#     dc_vec = target_c - centroid_c
-#     vec_len = np.hypot(dr_vec, dc_vec)
-#     if vec_len == 0:
-#         return [], False
-#
-#     source_wsno = _source_basin_wsno(target_rc, w_win, lake_mask)
-#     step_r, step_c = dr_vec / vec_len, dc_vec / vec_len
-#     curr_r, curr_c = float(target_r), float(target_c)
-#     breakout_path = []
-#     last_fixed_rc = target_rc
-#
-#     for _ in range(1, max_steps + 1):
-#         curr_r += step_r
-#         curr_c += step_c
-#         next_r, next_c = int(np.round(curr_r)), int(np.round(curr_c))
-#
-#         if not (0 <= next_r < ysize and 0 <= next_c < xsize):
-#             return breakout_path, False
-#
-#         if not lake_mask[next_r, next_c]:
-#             breakout_path.append((last_fixed_rc, (next_r, next_c)))
-#             last_fixed_rc = (next_r, next_c)
-#
-#             neighbor_wsno = int(w_win[next_r, next_c])
-#             if neighbor_wsno > 0 and neighbor_wsno != source_wsno:
-#                 return breakout_path, True
-#
-#     return breakout_path, False
-
-
 def select_algorithmic_outlet(surviving_candidates):
     """
     Rank and return the best stream exit when no override carve is possible.
@@ -736,8 +773,9 @@ def select_algorithmic_outlet(surviving_candidates):
 
 def select_outlet_for_lake(
     lake_id, surviving_candidates, overrides_gdf, boundary_pixels,
-    lake_mask, w_win, w_band, fdr_win, inv_gt, raster_size, cell_size,
-    lake_through_wsnos,
+    lake_mask, fdr_win, src_win, w_win, acc_win, cell_size,
+    wsno_to_link, link_to_downstream, lake_through_linknos,
+    gt, xoff, yoff,
 ):
     """
     Choose one outlet pixel for a lake using a tiered decision pipeline.
@@ -747,8 +785,9 @@ def select_outlet_for_lake(
     1. MANUAL OVERRIDE (if lake_id appears in outlet_overrides.csv):
        a. override_snapped  - override point is within 3 cells of a surviving
           stream exit; snap to the nearest clean exit.
-       b. override_breakout - temporary exterior carve from the shore cell nearest
-          the override (legacy WSNO / re-entry logic disabled).
+       b. override_breakout - iterative exterior carve validated by FDR trace to
+          an acceptable downstream stream link (vector graph plus local_accum when
+          the hit link crosses the lake).
        c. skipped_no_boundary - degenerate lake with no shoreline pixels; skip.
 
     2. ALGORITHMIC STREAM SELECTION (no override, or carve fallback):
@@ -773,8 +812,17 @@ def select_outlet_for_lake(
         if not boundary_pixels:
             return None, "skipped_no_boundary", False, []
 
-        # Legacy breakout (disabled): downstream vs through-lake WSNO split and
-        # compute_direct_ds_breakout_path / compute_override_breakout_path_by_wsno.
+        through_linknos = lake_through_linknos.get(lake_id, set())
+        ref_accum, ref_link = reference_outflow_for_override(
+            override_pt,
+            surviving_candidates,
+            acc_win,
+            src_win,
+            gt,
+            xoff,
+            yoff,
+            cell_size,
+        )
         closest = min(boundary_pixels, key=lambda item: item['point'].distance(override_pt))
         chosen = {
             'win_rc': closest['win_rc'],
@@ -782,18 +830,29 @@ def select_outlet_for_lake(
             'link_no': -1,
             'local_accum': -1,
         }
-        breakout, succeeded = compute_override_breakout_path(
-            chosen['win_rc'], lake_mask,
+        breakout, succeeded, hit_link = compute_override_breakout_path(
+            chosen['win_rc'],
+            lake_mask,
+            fdr_win,
+            src_win,
+            w_win,
+            acc_win,
+            wsno_to_link,
+            link_to_downstream,
+            through_linknos,
+            ref_accum,
+            ref_link,
         )
         if succeeded:
+            chosen['link_no'] = hit_link
             print(
-                f"Lake {lake_id}: Override {len(breakout)}-cell breakout path "
-                f"(temporary; legacy carve logic disabled)."
+                f"Lake {lake_id}: Override {len(breakout)}-cell breakout validated "
+                f"at stream link {hit_link}."
             )
             return chosen, "override_breakout", True, breakout
 
         print(
-            f"Lake {lake_id}: Override breakout could not place "
+            f"Lake {lake_id}: Override breakout could not validate outflow within "
             f"{OVERRIDE_BREAKOUT_STEPS} exterior cells; using algorithmic outlet selection."
         )
         return select_algorithmic_outlet(surviving_candidates)
@@ -827,22 +886,6 @@ def resolve_worker_count(requested_ncores, comm):
     if mpi_size > 1:
         return max(1, min(requested_ncores, mpi_size))
     return max(1, requested_ncores)
-
-
-def apply_masked_fdr_patch_old(fdr_band, xoff, yoff, updated_fdr_win, edit_mask):
-    """
-    Merge a lake window into the output raster, touching only edited cells.
-
-    Reads the current output window first so overlapping bounding boxes do not
-    revert cells already modified by other lakes.
-    """
-    if not np.any(edit_mask):
-        return
-
-    h, w = updated_fdr_win.shape
-    current_win = fdr_band.ReadAsArray(xoff, yoff, w, h)
-    current_win[edit_mask] = updated_fdr_win[edit_mask]
-    fdr_band.WriteArray(current_win, xoff, yoff)
 
 
 def apply_masked_fdr_patch(
@@ -882,6 +925,44 @@ def apply_masked_fdr_patch(
     fdr_band.WriteArray(current_win, xoff, yoff)
 
 
+def build_restore_mask(geometry, neighbor_wkts, gt, xoff, yoff, xsize, ysize, raster_proj):
+    """
+    Cells to reset to the original FDR before re-pasting a lake in override mode.
+
+    The lake mask is dilated far enough to cover any breakout carved by a previous
+    run (breakouts never leave the lake window). Cells inside neighbouring lake
+    polygons are excluded so their edits are not reverted.
+    """
+    lake_mask = rasterize_polygon_mask(geometry, gt, xoff, yoff, xsize, ysize, raster_proj)
+    restore_mask = binary_dilation(
+        lake_mask,
+        structure=np.ones((3, 3), dtype=bool),
+        iterations=OVERRIDE_BREAKOUT_STEPS + 1,
+    )
+    if neighbor_wkts:
+        win_gt = (
+            gt[0] + xoff * gt[1], gt[1], gt[2],
+            gt[3] + yoff * gt[5], gt[4], gt[5],
+        )
+        neighbor_mask = np.zeros((ysize, xsize), dtype=np.uint8)
+        for neighbor_wkt in neighbor_wkts:
+            rasterize_geometry(neighbor_mask, shapely_wkt.loads(neighbor_wkt), win_gt, raster_proj)
+        restore_mask &= neighbor_mask == 0
+    return restore_mask
+
+
+def restore_original_fdr(out_band, orig_band, xoff, yoff, restore_mask):
+    """Copy original TauDEM FDR values into the output raster under restore_mask."""
+    if not np.any(restore_mask):
+        return
+
+    h, w = restore_mask.shape
+    current_win = out_band.ReadAsArray(xoff, yoff, w, h)
+    original_win = orig_band.ReadAsArray(xoff, yoff, w, h)
+    current_win[restore_mask] = original_win[restore_mask]
+    out_band.WriteArray(current_win, xoff, yoff)
+
+
 def estimate_lake_grid_cells(geometry, cell_size):
     """Approximate lake raster cell count from polygon area (for load balancing)."""
     return max(1, int(round(float(geometry.area) / (cell_size * cell_size))))
@@ -914,16 +995,25 @@ def partition_lakes_by_cell_count(lake_cell_counts, n_workers):
     return batches
 
 
-def serialize_lake_row(idx, lake_row, cell_size):
+def lake_id_for_row(idx, lake_row):
+    return str(lake_row.get("Hylak_id", idx)).strip()
+
+
+def serialize_lake_row(idx, lake_row, neighbor_wkts=None):
     """Convert a GeoDataFrame row into a picklable dict for worker processes."""
     geometry = lake_row.geometry
     return {
-        "lake_idx": int(idx),
-        "lake_id": str(lake_row.get("Hylak_id", idx)).strip(),
+        "lake_id": lake_id_for_row(idx, lake_row),
         "geometry_wkt": geometry.wkt,
         "bounds": tuple(geometry.bounds),
-        "grid_cells": estimate_lake_grid_cells(geometry, cell_size),
+        "neighbor_wkts": neighbor_wkts or [],
     }
+
+
+def neighbor_lake_wkts(all_lakes, position, geometry):
+    """WKT of other lakes whose geometry intersects this lake's bounding box."""
+    hits = all_lakes.sindex.query(box(*geometry.bounds), predicate="intersects")
+    return [all_lakes.geometry.iloc[i].wkt for i in hits if i != position]
 
 
 def process_single_lake(
@@ -947,12 +1037,10 @@ def process_single_lake(
     overrides_gdf,
     cell_size,
     gauge_radius_meters,
-    inv_gt,
-    raster_size,
-    lake_through_wsnos,
+    lake_through_linknos,
 ):
     """
-    Process one lake and return a raster patch plus optional outlet metadata.
+    Process one lake and return its raster patch (xoff, yoff, updated_fdr_win, edit_mask).
 
     Returns None when the lake is outside the raster or has no valid outlet.
     """
@@ -982,13 +1070,17 @@ def process_single_lake(
         overrides_gdf,
         boundary_pixels,
         lake_mask,
-        w_win,
-        w_band,
         fdr_win,
-        inv_gt,
-        raster_size,
+        src_win,
+        w_win,
+        acc_win,
         cell_size,
-        lake_through_wsnos,
+        wsno_to_link,
+        link_to_downstream,
+        lake_through_linknos,
+        gt,
+        xoff,
+        yoff,
     )
     if chosen_outlet is None:
         return None
@@ -1009,19 +1101,25 @@ def process_single_lake(
     edit_mask = (
         updated_fdr_win.astype(np.int32) != np.asarray(fdr_win, dtype=np.int32)
     )
-
-    outlet_record = {
-        "lake_id": lake_id,
-        "link_no": int(chosen_outlet.get("link_no", -1)),
-        "sel_type": selection_type,
-        "local_acc": float(chosen_outlet.get("local_accum", -1)),
-        "geometry": chosen_outlet["point"],
-    }
-    return xoff, yoff, updated_fdr_win, edit_mask, outlet_record
+    return xoff, yoff, updated_fdr_win, edit_mask
 
 
-def process_assigned_lakes(rank_id, lake_rows, paths, lookup_tables, gauge_radius_meters, raster_meta, lake_through_wsnos):
-    """Process a rank's lake list and return masked patches for merge on rank 0."""
+def process_assigned_lakes(
+    rank_id,
+    lake_rows,
+    paths,
+    lookup_tables,
+    gauge_radius_meters,
+    raster_meta,
+    lake_through_linknos,
+    mode="full",
+):
+    """
+    Process a rank's lake list and return masked patches for merge on rank 0.
+
+    In override mode, also returns a restore mask per lake (even when no outlet
+    is found) so rank 0 can clear the previous run's edits before pasting.
+    """
 
     wsno_to_link, link_to_dout, link_to_accum, link_to_downstream = lookup_tables
     gt, inv_gt, raster_proj, raster_size, cell_size = raster_meta
@@ -1040,7 +1138,7 @@ def process_assigned_lakes(rank_id, lake_rows, paths, lookup_tables, gauge_radiu
     overrides_gdf = load_overrides(paths["overrides_csv_path"], raster_proj)
 
     patches = []
-    outlet_records = []
+    restores = []
     processed_count = 0
     batch_total = len(lake_rows)
 
@@ -1054,6 +1152,12 @@ def process_assigned_lakes(rank_id, lake_rows, paths, lookup_tables, gauge_radiu
         if window is None:
             continue
         xoff, yoff, xsize, ysize = window
+
+        if mode == "override":
+            restore_mask = build_restore_mask(
+                geometry, lake_row["neighbor_wkts"], gt, xoff, yoff, xsize, ysize, raster_proj,
+            )
+            restores.append((xoff, yoff, restore_mask))
 
         result = process_single_lake(
             lake_row["lake_id"],
@@ -1076,22 +1180,19 @@ def process_assigned_lakes(rank_id, lake_rows, paths, lookup_tables, gauge_radiu
             overrides_gdf,
             cell_size,
             gauge_radius_meters,
-            inv_gt,
-            raster_size,
-            lake_through_wsnos,
+            lake_through_linknos,
         )
         if result is None:
             continue
 
-        xoff, yoff, updated_fdr_win, edit_mask, outlet_record = result
+        xoff, yoff, updated_fdr_win, edit_mask = result
         patches.append((lake_row["lake_id"], xoff, yoff, updated_fdr_win, edit_mask))
-        outlet_records.append(outlet_record)
 
     ds_fdr = None
     ds_src = None
     ds_acc = None
     ds_w = None
-    return patches, outlet_records
+    return patches, restores
 
 
 def _print_partition_summary(batches, lake_cell_counts):
@@ -1224,13 +1325,18 @@ def process_raster_reservoir_routing(
     gauges_vector_path,
     overrides_csv_path,
     output_fdr_path,
-    output_outlets_path,
     gauge_radius_meters=750,
     ncores=1,
     comm=None,
+    mode="full",
 ):
     """
     Main entry point: loop over all lakes and patch the flow-direction raster.
+
+    mode="full" rebuilds output_fdr_path from fdr_raster_path for every lake.
+    mode="override" only re-runs lakes listed in overrides_csv_path and pastes
+    them into the existing output_fdr_path, after resetting each re-run lake's
+    area to the original FDR.
 
     Lakes are partitioned across MPI ranks by estimated grid-cell count, processed
     in parallel, then merged on rank 0 using masked writes (only edited cells).
@@ -1256,26 +1362,42 @@ def process_raster_reservoir_routing(
     rank = comm.Get_rank()
     mpi_size = comm.Get_size()
 
+    if mode not in ("full", "override"):
+        raise ValueError(f"Unknown mode {mode!r}; expected 'full' or 'override'.")
+
     if rank == 0:
+        setup_error = None
+        if mode == "override":
+            if not os.path.exists(output_fdr_path):
+                setup_error = (
+                    f"Override mode needs an existing {output_fdr_path} from a "
+                    "previous full run."
+                )
+            elif not os.path.exists(overrides_csv_path):
+                setup_error = f"Override CSV not found: {overrides_csv_path}"
+
+    if rank == 0 and setup_error is None:
         lookup_tables, streams_gdf = build_vector_lookup_tables(streams_vector_path)
         lakes = gpd.read_file(lakes_vector_path)
-        total_lakes = len(lakes)
 
-        if os.path.exists(output_fdr_path):
-            try:
-                os.remove(output_fdr_path)
-            except OSError:
-                pass
+        if mode == "full":
+            if os.path.exists(output_fdr_path):
+                try:
+                    os.remove(output_fdr_path)
+                except OSError:
+                    pass
 
-        print("Creating mutable working copy of flow directions dataset...")
-        driver = gdal.GetDriverByName("GTiff")
-        src_ds_fdr = gdal.Open(fdr_raster_path)
-        co_options = ["COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=256", "BLOCKYSIZE=256"]
-        out_ds = driver.CreateCopy(output_fdr_path, src_ds_fdr, strict=0, options=co_options)
-        out_ds = None
-        src_ds_fdr = None
+            print("Creating mutable working copy of flow directions dataset...")
+            driver = gdal.GetDriverByName("GTiff")
+            src_ds_fdr = gdal.Open(fdr_raster_path)
+            co_options = ["COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=256", "BLOCKYSIZE=256"]
+            out_ds = driver.CreateCopy(output_fdr_path, src_ds_fdr, strict=0, options=co_options)
+            out_ds = None
+            src_ds_fdr = None
+        else:
+            print(f"Override mode: pasting re-run lakes into existing {output_fdr_path}")
 
-        ds_fdr = gdal.Open(output_fdr_path, gdal.GA_Update)
+        ds_fdr = gdal.Open(output_fdr_path)
         gt = ds_fdr.GetGeoTransform()
         inv_gt = gdal.InvGeoTransform(gt)
         raster_proj = ds_fdr.GetProjection()
@@ -1284,7 +1406,7 @@ def process_raster_reservoir_routing(
         ds_fdr = None
 
         lakes = lakes.to_crs(raster_proj)
-        lake_through_wsnos = build_lake_through_stream_wsnos(lakes, streams_gdf)
+        lake_through_linknos = build_lake_through_stream_linknos(lakes, streams_gdf)
 
         if not os.path.exists(gauges_vector_path):
             print(
@@ -1297,16 +1419,37 @@ def process_raster_reservoir_routing(
                 "skipping manual outlet overrides."
             )
 
+        if mode == "override":
+            override_ids = set(load_overrides(overrides_csv_path, raster_proj)["lake_id"])
+            lake_ids = [lake_id_for_row(idx, row) for idx, row in lakes.iterrows()]
+            missing_ids = sorted(override_ids - set(lake_ids))
+            if missing_ids:
+                print(
+                    f"WARNING: {len(missing_ids)} CSV lake_id(s) not found in "
+                    f"{lakes_vector_path}: {', '.join(missing_ids)}"
+                )
+            selected_positions = [i for i, lake_id in enumerate(lake_ids) if lake_id in override_ids]
+            print(f"Override mode: {len(selected_positions)} lake(s) selected from {overrides_csv_path}.")
+        else:
+            selected_positions = list(range(len(lakes)))
+
         conflict_db = build_lake_conflict_database(
             lakes_vector_path,
             fdr_raster_path,
             lake_id_field="Hylak_id",
         )
 
-        lake_cell_counts = [
-            estimate_lake_grid_cells(row.geometry, cell_size) for _, row in lakes.iterrows()
-        ]
-        lake_rows = [serialize_lake_row(idx, row, cell_size) for idx, row in lakes.iterrows()]
+        total_lakes = len(selected_positions)
+        lake_cell_counts = []
+        lake_rows = []
+        for position in selected_positions:
+            idx = lakes.index[position]
+            row = lakes.iloc[position]
+            neighbor_wkts = (
+                neighbor_lake_wkts(lakes, position, row.geometry) if mode == "override" else None
+            )
+            lake_cell_counts.append(estimate_lake_grid_cells(row.geometry, cell_size))
+            lake_rows.append(serialize_lake_row(idx, row, neighbor_wkts))
 
         paths = {
             "fdr_raster_path": fdr_raster_path,
@@ -1324,19 +1467,26 @@ def process_raster_reservoir_routing(
             "lake_rows": lake_rows,
             "paths": paths,
             "raster_meta": raster_meta,
-            "lake_through_wsnos": lake_through_wsnos,
+            "lake_through_linknos": lake_through_linknos,
         }
+    elif rank == 0:
+        setup_payload = {"error": setup_error}
     else:
         setup_payload = None
 
     setup_payload = comm.bcast(setup_payload, root=0)
+    if "error" in setup_payload:
+        if rank == 0:
+            print(f"ERROR: {setup_payload['error']}")
+        raise SystemExit(1)
+
     lookup_tables = setup_payload["lookup_tables"]
     total_lakes = setup_payload["total_lakes"]
     lake_cell_counts = setup_payload["lake_cell_counts"]
     lake_rows = setup_payload["lake_rows"]
     paths = setup_payload["paths"]
     raster_meta = setup_payload["raster_meta"]
-    lake_through_wsnos = setup_payload["lake_through_wsnos"]
+    lake_through_linknos = setup_payload["lake_through_linknos"]
 
     if total_lakes == 0:
         if rank == 0:
@@ -1344,7 +1494,21 @@ def process_raster_reservoir_routing(
         return
 
     worker_count = resolve_worker_count(ncores, comm)
-    worker_count = min(worker_count, total_lakes)
+    if worker_count > mpi_size:
+        if rank == 0:
+            print(
+                f"WARNING: Requested {worker_count} core(s) but only {mpi_size} MPI "
+                f"rank(s) were launched; using {mpi_size}. Launch with "
+                f"srun/mpirun -n {worker_count} to use more."
+            )
+        worker_count = mpi_size
+    if worker_count > total_lakes:
+        if rank == 0:
+            print(
+                f"WARNING: Requested {worker_count} core(s) but only {total_lakes} "
+                f"lake(s) to edit; using {total_lakes}."
+            )
+        worker_count = total_lakes
 
     if rank == 0:
         batches = partition_lakes_by_cell_count(lake_cell_counts, worker_count)
@@ -1360,34 +1524,43 @@ def process_raster_reservoir_routing(
     my_lake_indices = comm.scatter(scatter_batches, root=0)
     my_lake_rows = [lake_rows[i] for i in my_lake_indices]
 
-    local_patches, local_outlets = process_assigned_lakes(
+    local_result = process_assigned_lakes(
         rank + 1,
         my_lake_rows,
         paths,
         lookup_tables,
         gauge_radius_meters,
         raster_meta,
-        lake_through_wsnos,
+        lake_through_linknos,
+        mode=mode,
     )
 
-    gathered = comm.gather((local_patches, local_outlets), root=0)
+    gathered = comm.gather(local_result, root=0)
 
     if rank == 0:
         ds_fdr = gdal.Open(output_fdr_path, gdal.GA_Update)
         fdr_band = ds_fdr.GetRasterBand(1)
-        outlet_records = []
         patches_written = 0
 
-        for rank_idx, rank_result in enumerate(gathered):
-            if rank_result is None:
-                continue
-            patches, batch_outlets = rank_result
+        if mode == "override":
+            # All restores run before any paste so one re-run lake's ring cannot
+            # wipe another re-run lake's new edits.
+            ds_orig = gdal.Open(fdr_raster_path)
+            orig_band = ds_orig.GetRasterBand(1)
+            restored = 0
+            for _, rank_restores in gathered:
+                for xoff, yoff, restore_mask in rank_restores:
+                    restore_original_fdr(fdr_band, orig_band, xoff, yoff, restore_mask)
+                    restored += 1
+            ds_orig = None
+            print(f"Reset {restored} lake area(s) to original flow directions.")
+
+        for rank_idx, (patches, _) in enumerate(gathered):
             for lake_id, xoff, yoff, updated_fdr_win, edit_mask in patches:
                 apply_masked_fdr_patch(
                     fdr_band, xoff, yoff, updated_fdr_win, edit_mask, lake_id, conflict_db,
                 )
                 patches_written += 1
-            outlet_records.extend(batch_outlets)
             if patches:
                 print(f"Merged rank {rank_idx + 1}: {len(patches)} lake patch(es).")
 
@@ -1411,8 +1584,22 @@ if __name__ == "__main__":
         help=(
             "Number of MPI ranks to use for lake processing (default: FLOWPATH_NCORES "
             "env var or 1). Launch with srun/mpirun; capped by the number of ranks "
-            "started."
+            "started and by the number of lakes being edited."
         ),
+    )
+    parser.add_argument(
+        "--option",
+        choices=("full", "override"),
+        default="full",
+        help=(
+            "full (default): rebuild fdr_lakes.tif for every lake. override: re-run "
+            "only lakes listed in --csv and paste them into the existing fdr_lakes.tif."
+        ),
+    )
+    parser.add_argument(
+        "--csv",
+        default="./outlet_overrides.csv",
+        help="Outlet override CSV (lake_id, lat, lon). Default: ./outlet_overrides.csv",
     )
     args = parser.parse_args()
     ensure_output_dirs()
@@ -1426,9 +1613,9 @@ if __name__ == "__main__":
         streams_vector_path=str(PASS1_STREAMS),
         lakes_vector_path=str(PREP_LAKES),
         gauges_vector_path=str(PREP_GAUGES),
-        overrides_csv_path="./outlet_overrides.csv",
+        overrides_csv_path=args.csv,
         output_fdr_path=str(FDR_CENTERLINE),
-        output_outlets_path=str(PREP_SELECTED_OUTLETS),
         gauge_radius_meters=750,
         ncores=args.ncores,
+        mode=args.option,
     )
