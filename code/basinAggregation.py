@@ -16,9 +16,9 @@ Algorithm (repeat until an iteration merges nothing):
      aggregate drains into. Junctions (aggregates with 2+ inflows) are visited
      most-upstream first. Headwaters with area_km2 < MIN_SUB_AREA merge into a
      sibling that shares the same DSLINKNO:
-       * 2 inflows, both headwaters, either one small: the longer stream
-         dissolves into the shorter stream.
-       * 3+ inflows, all headwaters: small headwaters merge into the shortest.
+       * 2 inflows, both headwaters, either one small: the shorter stream
+         dissolves into the longer stream.
+       * 3+ inflows, all headwaters: small headwaters merge into the longest.
        * one non-headwater sibling: small headwaters merge into it.
        * several non-headwater siblings: each small headwater merges into the
          one it shares the most border with.
@@ -432,8 +432,8 @@ def headwater_pass(g: AggregateGraph, min_sub_area: float, iteration: int, log: 
       if not (is_small(a) or is_small(b)) or not (sideways_ok(a) and sideways_ok(b)):
         continue
       shorter, longer = sorted(hw, key=by_length)
-      _log_merge(log, g, iteration, "headwater", longer, shorter, "two_headwater_longer_into_shorter")
-      g.merge(longer, shorter, add_stream=False)
+      _log_merge(log, g, iteration, "headwater", shorter, longer, "two_headwater_shorter_into_longer")
+      g.merge(shorter, longer, add_stream=False)
       merged += 1
       continue
 
@@ -441,10 +441,10 @@ def headwater_pass(g: AggregateGraph, min_sub_area: float, iteration: int, log: 
       targets = [a for a in hw if sideways_ok(a)]
       if not targets:
         continue
-      target = min(targets, key=by_length)
+      target = max(targets, key=by_length)
       for src in hw:
         if src != target and sideways_ok(src) and is_small(src):
-          _log_merge(log, g, iteration, "headwater", src, target, "all_headwater_into_shortest")
+          _log_merge(log, g, iteration, "headwater", src, target, "all_headwater_into_longest")
           g.merge(src, target, add_stream=False)
           merged += 1
       continue
