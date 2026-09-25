@@ -20,7 +20,10 @@ Inputs
                                        reservoir edits from conditionLakes.py
                                        are preserved
 
-Rows whose start or end point is outside the raster are skipped silently.
+The start (inflow) point is snapped onto the nearest Pass 1 stream when that
+stream is within INFLOW_SNAP_CELLS, so the new path diverts the existing
+channel. A start farther away is used as given. Rows whose start or end point
+is outside the raster are skipped silently.
 Rows are processed top to bottom; where paths overlap, later rows win.
 
 Re-run this script after any full conditionLakes.py run, which rebuilds
@@ -41,7 +44,7 @@ from osgeo import gdal
 from shapely.geometry import box
 
 from conditionLakes import D8_DIRS, get_d8_direction, get_d8_offset, rasterize_geometry
-from pipeline_paths import FDR_CENTERLINE, INPUT_DEM, PREP_LAKES
+from pipeline_paths import FDR_CENTERLINE, INPUT_DEM, PASS1_STREAMS, PREP_LAKES
 
 gdal.UseExceptions()
 
@@ -53,6 +56,9 @@ gdal.UseExceptions()
 # BASE_COST + VALLEY_SCALE * rel ** VALLEY_POWER, so ridges are expensive and the
 # valley bottom is cheap (same idea as the reservoir centerline penalty).
 BUFFER_CELLS = 50            # cells added around the start/end bounding box
+# Snap the upstream (inflow) point onto a Pass 1 stream when one is this close,
+# so the new path leaves the existing channel. Farther points are used as given.
+INFLOW_SNAP_CELLS = 10
 BASE_COST = 1.0              # cost of one straight step on the valley floor
 VALLEY_SCALE = 100.0         # how strongly high ground is avoided
 VALLEY_POWER = 2.0           # >1 keeps the valley floor cheap and walls steep
@@ -232,6 +238,37 @@ def end_flow_reenters_path(fdr_win, path, max_steps=MAX_LOOP_TRACE_STEPS):
     return False
 
 
+def load_streams(streams_path, raster_proj):
+    """Pass 1 stream lines used to snap inflow points, or None if unavailable."""
+    if not os.path.exists(streams_path):
+        print(f"No streams file at {streams_path}; inflow points will not be snapped.")
+        return None
+    streams = gpd.read_file(streams_path).to_crs(raster_proj)
+    streams = streams[streams.geometry.notna() & ~streams.geometry.is_empty]
+    if streams.empty:
+        return None
+    return streams.reset_index(drop=True)
+
+
+def snap_inflow_to_stream(point, streams, max_dist):
+    """
+    Return (point, snapped).
+
+    When a stream is within max_dist, the point is moved onto that line so the
+    conditioned path diverts the existing channel. Otherwise the point is unchanged.
+    """
+    if streams is None or streams.empty:
+        return point, False
+    (_, line_idx), dists = streams.sindex.nearest(
+        [point], return_all=False, return_distance=True,
+    )
+    dist = float(np.asarray(dists).ravel()[0])
+    if dist > max_dist:
+        return point, False
+    line = streams.geometry.iloc[int(np.asarray(line_idx).ravel()[0])]
+    return line.interpolate(line.project(point)), True
+
+
 def load_lakes(lakes_path, raster_proj):
     if not os.path.exists(lakes_path):
         print(f"No lakes file at {lakes_path}; lake cells will not be protected.")
@@ -239,7 +276,7 @@ def load_lakes(lakes_path, raster_proj):
     return gpd.read_file(lakes_path).to_crs(raster_proj)
 
 
-def condition_streams(csv_path, dem_path, fdr_path, lakes_path):
+def condition_streams(csv_path, dem_path, fdr_path, lakes_path, streams_path):
     """Condition fdr_path along every CSV path. Returns a process exit code."""
     if not os.path.exists(csv_path):
         print(f"No stream conditioning file at {csv_path}; skipping stream conditioning.")
@@ -269,6 +306,9 @@ def condition_streams(csv_path, dem_path, fdr_path, lakes_path):
 
     labels, starts, ends = load_paths_csv(csv_path, raster_proj)
     lakes = load_lakes(lakes_path, raster_proj)
+    streams = load_streams(streams_path, raster_proj)
+    cell_size = max(abs(gt[1]), abs(gt[5]))
+    snap_dist = INFLOW_SNAP_CELLS * cell_size
     print(f"Conditioning {len(labels)} stream path(s) from {csv_path}...")
 
     conditioned = 0
@@ -276,6 +316,14 @@ def condition_streams(csv_path, dem_path, fdr_path, lakes_path):
     total_changed = 0
 
     for label, start_pt, end_pt in zip(labels, starts, ends):
+        start_pt, snapped = snap_inflow_to_stream(start_pt, streams, snap_dist)
+        if snapped:
+            print(f"  {label}: inflow snapped to the nearest stream.")
+        elif streams is not None:
+            print(
+                f"  {label}: inflow is farther than {INFLOW_SNAP_CELLS} cells "
+                "from a stream; using the given point."
+            )
         start_abs = point_to_rc(start_pt, inv_gt, raster_size)
         end_abs = point_to_rc(end_pt, inv_gt, raster_size)
         if start_abs is None or end_abs is None:
@@ -354,4 +402,5 @@ if __name__ == "__main__":
         dem_path=str(INPUT_DEM),
         fdr_path=str(FDR_CENTERLINE),
         lakes_path=str(PREP_LAKES),
+        streams_path=str(PASS1_STREAMS),
     ))
