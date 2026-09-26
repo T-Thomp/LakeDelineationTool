@@ -168,29 +168,6 @@ def build_lake_through_stream_linknos(lakes_gdf, streams_gdf):
     return lake_through_linknos
 
 
-def trace_flow_enters_lake(start_rc, fdr_win, lake_mask):
-    """Follow D8 downstream from start_rc; True if the path re-enters the lake."""
-    height, width = lake_mask.shape
-    row, col = start_rc
-    visited = set()
-
-    while (row, col) not in visited:
-        visited.add((row, col))
-        if lake_mask[row, col]:
-            return True
-
-        dr, dc = get_d8_offset(fdr_win[row, col])
-        if dr == 0 and dc == 0:
-            return False
-
-        nrow, ncol = row + dr, col + dc
-        if not (0 <= nrow < height and 0 <= ncol < width):
-            return False
-        row, col = nrow, ncol
-
-    return False
-
-
 def _override_outward_ray(target_rc, lake_mask):
     """
     Unit step vector from a shoreline cell outward, away from local lake interior.
@@ -233,7 +210,7 @@ def is_link_upstream_of(link_a, link_b, link_to_downstream):
     return False
 
 
-def trace_fdr_to_stream_link(
+def trace_breakout_flow(
     start_rc,
     fdr_win,
     src_win,
@@ -242,34 +219,42 @@ def trace_fdr_to_stream_link(
     lake_mask,
     max_steps=MAX_BREAKOUT_TRACE_STEPS,
 ):
-    """Follow D8 downstream until a stream-network cell; return (LINKNO, hit_rc) or (None, None)."""
+    """
+    Follow D8 downstream from a breakout tip.
+
+    Returns (outcome, link_no, hit_rc), where outcome is:
+      "lake"   - flow runs back into the reservoir
+      "sink"   - flow stops (no direction) or loops
+      "stream" - flow reaches a stream cell (link_no, hit_rc set)
+      "away"   - flow leaves the window or runs max_steps without returning
+    """
     height, width = lake_mask.shape
     row, col = start_rc
     visited = set()
 
     for _ in range(max_steps):
         if (row, col) in visited:
-            return None, None
+            return "sink", -1, None
         visited.add((row, col))
 
         if lake_mask[row, col]:
-            return None, None
+            return "lake", -1, None
 
         if int(src_win[row, col]) == 1:
             link_no = wsno_to_link.get(int(w_win[row, col]), -1)
             if link_no > 0:
-                return link_no, (row, col)
+                return "stream", link_no, (row, col)
 
         dr, dc = get_d8_offset(fdr_win[row, col])
         if dr == 0 and dc == 0:
-            return None, None
+            return "sink", -1, None
 
         nrow, ncol = row + dr, col + dc
         if not (0 <= nrow < height and 0 <= ncol < width):
-            return None, None
+            return "away", -1, None
         row, col = nrow, ncol
 
-    return None, None
+    return "away", -1, None
 
 
 def is_acceptable_outflow_link(
@@ -341,9 +326,10 @@ def compute_override_breakout_path(
     """
     Carve outward one exterior cell at a time along the local-centroid ray.
 
-    After each new cell the temporary FDR is updated and flow is traced to the
-    stream network. Success when the hit link passes vector-graph and (when
-    needed) local_accum checks relative to the override reference outlet.
+    After each new cell the temporary FDR is updated and flow is traced from
+    the tip. Success once that flow does not return to the lake and does not
+    stop in a sink. If it reaches a stream, that link must also pass the
+    vector-graph and local_accum checks (so an inflow branch is rejected).
     """
     ray = _override_outward_ray(target_rc, lake_mask)
     if ray is None:
@@ -374,12 +360,8 @@ def compute_override_breakout_path(
         last_fixed_rc = (next_r, next_c)
         outside_steps += 1
 
-        tip_rc = (next_r, next_c)
-        if trace_flow_enters_lake(tip_rc, temp_fdr, lake_mask):
-            continue
-
-        hit_link, hit_rc = trace_fdr_to_stream_link(
-            tip_rc,
+        outcome, hit_link, hit_rc = trace_breakout_flow(
+            (next_r, next_c),
             temp_fdr,
             src_win,
             w_win,
@@ -387,12 +369,9 @@ def compute_override_breakout_path(
             lake_mask,
             max_trace_steps,
         )
-        # A tip that never reaches the stream network is a sink (or leaves the
-        # window). Keep carving so that cell is given a direction downstream.
-        if hit_link is None:
+        if outcome in ("lake", "sink"):
             continue
-
-        if is_acceptable_outflow_link(
+        if outcome == "stream" and not is_acceptable_outflow_link(
             hit_link,
             hit_rc,
             lake_through_linknos,
@@ -401,7 +380,8 @@ def compute_override_breakout_path(
             ref_accum,
             ref_link,
         ):
-            return breakout_path, True, hit_link
+            continue
+        return breakout_path, True, hit_link if hit_link > 0 else ref_link
 
     return breakout_path, False, -1
 
