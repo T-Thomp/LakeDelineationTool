@@ -308,6 +308,33 @@ def is_acceptable_outflow_link(
     return True
 
 
+def _next_breakout_cell(current_rc, origin_rc, step_r, step_c, lake_mask, carved):
+    """
+    Next D8 neighbour of current_rc along the outward ray from origin_rc.
+
+    Only non-lake, not-yet-carved neighbours that move outward are allowed, so
+    every carved cell drains straight into the one after it. Picks the one
+    closest to the ray line, then the one furthest along it.
+    """
+    ysize, xsize = lake_mask.shape
+    best = None
+    for dr, dc in D8_DIRS:
+        nr, nc = current_rc[0] + dr, current_rc[1] + dc
+        if not (0 <= nr < ysize and 0 <= nc < xsize):
+            continue
+        if lake_mask[nr, nc] or (nr, nc) in carved:
+            continue
+        if dr * step_r + dc * step_c <= 0:
+            continue
+        rel_r, rel_c = nr - origin_rc[0], nc - origin_rc[1]
+        along = rel_r * step_r + rel_c * step_c
+        off_ray = abs(rel_r * step_c - rel_c * step_r)
+        key = (off_ray, -along)
+        if best is None or key < best[0]:
+            best = (key, (nr, nc))
+    return best[1] if best else None
+
+
 def compute_override_breakout_path(
     target_rc,
     lake_mask,
@@ -337,27 +364,27 @@ def compute_override_breakout_path(
 
     step_r, step_c = ray
     ysize, xsize = lake_mask.shape
-    curr_r, curr_c = float(target_rc[0]), float(target_rc[1])
     breakout_path = []
     last_fixed_rc = target_rc
-    temp_fdr = fdr_win.copy()
+    carved = {target_rc}
+    # Validate against the lake as it will be written: every lake cell routed to
+    # the outlet, so a carve that leads back into the lake is caught.
+    temp_fdr = route_centerline_to_target(fdr_win, lake_mask, target_rc, lock_target_value=False)
     outside_steps = 0
 
     while outside_steps < max_steps:
-        curr_r += step_r
-        curr_c += step_c
-        next_r, next_c = int(np.round(curr_r)), int(np.round(curr_c))
-
-        if not (0 <= next_r < ysize and 0 <= next_c < xsize):
+        next_rc = _next_breakout_cell(
+            last_fixed_rc, target_rc, step_r, step_c, lake_mask, carved,
+        )
+        if next_rc is None:
             break
+        next_r, next_c = next_rc
 
-        if lake_mask[next_r, next_c]:
-            continue
-
-        breakout_path.append((last_fixed_rc, (next_r, next_c)))
+        breakout_path.append((last_fixed_rc, next_rc))
         cr, cc = last_fixed_rc
-        temp_fdr[cr, cc] = get_d8_direction(last_fixed_rc, (next_r, next_c))
-        last_fixed_rc = (next_r, next_c)
+        temp_fdr[cr, cc] = get_d8_direction(last_fixed_rc, next_rc)
+        carved.add(next_rc)
+        last_fixed_rc = next_rc
         outside_steps += 1
 
         outcome, hit_link, hit_rc = trace_breakout_flow(
