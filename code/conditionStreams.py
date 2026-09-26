@@ -73,6 +73,9 @@ DIST_WEIGHT = 0.5
 
 # Max D8 steps traced downstream from the end cell when checking for flow loops.
 MAX_LOOP_TRACE_STEPS = 1000
+# Max cells at and past the end point re-pointed downslope when the original
+# flow there would run back into the new path or its banks.
+END_SLOPE_CELLS = 5
 
 DEFAULT_CSV = "./stream_conditioning.csv"
 REQUIRED_COLUMNS = ("start_lat", "start_lon", "end_lat", "end_lon")
@@ -231,8 +234,65 @@ def flanking_cells(curr, nxt):
     ]
 
 
-def apply_path_to_fdr(fdr_win, path, lake_mask):
-    """Point the path downstream, then point both banks into the path."""
+def flows_back(fdr_win, start_rc, edited, max_steps=MAX_LOOP_TRACE_STEPS):
+    """True if D8 flow from start_rc lands on an edited cell, loops, or stops."""
+    h, w = fdr_win.shape
+    row, col = start_rc
+    seen = set()
+    for _ in range(max_steps):
+        if (row, col) in edited or (row, col) in seen:
+            return True
+        seen.add((row, col))
+        dr, dc = get_d8_offset(fdr_win[row, col])
+        if dr == 0 and dc == 0:
+            return True
+        row, col = row + dr, col + dc
+        if not (0 <= row < h and 0 <= col < w):
+            return False
+    return False
+
+
+def exit_end_downslope(updated, end_rc, edited, dem, valid, lake_mask):
+    """
+    Make flow leave the end point instead of sinking there.
+
+    If the end cell's current direction already drains away from the edits, it
+    is kept. Otherwise the end cell, and up to END_SLOPE_CELLS cells after it,
+    are pointed at their steepest-descent neighbour outside the edits until the
+    flow no longer comes back.
+    """
+    h, w = updated.shape
+    dr, dc = get_d8_offset(updated[end_rc])
+    nxt = (end_rc[0] + dr, end_rc[1] + dc)
+    if (dr, dc) != (0, 0) and not (0 <= nxt[0] < h and 0 <= nxt[1] < w):
+        return
+    if (dr, dc) != (0, 0) and nxt not in edited and not flows_back(updated, nxt, edited):
+        return
+
+    current = end_rc
+    for _ in range(END_SLOPE_CELLS):
+        if lake_mask[current]:
+            return
+        best = None
+        for dr, dc in D8_DIRS:
+            nr, nc = current[0] + dr, current[1] + dc
+            if not (0 <= nr < h and 0 <= nc < w) or not valid[nr, nc] or (nr, nc) in edited:
+                continue
+            drop = (dem[current] - dem[nr, nc]) / np.hypot(dr, dc)
+            if best is None or drop > best[0]:
+                best = (drop, (nr, nc))
+        if best is None:
+            return
+        nxt = best[1]
+        updated[current] = get_d8_direction(current, nxt)
+        edited.add(current)
+        if lake_mask[nxt] or not flows_back(updated, nxt, edited):
+            return
+        current = nxt
+
+
+def apply_path_to_fdr(fdr_win, path, lake_mask, dem, valid):
+    """Point the path downstream, point both banks into it, then drain the end downslope."""
     updated = fdr_win.copy()
     for current_rc, next_rc in zip(path[:-1], path[1:]):
         if lake_mask[current_rc]:
@@ -240,6 +300,7 @@ def apply_path_to_fdr(fdr_win, path, lake_mask):
         updated[current_rc] = get_d8_direction(current_rc, next_rc)
 
     on_path = set(path)
+    edited = set(path)
     order = {rc: i for i, rc in enumerate(path)}
     h, w = updated.shape
     for curr, nxt in zip(path[:-1], path[1:]):
@@ -256,6 +317,9 @@ def apply_path_to_fdr(fdr_win, path, lake_mask):
                 continue
             target = max(choices, key=order.get)
             updated[r, c] = get_d8_direction(side, target)
+            edited.add(side)
+
+    exit_end_downslope(updated, path[-1], edited, dem, valid, lake_mask)
     return updated
 
 
@@ -394,7 +458,7 @@ def condition_streams(csv_path, dem_path, fdr_path, lakes_path, streams_path):
         win_gt = window_geotransform(gt, xoff, yoff)
         lake_mask = build_lake_mask(lakes, win_gt, xsize, ysize, raster_proj)
         fdr_win = fdr_band.ReadAsArray(xoff, yoff, xsize, ysize)
-        updated_fdr = apply_path_to_fdr(fdr_win, path, lake_mask)
+        updated_fdr = apply_path_to_fdr(fdr_win, path, lake_mask, dem, valid)
 
         if end_flow_reenters_path(updated_fdr, path):
             print(
