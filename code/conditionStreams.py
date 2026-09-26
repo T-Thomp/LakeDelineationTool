@@ -73,9 +73,10 @@ DIST_WEIGHT = 0.5
 
 # Max D8 steps traced downstream from the end cell when checking for flow loops.
 MAX_LOOP_TRACE_STEPS = 1000
-# Max cells at and past the end point re-pointed downslope when the original
-# flow there would run back into the new path or its banks.
-END_SLOPE_CELLS = 5
+# Max cells in the route searched from the end point to a cell whose flow
+# drains away, used when the end would otherwise run back onto the new path or
+# its banks.
+END_MAX_EXIT_CELLS = 50
 
 DEFAULT_CSV = "./stream_conditioning.csv"
 REQUIRED_COLUMNS = ("start_lat", "start_lon", "end_lat", "end_lon")
@@ -234,22 +235,45 @@ def flanking_cells(curr, nxt):
     ]
 
 
-def flows_back(fdr_win, start_rc, edited, max_steps=MAX_LOOP_TRACE_STEPS):
-    """True if D8 flow from start_rc lands on an edited cell, loops, or stops."""
+def make_escape_check(fdr_win, edited, lake_mask):
+    """
+    Return escapes(rc): True if D8 flow from rc reaches a lake or leaves the
+    window without touching an edited cell, looping, or stopping in a sink.
+    Results are cached along each traced path.
+    """
     h, w = fdr_win.shape
-    row, col = start_rc
-    seen = set()
-    for _ in range(max_steps):
-        if (row, col) in edited or (row, col) in seen:
-            return True
-        seen.add((row, col))
-        dr, dc = get_d8_offset(fdr_win[row, col])
-        if dr == 0 and dc == 0:
-            return True
-        row, col = row + dr, col + dc
-        if not (0 <= row < h and 0 <= col < w):
-            return False
-    return False
+    memo = {}
+
+    def escapes(start_rc):
+        trail = []
+        on_trail = set()
+        row, col = start_rc
+        while True:
+            if not (0 <= row < h and 0 <= col < w):
+                result = True
+                break
+            rc = (row, col)
+            if rc in memo:
+                result = memo[rc]
+                break
+            if rc in edited or rc in on_trail:
+                result = False
+                break
+            if lake_mask[rc]:
+                result = True
+                break
+            trail.append(rc)
+            on_trail.add(rc)
+            dr, dc = get_d8_offset(fdr_win[rc])
+            if dr == 0 and dc == 0:
+                result = False
+                break
+            row, col = row + dr, col + dc
+        for rc in trail:
+            memo[rc] = result
+        return result
+
+    return escapes
 
 
 def exit_end_downslope(updated, end_rc, edited, dem, valid, lake_mask):
@@ -257,38 +281,69 @@ def exit_end_downslope(updated, end_rc, edited, dem, valid, lake_mask):
     Make flow leave the end point instead of sinking there.
 
     If the end cell's current direction already drains away from the edits, it
-    is kept. Otherwise the end cell, and up to END_SLOPE_CELLS cells after it,
-    are pointed at their steepest-descent neighbour outside the edits until the
-    flow no longer comes back.
+    is kept. Otherwise a lowest-cost route (downhill steps are cheap, uphill
+    steps pay UPHILL_PENALTY) is searched from the end cell to the nearest cell
+    whose own flow drains away, and every cell on that route is pointed at the
+    next one. Returns False if no such route exists within END_MAX_EXIT_CELLS.
     """
+    if lake_mask[end_rc]:
+        return True
     h, w = updated.shape
-    dr, dc = get_d8_offset(updated[end_rc])
-    nxt = (end_rc[0] + dr, end_rc[1] + dc)
-    if (dr, dc) != (0, 0) and not (0 <= nxt[0] < h and 0 <= nxt[1] < w):
-        return
-    if (dr, dc) != (0, 0) and nxt not in edited and not flows_back(updated, nxt, edited):
-        return
+    escapes = make_escape_check(updated, edited, lake_mask)
 
-    current = end_rc
-    for _ in range(END_SLOPE_CELLS):
-        if lake_mask[current]:
-            return
-        best = None
-        for dr, dc in D8_DIRS:
-            nr, nc = current[0] + dr, current[1] + dc
-            if not (0 <= nr < h and 0 <= nc < w) or not valid[nr, nc] or (nr, nc) in edited:
+    dr, dc = get_d8_offset(updated[end_rc])
+    if (dr, dc) != (0, 0):
+        nxt = (end_rc[0] + dr, end_rc[1] + dc)
+        if not (0 <= nxt[0] < h and 0 <= nxt[1] < w):
+            return True
+        if nxt not in edited and escapes(nxt):
+            return True
+
+    z_range = max(float(dem[valid].max() - dem[valid].min()), 1e-6)
+    uphill_scale = UPHILL_PENALTY / z_range
+    dist = {end_rc: 0.0}
+    steps = {end_rc: 0}
+    parent = {}
+    pq = [(0.0, end_rc)]
+    target = None
+    while pq:
+        d, rc = heapq.heappop(pq)
+        if d > dist[rc]:
+            continue
+        if rc != end_rc and escapes(rc):
+            target = rc
+            break
+        if steps[rc] >= END_MAX_EXIT_CELLS:
+            continue
+        for dr, dc, step_len in D8_STEPS:
+            nr, nc = rc[0] + dr, rc[1] + dc
+            if not (0 <= nr < h and 0 <= nc < w):
                 continue
-            drop = (dem[current] - dem[nr, nc]) / np.hypot(dr, dc)
-            if best is None or drop > best[0]:
-                best = (drop, (nr, nc))
-        if best is None:
-            return
-        nxt = best[1]
-        updated[current] = get_d8_direction(current, nxt)
-        edited.add(current)
-        if lake_mask[nxt] or not flows_back(updated, nxt, edited):
-            return
-        current = nxt
+            nb = (nr, nc)
+            if not valid[nb] or nb in edited:
+                continue
+            step = step_len
+            rise = dem[nb] - dem[rc]
+            if rise > 0:
+                step += uphill_scale * rise
+            new_d = d + step
+            if new_d < dist.get(nb, np.inf):
+                dist[nb] = new_d
+                steps[nb] = steps[rc] + 1
+                parent[nb] = rc
+                heapq.heappush(pq, (new_d, nb))
+
+    if target is None:
+        return False
+
+    route = [target]
+    while route[-1] != end_rc:
+        route.append(parent[route[-1]])
+    route.reverse()
+    for current_rc, next_rc in zip(route[:-1], route[1:]):
+        updated[current_rc] = get_d8_direction(current_rc, next_rc)
+        edited.add(current_rc)
+    return True
 
 
 def apply_path_to_fdr(fdr_win, path, lake_mask, dem, valid):
@@ -319,8 +374,8 @@ def apply_path_to_fdr(fdr_win, path, lake_mask, dem, valid):
             updated[r, c] = get_d8_direction(side, target)
             edited.add(side)
 
-    exit_end_downslope(updated, path[-1], edited, dem, valid, lake_mask)
-    return updated
+    drained = exit_end_downslope(updated, path[-1], edited, dem, valid, lake_mask)
+    return updated, drained
 
 
 def end_flow_reenters_path(fdr_win, path, max_steps=MAX_LOOP_TRACE_STEPS):
@@ -458,9 +513,15 @@ def condition_streams(csv_path, dem_path, fdr_path, lakes_path, streams_path):
         win_gt = window_geotransform(gt, xoff, yoff)
         lake_mask = build_lake_mask(lakes, win_gt, xsize, ysize, raster_proj)
         fdr_win = fdr_band.ReadAsArray(xoff, yoff, xsize, ysize)
-        updated_fdr = apply_path_to_fdr(fdr_win, path, lake_mask, dem, valid)
+        updated_fdr, drained = apply_path_to_fdr(fdr_win, path, lake_mask, dem, valid)
 
-        if end_flow_reenters_path(updated_fdr, path):
+        if not drained:
+            print(
+                f"  WARNING {label}: no drainage route from the end point within "
+                f"{END_MAX_EXIT_CELLS} cells; the end may be a sink. Move the end "
+                "point further downstream."
+            )
+        elif end_flow_reenters_path(updated_fdr, path):
             print(
                 f"  WARNING {label}: flow leaving the end point runs back onto the new "
                 "path (flow loop). Move the end point further downstream."
