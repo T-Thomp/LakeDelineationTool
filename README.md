@@ -297,7 +297,7 @@ For each row the script:
 2. Takes the rectangle around the two points plus a buffer (`BUFFER_CELLS`, default 50).
 3. Builds a cost surface from the raw DEM: relative elevation in the window (0 on the valley floor, 1 at the highest cell), an uphill penalty, and a small pull toward the end point.
 4. Finds the lowest-cost 8-direction path from start to end, so the path follows the valley the way water would.
-5. Points each path cell's flow direction at the next cell, and points the cells on both sides into the path. If the end cell's flow would run back onto the edits, it (and up to `END_SLOPE_CELLS` cells past it) is pointed downslope instead. Lake cells are never changed.
+5. Points each path cell's flow direction at the next cell, and points the cells on both sides into the path. If the end cell's flow would run back onto the edits or stop, a mostly-downhill route (up to `END_MAX_EXIT_CELLS` cells) is found from the end to the nearest cell that drains away, and those cells are pointed along it. Lake cells are never changed.
 
 A warning is printed if flow leaving the end point runs back onto the path (move the end point further downstream). Weights are constants at the top of the script. If the CSV does not exist, the step is skipped.
 
