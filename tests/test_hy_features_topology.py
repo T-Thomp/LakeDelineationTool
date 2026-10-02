@@ -804,6 +804,18 @@ def test_catchment_divides_and_adjacency():
     assert shared[("3", "")] == pytest.approx(4.0)
 
 
+def test_gauge_catchment_union_allows_overlapping_basins():
+    from hy_features.gauges import _union
+
+    overlapping = [
+        Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+        Polygon([(1, 0), (3, 0), (3, 2), (1, 2)]),
+    ]
+    merged = _union(overlapping)
+    assert merged.is_valid
+    assert merged.area == pytest.approx(6.0)
+
+
 def test_gauge_catchments_and_hydrometric_networks():
     from hy_features.tables import CONTAINMENT_TABLE, HYDROMETRIC_STATION_TABLE
     from hy_features.validate import validate_assembled
