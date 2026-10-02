@@ -45,6 +45,7 @@ from hy_features.schema import (
     HY_CATCHMENT_AGGREGATE,
     HY_CATCHMENT_AREA,
     HY_CATCHMENT_DIVIDE,
+    HY_CHANNEL,
     HY_CHANNEL_NETWORK,
     HY_FLOWPATH,
     HY_HYDRO_NEXUS,
@@ -55,6 +56,7 @@ from hy_features.schema import (
     IS_LAKE_CATCHMENT,
     MESH_OUTLET_SENTINEL,
     OUTFLOW_NEXUS_ID,
+    REALIZES_CATCHMENT,
     UNDETERMINED_LANGUAGE,
     UPPER_CATCHMENT_ID,
     WATERBODY_ID,
@@ -64,10 +66,12 @@ from hy_features.gauges import build_gauge_catchments, register_gauge_catchments
 from hy_features.names import build_feature_name_table
 from hy_features.stamp import stamp_geofabric_layers
 from hy_features.tables import (
+    CHANNEL_MEMBER_TABLE,
     DIVIDE_ADJACENCY_TABLE,
     FEATURE_NAME_TABLE,
     HYDROMETRIC_STATION_TABLE,
     build_association_tables,
+    build_channel_network_members,
 )
 
 
@@ -132,7 +136,7 @@ def assemble_full_geofabric(
         )
 
     dendritic = build_dendritic_catchment_table(basins, streams, outlet_sentinel=outlet_sentinel)
-    channel = build_channel_network(streams, network_id, domain_catchment_id)
+    channel, channels = build_channel_network(streams, network_id, domain_catchment_id)
     divides, divide_adjacency = build_catchment_divides(basins)
 
     registry = build_catchment_registry_from_geofabric(basins, streams)
@@ -145,6 +149,8 @@ def assemble_full_geofabric(
         "hydro_location": locations,
         "channel_network": channel,
     }
+    if channels is not None:
+        layers["surface_channel"] = channels
     if hydrometric is not None and not hydrometric.empty:
         layers["hydrometric_feature"] = hydrometric
     if waterbody_layer is not None and not waterbody_layer.empty:
@@ -153,7 +159,10 @@ def assemble_full_geofabric(
     layers = stamp_geofabric_layers(layers, network_id)
     _finalize_registry(registry, layers, dendritic, network_id, domain_catchment_id)
 
-    extra_tables: dict[str, pd.DataFrame] = {DIVIDE_ADJACENCY_TABLE: divide_adjacency}
+    extra_tables: dict[str, pd.DataFrame] = {
+        DIVIDE_ADJACENCY_TABLE: divide_adjacency,
+        CHANNEL_MEMBER_TABLE: build_channel_network_members(layers),
+    }
     gauges_built = build_gauge_catchments(layers, network_id, outlet_sentinel=outlet_sentinel)
     if gauges_built is not None:
         layers["hydrometric_feature"] = gauges_built["hydrometric_feature"]
@@ -239,6 +248,11 @@ def _finalize_registry(
     flowpaths = layers["flowpath"]
     for cid, fid in zip(flowpaths[FLOWPATH_ID], flowpaths[FEATURE_ID]):
         registry.add(str(cid), HY_FLOWPATH, str(fid), notes="catchmentRealization")
+
+    channels = layers.get("surface_channel")
+    if channels is not None:
+        for cid, fid in zip(channels[REALIZES_CATCHMENT], channels[FEATURE_ID]):
+            registry.add(str(cid), HY_CHANNEL, str(fid), notes="catchmentRealization")
 
     for nexus_id, contributing in zip(nexus[FEATURE_ID], nexus[CONTRIBUTING_CATCHMENT_ID]):
         for cid in str(contributing).split(","):

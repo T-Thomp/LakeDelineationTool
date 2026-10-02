@@ -32,6 +32,7 @@ from hy_features.schema import (
     HY_CATCHMENT_AGGREGATE,
     HY_CATCHMENT_AREA,
     HY_CATCHMENT_DIVIDE,
+    HY_CHANNEL,
     HY_CHANNEL_NETWORK,
     HY_DENDRITIC_CATCHMENT,
     HY_FLOWPATH,
@@ -301,7 +302,8 @@ def test_registry_realizations_and_nexus_associations():
 
     realization_types = {e.realization_type for e in registry.entries}
     assert realization_types == {
-        HY_CATCHMENT_AREA, HY_CATCHMENT_DIVIDE, HY_FLOWPATH, HY_HYDROGRAPHIC_NETWORK, HY_CHANNEL_NETWORK,
+        HY_CATCHMENT_AREA, HY_CATCHMENT_DIVIDE, HY_FLOWPATH, HY_CHANNEL,
+        HY_HYDROGRAPHIC_NETWORK, HY_CHANNEL_NETWORK,
     }
     assert set(registry.catchments) == {"1", "2", "domain"}
     domain = registry.catchments["domain"]
@@ -600,7 +602,7 @@ def test_lake_inflow_location_is_river_mouth_and_confluence_elsewhere():
     assert loc.loc["nx_3", "hydro_loc_type"] == "confluence"
 
 
-def test_channel_network_realizes_domain():
+def test_channel_network_is_channels_not_a_flowpath_multiline():
     basins, streams = _minimal_raw_geofabric()
     assembled = assemble_full_geofabric(basins, streams)
     channel = assembled["layers"]["channel_network"]
@@ -609,8 +611,65 @@ def test_channel_network_realizes_domain():
     assert row[HYF_TYPE] == HY_CHANNEL_NETWORK
     assert row[REALIZES_CATCHMENT] == "domain"
     assert row["drainage_pattern"] == "dendritic"
-    assert row.geometry.geom_type == "MultiLineString"
+    assert "geometry" not in channel.columns
+    assert row["channel_count"] == 2
+
+    reaches = assembled["layers"]["surface_channel"]
+    assert set(reaches[HYF_TYPE]) == {HY_CHANNEL}
+    assert set(reaches["flowpath_id"]) == {"1", "2"}
+    assert set(reaches.geometry.geom_type) == {"LineString"}
+
+    members = assembled["tables"]["channel_network_member"]
+    assert set(members["role"]) == {"surfaceChannel"}
+    assert set(members[FEATURE_ID]) == set(reaches[FEATURE_ID])
     assert assembled["hydrographic_network"]["realized_catchment"] == "domain"
+
+
+def test_lake_outlet_is_the_start_of_the_next_stream():
+    from shapely.geometry import MultiLineString
+
+    from hy_features.network import build_nexus_hydro_locations
+
+    basins = enrich_catchment_areas(gpd.GeoDataFrame(
+        {
+            "DN": [1, 2],
+            "is_lake": [1, 0],
+            "lake_id": [100, -1],
+            "lake_area": [1.0, 0.0],
+            "frac_lake": [1.0, 0.0],
+            "geometry": [
+                Polygon([(8, -2), (12, -2), (12, 6), (8, 6)]),
+                Polygon([(10, -2), (22, -2), (22, 2), (10, 2)]),
+            ],
+        },
+        crs="EPSG:3857",
+    ))
+    streams = enrich_flowpaths(gpd.GeoDataFrame(
+        {
+            "LINKNO": [1, 2],
+            "DSLINKNO": [2, -9999],
+            "geometry": [
+                MultiLineString([[(0, 0), (0, 50)], [(3, 3), (4, 3)]]),
+                LineString([(20, 0), (10, 0)]),
+            ],
+        },
+        crs="EPSG:3857",
+    ), outlet_sentinel=-9999)
+    loc = build_nexus_hydro_locations(streams, basins, outlet_sentinel=-9999)
+    outlet = loc[loc[REALIZED_NEXUS_ID] == "nx_2"].iloc[0]
+    assert outlet.geometry.equals(Point(10, 0))
+    assert outlet["hydro_loc_type"] == "catchment outlet"
+    assert outlet[CONTRIBUTING_CATCHMENT_ID] == "1"
+    assert outlet[WATERBODY_ID] == "100"
+
+
+def test_lake_reaches_stay_channels():
+    assembled = assemble_full_geofabric(_confluence_basins(), _confluence_streams())
+    reaches = assembled["layers"]["surface_channel"]
+    assert set(reaches["realizes_catchment"]) == {"1", "2", "3"}
+    assert set(reaches[HYF_TYPE]) == {HY_CHANNEL}
+    assert "surface_depression" not in assembled["layers"]
+    assert set(assembled["tables"]["channel_network_member"]["role"]) == {"surfaceChannel"}
 
 
 def test_link_tables():
@@ -642,7 +701,7 @@ def test_link_tables():
     assert len(tables[CONTAINMENT_TABLE]) == 3
     realization = tables[REALIZATION_TABLE]
     assert set(realization.loc[realization[CATCHMENT_ID] == "3", "realization_type"]) == {
-        HY_CATCHMENT_AREA, HY_CATCHMENT_DIVIDE, HY_FLOWPATH,
+        HY_CATCHMENT_AREA, HY_CATCHMENT_DIVIDE, HY_FLOWPATH, HY_CHANNEL,
     }
 
 

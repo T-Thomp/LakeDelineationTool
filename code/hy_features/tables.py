@@ -15,6 +15,7 @@ from hy_features.models import CatchmentRegistry
 from hy_features.schema import (
     ASSOCIATION_ROLE,
     CATCHMENT_ID,
+    CHANNEL_NETWORK_ID,
     CONTAINED_CATCHMENT_ID,
     CONTAINING_CATCHMENT_ID,
     CONTRIBUTING_CATCHMENT_ID,
@@ -29,6 +30,7 @@ from hy_features.schema import (
     OUTFLOW_NEXUS_ID,
     REALIZATION_TYPE,
     RECEIVING_CATCHMENT_ID,
+    SURFACE_CHANNEL_ROLE,
     UPPER_CATCHMENT_ID,
     UPSTREAM_WATERBODY_ID,
     WATERBODY_ID,
@@ -44,11 +46,31 @@ NEXUS_CONTRIBUTING_TABLE = "nexus_contributing_catchment"
 WATERBODY_UPSTREAM_TABLE = "waterbody_upstream_waterbody"
 DIVIDE_ADJACENCY_TABLE = "catchment_divide_adjacency"
 HYDROMETRIC_STATION_TABLE = "hydrometric_network_station"
+CHANNEL_MEMBER_TABLE = "channel_network_member"
 FEATURE_NAME_TABLE = "feature_name"
 
 
 def _split(value: object) -> list[str]:
     return [part for part in str(value or "").split(",") if part]
+
+
+def build_channel_network_members(layers: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """surfaceChannel links for the study channel network."""
+    columns = [CHANNEL_NETWORK_ID, FEATURE_ID, ASSOCIATION_ROLE]
+    network = layers.get("channel_network")
+    frame = layers.get("surface_channel")
+    if network is None or network.empty or frame is None or frame.empty:
+        return pd.DataFrame(columns=columns)
+    network_id = str(network[CHANNEL_NETWORK_ID].iloc[0])
+    records = [
+        {
+            CHANNEL_NETWORK_ID: network_id,
+            FEATURE_ID: str(feature_id),
+            ASSOCIATION_ROLE: SURFACE_CHANNEL_ROLE,
+        }
+        for feature_id in frame[FEATURE_ID]
+    ]
+    return pd.DataFrame(records, columns=columns)
 
 
 def build_catchment_table(registry: CatchmentRegistry, network_id: str) -> pd.DataFrame:

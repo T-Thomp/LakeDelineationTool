@@ -26,6 +26,7 @@ HY_RESERVOIR: Final[str] = "HY_Reservoir"
 HY_HYDRO_NEXUS: Final[str] = "HY_HydroNexus"
 HY_HYDROGRAPHIC_NETWORK: Final[str] = "HY_HydrographicNetwork"
 HY_CHANNEL_NETWORK: Final[str] = "HY_ChannelNetwork"
+HY_CHANNEL: Final[str] = "HY_Channel"
 HY_CATCHMENT_AGGREGATE: Final[str] = "HY_CatchmentAggregate"
 HY_CATCHMENT_DIVIDE: Final[str] = "HY_CatchmentDivide"
 HY_HYDROMETRIC_NETWORK: Final[str] = "HY_HydrometricNetwork"
@@ -67,8 +68,10 @@ REALIZATION_TYPE: Final[str] = "realization_type"
 FEATURE_TYPE: Final[str] = "feature_type"
 ASSOCIATION_ROLE: Final[str] = "role"
 
-# HY_ChannelNetwork realization of the study-domain catchment
+# HY_ChannelNetwork (Section 7.4.1): aggregate of delineated surface channels
 CHANNEL_NETWORK_ID: Final[str] = "channel_network_id"
+CHANNEL_ID: Final[str] = "channel_id"
+SURFACE_CHANNEL_ROLE: Final[str] = "surfaceChannel"
 
 # HY_CatchmentDivide neighbours (catchment_divide_adjacency table)
 ADJACENT_CATCHMENT_ID: Final[str] = "adjacent_catchment_id"

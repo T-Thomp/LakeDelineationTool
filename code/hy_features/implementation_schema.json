@@ -24,10 +24,10 @@
   "products": {
     "geofabric.gpkg": {
       "description": "Multi-layer GeoPackage; canonical product (spatial layers + attribute tables)",
-      "required_layers": ["catchment_area", "catchment_divide", "flowpath", "hydro_nexus", "hydro_location", "channel_network"],
-      "required_tables": ["catchment", "catchment_realization", "nexus_contributing_catchment", "catchment_divide_adjacency"],
-      "optional_layers": ["waterbody", "hydrometric_feature", "gauge_catchment", "hydrometric_network"],
-      "optional_tables": ["catchment_association", "catchment_containment", "catchment_upper_catchment", "waterbody_upstream_waterbody", "hydrometric_network_station", "feature_name"]
+      "required_layers": ["catchment_area", "catchment_divide", "flowpath", "hydro_nexus", "hydro_location"],
+      "required_tables": ["catchment", "catchment_realization", "nexus_contributing_catchment", "catchment_divide_adjacency", "channel_network"],
+      "optional_layers": ["surface_channel", "waterbody", "hydrometric_feature", "gauge_catchment", "hydrometric_network"],
+      "optional_tables": ["channel_network_member", "catchment_association", "catchment_containment", "catchment_upper_catchment", "waterbody_upstream_waterbody", "hydrometric_network_station", "feature_name"]
     },
     "geofabric_aggregated.gpkg": {
       "description": "Same schema for the basinAggregation fabric; catchment ids prefixed agg_, catchment_containment links each aggregate to the geofabric.gpkg catchments it contains"
@@ -139,20 +139,21 @@
         { "name": "geometry", "type": "geometry", "geometry_type": "Point", "required": true, "hy_property": "shape" }
       ]
     },
-    "channel_network": {
+    "surface_channel": {
       "gf_feature": true,
-      "hy_feature_types": ["HY_ChannelNetwork"],
-      "geometry_type": "MultiLineString",
+      "hy_feature_types": ["HY_Channel"],
+      "geometry_type": "LineString",
+      "description": "HY_Channel centerline for every delineated reach, including reaches through lake catchments. Recognized as the catchment flowpath (channel-flowpath).",
       "columns": [
-        { "name": "feature_id", "type": "string", "required": true, "notes": "Equals channel_network_id" },
+        { "name": "feature_id", "type": "string", "required": true, "notes": "Pattern ch_{channel_id}" },
         { "name": "network_id", "type": "string", "required": true },
-        { "name": "channel_network_id", "type": "string", "required": true },
-        { "name": "hyf_type", "type": "string", "required": true, "allowed_values": ["HY_ChannelNetwork"] },
+        { "name": "channel_id", "type": "string", "required": true },
+        { "name": "channel_network_id", "type": "string", "required": true, "hy_property": "channelNetwork" },
+        { "name": "hyf_type", "type": "string", "required": true, "allowed_values": ["HY_Channel"] },
         { "name": "hyf_type_uri", "type": "string", "required": true, "format": "uri" },
-        { "name": "realizes_catchment", "type": "string", "required": true, "hy_property": "realizedCatchment", "notes": "Study-domain HY_CatchmentAggregate" },
-        { "name": "drainage_pattern", "type": "string", "required": true, "hy_property": "drainagePattern", "allowed_values": ["dendritic"] },
-        { "name": "flowpath_count", "type": "integer", "required": false },
-        { "name": "geometry", "type": "geometry", "geometry_type": "MultiLineString", "required": true, "hy_property": "shape" }
+        { "name": "realizes_catchment", "type": "string", "required": true, "hy_property": "realizedCatchment" },
+        { "name": "flowpath_id", "type": "string", "required": true, "hy_property": "channel-flowpath", "notes": "The HY_Flowpath this channel is recognized as" },
+        { "name": "geometry", "type": "geometry", "geometry_type": "LineString", "required": true, "hy_property": "shape", "notes": "Channel centerline, the same curve as the flowpath" }
       ]
     },
     "waterbody": {
@@ -232,7 +233,7 @@
       "description": "catchmentRealization: one row per realization feature",
       "columns": [
         { "name": "catchment_id", "type": "string", "required": true },
-        { "name": "realization_type", "type": "string", "required": true, "allowed_values": ["HY_CatchmentArea", "HY_CatchmentDivide", "HY_Flowpath", "HY_HydrographicNetwork", "HY_ChannelNetwork", "HY_HydrometricNetwork"] },
+        { "name": "realization_type", "type": "string", "required": true, "allowed_values": ["HY_CatchmentArea", "HY_CatchmentDivide", "HY_Flowpath", "HY_Channel", "HY_HydrographicNetwork", "HY_ChannelNetwork", "HY_HydrometricNetwork"] },
         { "name": "feature_id", "type": "string", "required": true }
       ]
     },
@@ -280,6 +281,29 @@
         { "name": "catchment_id", "type": "string", "required": true },
         { "name": "adjacent_catchment_id", "type": "string", "required": true, "nillable": true },
         { "name": "shared_length_m", "type": "number", "required": true }
+      ]
+    },
+    "channel_network": {
+      "gf_feature": true,
+      "hy_feature_types": ["HY_ChannelNetwork"],
+      "description": "One HY_ChannelNetwork realizing the study-domain catchment. Shape is carried by surface_channel, not by this record.",
+      "columns": [
+        { "name": "feature_id", "type": "string", "required": true, "notes": "Equals channel_network_id" },
+        { "name": "network_id", "type": "string", "required": true },
+        { "name": "channel_network_id", "type": "string", "required": true },
+        { "name": "hyf_type", "type": "string", "required": true, "allowed_values": ["HY_ChannelNetwork"] },
+        { "name": "hyf_type_uri", "type": "string", "required": true, "format": "uri" },
+        { "name": "realizes_catchment", "type": "string", "required": true, "hy_property": "realizedCatchment", "notes": "Study-domain HY_CatchmentAggregate" },
+        { "name": "drainage_pattern", "type": "string", "required": true, "hy_property": "drainagePattern", "allowed_values": ["dendritic"] },
+        { "name": "channel_count", "type": "integer", "required": false }
+      ]
+    },
+    "channel_network_member": {
+      "description": "HY_ChannelNetwork.surfaceChannel, one row per delineated channel",
+      "columns": [
+        { "name": "channel_network_id", "type": "string", "required": true },
+        { "name": "feature_id", "type": "string", "required": true },
+        { "name": "role", "type": "string", "required": true, "allowed_values": ["surfaceChannel"] }
       ]
     },
     "hydrometric_network": {
@@ -409,6 +433,7 @@
       "hydro_nexus": "",
       "hydro_location": "hl_",
       "channel_network": "",
+      "surface_channel": "ch_",
       "waterbody": "wb_",
       "hydrometric_feature": "hm_"
     },

@@ -7,6 +7,7 @@ import pandas as pd
 
 from hy_features.schema import (
     CATCHMENT_ID,
+    CHANNEL_ID,
     CHANNEL_NETWORK_ID,
     FEATURE_ID,
     FLOWPATH_ID,
@@ -64,6 +65,7 @@ def stamp_geofabric_layers(
         "waterbody": (WATERBODY_ID, "wb_"),
         "hydrometric_feature": (STATION_CODE, "hm_"),
         "channel_network": (CHANNEL_NETWORK_ID, ""),
+        "surface_channel": (CHANNEL_ID, "ch_"),
     }
 
     stamped: dict[str, gpd.GeoDataFrame] = {}

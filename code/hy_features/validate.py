@@ -132,8 +132,8 @@ def _check_references(
     nexuses = _ids(nexus, "nexus_id")
     flowpaths = _ids(flowpath, "flowpath_id")
     feature_layers = ("catchment", "catchment_area", "catchment_divide", "flowpath", "hydro_nexus",
-                      "hydro_location", "channel_network", "waterbody", "hydrometric_feature",
-                      "gauge_catchment", "hydrometric_network")
+                      "hydro_location", "channel_network", "surface_channel",
+                      "waterbody", "hydrometric_feature", "gauge_catchment", "hydrometric_network")
     feature_ids = set().union(*(_ids(frames.get(name), "feature_id") for name in feature_layers))
     feature_ids |= _ids(catchment, "network_id")
 
@@ -153,6 +153,18 @@ def _check_references(
 
     if flowpath is not None:
         expect("flowpath.lower_catchment_id", _ids(flowpath, "lower_catchment_id"), catchments)
+
+    channel = frames.get("surface_channel")
+    channel_network = frames.get("channel_network")
+    expect("surface_channel.realizes_catchment", _ids(channel, "realizes_catchment"), catchments)
+    expect("surface_channel.flowpath_id", _ids(channel, "flowpath_id"), flowpaths)
+    members = frames.get("channel_network_member")
+    expect(
+        "channel_network_member.channel_network_id",
+        _ids(members, "channel_network_id"),
+        _ids(channel_network, "channel_network_id"),
+    )
+    expect("channel_network_member.feature_id", _ids(members, "feature_id"), feature_ids)
 
     if nexus is not None:
         expect("hydro_nexus.contributing_catchment_id", _ids(nexus, "contributing_catchment_id"), catchments)
