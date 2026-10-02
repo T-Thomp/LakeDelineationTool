@@ -122,6 +122,9 @@ def enrich_flowpaths(gdf: gpd.GeoDataFrame, outlet_sentinel: int = -9999) -> gpd
     out[CATCHMENT_ID] = out[FLOWPATH_ID]
     out[REALIZES_CATCHMENT] = out[CATCHMENT_ID]
     out[HYF_TYPE] = HY_FLOWPATH
+    # HY_Flowpath shape is one curve connecting inflow to outflow (Section 7.3).
+    from hy_features.network import _as_linestring
+    out = out.set_geometry([_as_linestring(geom) or geom for geom in out.geometry])
 
     if down_col in out.columns:
         out[LOWER_CATCHMENT_ID] = out[down_col].map(

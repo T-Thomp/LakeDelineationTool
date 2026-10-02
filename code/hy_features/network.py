@@ -156,11 +156,52 @@ def _id_sort_key(value: str) -> tuple[int, float, str]:
         return (1, 0.0, value)
 
 
+def _line_parts(geom) -> list[LineString]:
+    if geom is None or geom.is_empty:
+        return []
+    if geom.geom_type == "LineString":
+        return [geom]
+    if geom.geom_type == "MultiLineString":
+        return [part for part in geom.geoms if part.geom_type == "LineString" and not part.is_empty]
+    line = _as_linestring(geom)
+    return [line] if line is not None else []
+
+
+def _upstream_start(line: LineString) -> Point:
+    """Upstream end of a TauDEM reach. The pour point is ``coords[0]``."""
+    return Point(line.coords[-1])
+
+
+def _next_stream_start(down_geom, near=None) -> Point | None:
+    """
+    Upstream start of the reach downstream of a lake.
+
+    A dissolved lake link is a multilinestring of interior channels, so its own
+    endpoints are confluences inside the lake. The outlet is the start of the
+    next stream (``coords[-1]``; TauDEM stores the pour point at ``coords[0]``).
+    When that next reach is itself a dissolved lake, use the part start nearest
+    the upstream lake.
+    """
+    parts = _line_parts(down_geom)
+    if not parts:
+        return None
+    starts = [_upstream_start(part) for part in parts]
+    if near is None or getattr(near, "is_empty", True) or len(starts) == 1:
+        if len(starts) == 1:
+            return starts[0]
+        longest = max(parts, key=lambda part: part.length)
+        return _upstream_start(longest)
+    return min(starts, key=lambda point: point.distance(near))
+
+
 def _outlet_point_for_reach(
     row: pd.Series,
     streams_indexed: gpd.GeoDataFrame,
     upstream_map: dict[str, list[str]],
     lower: str,
+    *,
+    at_downstream_start: bool = False,
+    near_geom=None,
 ) -> Point | None:
     """
     Locate the catchment outflow (downstream end) of a reach.
@@ -168,7 +209,17 @@ def _outlet_point_for_reach(
     TauDEM ``stream_net`` lines store the pour point at ``coords[0]`` (downstream).
     Prefer ``DSLINKNO`` / upstream topology when available so nexus placement stays
     correct if a reach was reversed during post-processing; otherwise use ``coords[0]``.
+
+    Lake catchments pass ``at_downstream_start`` so the outlet is the start of the
+    next stream instead of a vertex on the dissolved lake line.
     """
+    if at_downstream_start and lower:
+        down_row = _flowpath_row(streams_indexed, lower)
+        if down_row is not None and down_row.geometry is not None:
+            start = _next_stream_start(down_row.geometry, near_geom)
+            if start is not None:
+                return start
+
     line = _as_linestring(row.geometry)
     if line is None:
         return None
@@ -198,9 +249,25 @@ def _outlet_point_for_reach(
     return end_a
 
 
+def _lake_geometries(basins: gpd.GeoDataFrame | None) -> dict[str, object]:
+    """Lake catchment id -> catchment polygon, for siting the outlet on the next stream."""
+    from hy_features.schema import IS_LAKE_CATCHMENT
+
+    if basins is None or IS_LAKE_CATCHMENT not in basins.columns:
+        return {}
+    flagged = pd.to_numeric(basins[IS_LAKE_CATCHMENT], errors="coerce").fillna(0) > 0
+    basin_col = CATCHMENT_ID if CATCHMENT_ID in basins.columns else LEGACY_BASIN_ID
+    return {
+        normalize_id(cid): geom
+        for cid, geom, is_lake in zip(basins[basin_col], basins.geometry, flagged)
+        if is_lake
+    }
+
+
 def build_reach_outlets(
     streams: gpd.GeoDataFrame,
     outlet_sentinel: int = DEFAULT_OUTLET_SENTINEL,
+    basins: gpd.GeoDataFrame | None = None,
 ) -> gpd.GeoDataFrame:
     """One point per reach at its topologic outlet, tagged with its outflow nexus id."""
     link_col = _link_col(streams)
@@ -208,11 +275,16 @@ def build_reach_outlets(
     indexed.index = indexed[link_col].map(normalize_id)
     upstream_map = build_upstream_map(streams, outlet_sentinel)
     lower_map = build_lower_map(streams, outlet_sentinel)
+    lake_geoms = _lake_geometries(basins)
 
     records: list[dict] = []
     for cid, row in indexed.iterrows():
         lower = lower_map.get(cid, "")
-        pt = _outlet_point_for_reach(row, indexed, upstream_map, lower)
+        pt = _outlet_point_for_reach(
+            row, indexed, upstream_map, lower,
+            at_downstream_start=cid in lake_geoms,
+            near_geom=lake_geoms.get(cid),
+        )
         if pt is None:
             continue
         records.append({
@@ -301,7 +373,7 @@ def build_nexus_hydro_locations(
 
     columns = [HYF_TYPE, HYF_TYPE_URI, HYDRO_LOC_TYPE, REALIZED_NEXUS_ID,
                CONTRIBUTING_CATCHMENT_ID, WATERBODY_ID, FEATURE_NAME, "geometry"]
-    outlets = build_reach_outlets(streams, outlet_sentinel)
+    outlets = build_reach_outlets(streams, outlet_sentinel, basins)
     if outlets.empty:
         return gpd.GeoDataFrame(columns=columns, geometry="geometry", crs=streams.crs)
 
@@ -346,38 +418,55 @@ def build_channel_network(
     streams: gpd.GeoDataFrame,
     network_id: str,
     domain_catchment_id: str,
-) -> gpd.GeoDataFrame:
-    """Single HY_ChannelNetwork feature realizing the study-domain catchment."""
-    from shapely.geometry import MultiLineString
+) -> tuple[pd.DataFrame, gpd.GeoDataFrame | None]:
+    """
+    HY_ChannelNetwork as an aggregate of surface channels (Section 7.4.1).
 
+    This is a stream-delineation fabric: every reach is an HY_Channel, including
+    reaches through lake catchments. The network realizes the study-domain catchment
+    and has no geometry of its own. Each channel's centerline is that catchment's
+    flowpath (channel-flowpath). Lakes stay on the hydrographic network as waterbodies.
+    """
     from hy_features.schema import (
+        CHANNEL_ID,
         CHANNEL_NETWORK_ID,
+        HY_CHANNEL,
         HY_CHANNEL_NETWORK,
         REALIZES_CATCHMENT,
     )
 
-    parts: list[LineString] = []
-    for geom in streams.geometry:
-        if geom is None or geom.is_empty:
-            continue
-        if geom.geom_type == "LineString":
-            parts.append(geom)
-        elif geom.geom_type == "MultiLineString":
-            parts.extend(geom.geoms)
+    channel_network_id = f"{network_id}_channels"
+    link_col = _link_col(streams)
 
-    return gpd.GeoDataFrame(
-        [{
-            CHANNEL_NETWORK_ID: f"{network_id}_channels",
-            HYF_TYPE: HY_CHANNEL_NETWORK,
-            HYF_TYPE_URI: hyf_type_uri(HY_CHANNEL_NETWORK),
-            REALIZES_CATCHMENT: domain_catchment_id,
-            "drainage_pattern": DRAINAGE_PATTERN,
-            "flowpath_count": len(streams),
-            "geometry": MultiLineString(parts) if parts else None,
-        }],
-        geometry="geometry",
-        crs=streams.crs,
+    channel_rows: list[dict] = []
+    for _, row in streams.iterrows():
+        cid = normalize_id(row[link_col])
+        line = _as_linestring(row.geometry)
+        if line is None:
+            continue
+        channel_rows.append({
+            CHANNEL_ID: cid,
+            HYF_TYPE: HY_CHANNEL,
+            HYF_TYPE_URI: hyf_type_uri(HY_CHANNEL),
+            CHANNEL_NETWORK_ID: channel_network_id,
+            REALIZES_CATCHMENT: cid,
+            FLOWPATH_ID: cid,
+            "geometry": line,
+        })
+
+    network = pd.DataFrame([{
+        CHANNEL_NETWORK_ID: channel_network_id,
+        HYF_TYPE: HY_CHANNEL_NETWORK,
+        HYF_TYPE_URI: hyf_type_uri(HY_CHANNEL_NETWORK),
+        REALIZES_CATCHMENT: domain_catchment_id,
+        "drainage_pattern": DRAINAGE_PATTERN,
+        "channel_count": len(channel_rows),
+    }])
+    channels = (
+        gpd.GeoDataFrame(channel_rows, geometry="geometry", crs=streams.crs)
+        if channel_rows else None
     )
+    return network, channels
 
 
 def _link_nexuses(
@@ -489,6 +578,7 @@ def assign_hydrometric_positions(
     points = gauges_w.geometry.iloc[positions]
 
     containing: dict[int, str] = {}
+    basins_w = None
     if basins is not None and not basins.empty:
         basin_col = CATCHMENT_ID if CATCHMENT_ID in basins.columns else LEGACY_BASIN_ID
         basins_w = _projected(basins, streams_w.crs)
@@ -505,6 +595,7 @@ def assign_hydrometric_positions(
         for p, s, d in zip(pt_idx, line_idx, dists):
             nearest[unplaced[int(p)]] = (normalize_id(streams_w.iloc[int(s)][link_col]), float(d))
 
+    lake_geoms = _lake_geometries(basins_w)
     for pos in positions:
         catchment_id = containing.get(pos)
         if catchment_id is None:
@@ -520,7 +611,11 @@ def assign_hydrometric_positions(
         if line is None:
             continue
         lower = lower_map.get(catchment_id, "")
-        outlet_pt = _outlet_point_for_reach(reach, streams_indexed, upstream_map, lower)
+        outlet_pt = _outlet_point_for_reach(
+            reach, streams_indexed, upstream_map, lower,
+            at_downstream_start=catchment_id in lake_geoms,
+            near_geom=lake_geoms.get(catchment_id),
+        )
         if outlet_pt is None:
             continue
 
