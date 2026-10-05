@@ -87,7 +87,10 @@
 #       Launch             -- MUST use srun/mpirun (mpi4py); see FLOWPATH_NCORES
 #
 # [ ] conditionStreams.py  (--csv; runs right after conditionLakes.py)
-#       stream_conditioning.csv (optional; id,start_lat,start_lon,end_lat,end_lon)
+#       stream_conditioning.csv (optional; id,start_lat,start_lon,end_lat,end_lon,
+#                                 valley_weight,end_weight; blank keeps defaults.
+#                                 A start in another row's end cell chains; only
+#                                 the last link searches downhill.)
 #       INPUT_DEM          -- raw DEM used for the valley cost surface
 #       outputs            -- edits outputs/interim/taudem_d8/fdr_lakes.tif in place
 #

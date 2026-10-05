@@ -15,7 +15,9 @@ dam, or DEM artifact) and you know where the stream should go.
 Inputs
 ------
   stream_conditioning.csv (optional) - one path per row:
-      id,start_lat,start_lon,end_lat,end_lon     (id is optional)
+      id,start_lat,start_lon,end_lat,end_lon,valley_weight,end_weight
+      id is optional. valley_weight and end_weight are optional and override
+      VALLEY_SCALE and DIST_WEIGHT for that row; a blank cell keeps the default.
   INPUT_DEM (raw DEM)                - cost surface; must share the FDR grid
   fdr_lakes.tif                      - edited in place
   lakes.shp (optional)               - lake cells are never changed, so the
@@ -27,6 +29,11 @@ stream is within INFLOW_SNAP_CELLS, so the new path diverts the existing
 channel. A start farther away is used as given. Rows whose start or end point
 is outside the raster are skipped silently.
 Rows are processed top to bottom; where paths overlap, later rows win.
+
+Links chain when one row's start falls in the same cell as another row's end.
+That shared cell is not given a downhill exit, and the continuing start is not
+snapped, so the paths meet. Only the last link in the chain searches downhill
+from its end.
 
 Re-run this script after any full conditionLakes.py run, which rebuilds
 fdr_lakes.tif from the original TauDEM flow directions.
@@ -62,13 +69,14 @@ BUFFER_CELLS = 50            # cells added around the start/end bounding box
 # so the new path leaves the existing channel. Farther points are used as given.
 INFLOW_SNAP_CELLS = 10
 BASE_COST = 1.0              # cost of one straight step on the valley floor
-VALLEY_SCALE = 400.0         # how strongly high ground is avoided
+VALLEY_SCALE = 400.0         # how strongly high ground is avoided (valley_weight default)
 VALLEY_POWER = 2.0           # >1 keeps the valley floor cheap and walls steep
 # Climbing costs UPHILL_PENALTY per full window relief, so water-like downhill
 # routes win over shortcuts that go up and over a rise.
 UPHILL_PENALTY = 1000.0
 # Small pull toward the end point so the path does not wander on flat ground.
-# Added per cell as DIST_WEIGHT * distance_to_end / max_distance. Set to 0 to disable.
+# Added per cell as end_weight * distance_to_end / max_distance. Set to 0 to disable.
+# DIST_WEIGHT is the default end_weight when the CSV cell is blank.
 DIST_WEIGHT = 0.5
 
 # Max D8 steps traced downstream from the end cell when checking for flow loops.
@@ -84,17 +92,44 @@ REQUIRED_COLUMNS = ("start_lat", "start_lon", "end_lat", "end_lon")
 D8_STEPS = [(dr, dc, float(np.hypot(dr, dc))) for dr, dc in D8_DIRS]
 
 
+def parse_weight(value, default, column, label):
+    """Return default when a CSV weight cell is blank, otherwise a finite float."""
+    if value is None or pd.isna(value):
+        return default
+    text = str(value).strip()
+    if text == "":
+        return default
+    try:
+        weight = float(text)
+    except ValueError as exc:
+        raise ValueError(f"{label} has a non-numeric {column} value: {value!r}") from exc
+    if not np.isfinite(weight):
+        raise ValueError(f"{label} has a non-numeric {column} value: {value!r}")
+    return weight
+
+
 def load_paths_csv(csv_path, target_crs):
-    """Read the CSV and return (labels, start_points, end_points) in target_crs."""
+    """Read the CSV and return labels, points, and per-row weights in target_crs.
+
+    valley_weight and end_weight are optional. A missing column or a blank cell
+    uses VALLEY_SCALE and DIST_WEIGHT.
+    """
     df = pd.read_csv(csv_path)
     missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
     if missing:
         raise ValueError(f"{csv_path} is missing column(s): {', '.join(missing)}")
 
     labels = []
+    valley_weights = []
+    end_weights = []
     for i, row in df.iterrows():
         has_id = "id" in df.columns and pd.notna(row["id"]) and str(row["id"]).strip()
-        labels.append(str(row["id"]).strip() if has_id else f"row {i + 1}")
+        label = str(row["id"]).strip() if has_id else f"row {i + 1}"
+        labels.append(label)
+        valley_value = row["valley_weight"] if "valley_weight" in df.columns else None
+        end_value = row["end_weight"] if "end_weight" in df.columns else None
+        valley_weights.append(parse_weight(valley_value, VALLEY_SCALE, "valley_weight", label))
+        end_weights.append(parse_weight(end_value, DIST_WEIGHT, "end_weight", label))
 
     starts = gpd.GeoSeries(
         gpd.points_from_xy(df["start_lon"], df["start_lat"]), crs="EPSG:4326",
@@ -102,7 +137,39 @@ def load_paths_csv(csv_path, target_crs):
     ends = gpd.GeoSeries(
         gpd.points_from_xy(df["end_lon"], df["end_lat"]), crs="EPSG:4326",
     ).to_crs(target_crs)
-    return labels, list(starts), list(ends)
+    return labels, list(starts), list(ends), valley_weights, end_weights
+
+
+def continuation_mask(start_cells, end_cells):
+    """True when this link's start cell is another link's end cell."""
+    ends = {}
+    for index, cell in enumerate(end_cells):
+        if cell is None:
+            continue
+        ends.setdefault(cell, []).append(index)
+    mask = []
+    for index, cell in enumerate(start_cells):
+        owners = ends.get(cell, ())
+        mask.append(any(owner != index for owner in owners))
+    return mask
+
+
+def drain_end_mask(start_cells, end_cells, routed):
+    """True when this link should search downhill from its end.
+
+    A successfully routed link whose end cell is another routed link's start is
+    an intermediate link. Only the final link in that chain drains downhill.
+    """
+    flags = []
+    for index, end in enumerate(end_cells):
+        chained = False
+        if end is not None:
+            for other, (start, ok) in enumerate(zip(start_cells, routed)):
+                if other != index and ok and start == end:
+                    chained = True
+                    break
+        flags.append(not chained)
+    return flags
 
 
 def point_to_rc(point, inv_gt, raster_size):
@@ -146,7 +213,7 @@ def build_lake_mask(lakes, win_gt, xsize, ysize, raster_proj):
     return mask.astype(bool)
 
 
-def build_cell_cost(dem, valid, end_rc):
+def build_cell_cost(dem, valid, end_rc, valley_weight=VALLEY_SCALE, end_weight=DIST_WEIGHT):
     """Per-cell entry cost: relative-elevation valley term plus distance-to-end pull."""
     z_min = float(dem[valid].min())
     z_max = float(dem[valid].max())
@@ -154,18 +221,20 @@ def build_cell_cost(dem, valid, end_rc):
 
     rel = np.zeros(dem.shape, dtype=np.float64)
     rel[valid] = (dem[valid] - z_min) / z_range
-    cell_cost = BASE_COST + VALLEY_SCALE * rel ** VALLEY_POWER
+    cell_cost = BASE_COST + valley_weight * rel ** VALLEY_POWER
 
-    if DIST_WEIGHT > 0:
+    if end_weight != 0:
         rows, cols = np.indices(dem.shape)
         dist_to_end = np.hypot(rows - end_rc[0], cols - end_rc[1])
-        cell_cost += DIST_WEIGHT * dist_to_end / max(float(dist_to_end.max()), 1.0)
+        cell_cost += end_weight * dist_to_end / max(float(dist_to_end.max()), 1.0)
 
     cell_cost[~valid] = np.inf
     return cell_cost, z_range
 
 
-def route_valley_path(dem, valid, start_rc, end_rc):
+def route_valley_path(
+    dem, valid, start_rc, end_rc, valley_weight=VALLEY_SCALE, end_weight=DIST_WEIGHT,
+):
     """
     Lowest-cost 8-direction path from start_rc to end_rc (Dijkstra).
 
@@ -174,7 +243,9 @@ def route_valley_path(dem, valid, start_rc, end_rc):
     (row, col) cells from start to end, or None if the end is unreachable.
     """
     h, w = dem.shape
-    cell_cost, z_range = build_cell_cost(dem, valid, end_rc)
+    cell_cost, z_range = build_cell_cost(
+        dem, valid, end_rc, valley_weight=valley_weight, end_weight=end_weight,
+    )
     uphill_scale = UPHILL_PENALTY / z_range
 
     dist = np.full((h, w), np.inf)
@@ -346,8 +417,13 @@ def exit_end_downslope(updated, end_rc, edited, dem, valid, lake_mask):
     return True
 
 
-def apply_path_to_fdr(fdr_win, path, lake_mask, dem, valid):
-    """Point the path downstream, point both banks into it, then drain the end downslope."""
+def apply_path_to_fdr(fdr_win, path, lake_mask, dem, valid, drain_end=True):
+    """Point the path downstream, point both banks into it, then drain the end downslope.
+
+    drain_end is false for an intermediate link in a chain. The shared end cell
+    is left for the link that starts there, and only the final link searches
+    downhill.
+    """
     updated = fdr_win.copy()
     for current_rc, next_rc in zip(path[:-1], path[1:]):
         if lake_mask[current_rc]:
@@ -374,6 +450,8 @@ def apply_path_to_fdr(fdr_win, path, lake_mask, dem, valid):
             updated[r, c] = get_d8_direction(side, target)
             edited.add(side)
 
+    if not drain_end:
+        return updated, True
     drained = exit_end_downslope(updated, path[-1], edited, dem, valid, lake_mask)
     return updated, drained
 
@@ -461,18 +539,26 @@ def condition_streams(csv_path, dem_path, fdr_path, lakes_path, streams_path):
     dem_band = ds_dem.GetRasterBand(1)
     dem_nodata = dem_band.GetNoDataValue()
 
-    labels, starts, ends = load_paths_csv(csv_path, raster_proj)
+    labels, starts, ends, valley_weights, end_weights = load_paths_csv(
+        csv_path, raster_proj,
+    )
     lakes = load_lakes(lakes_path, raster_proj)
     streams = load_streams(streams_path, raster_proj)
     cell_size = max(abs(gt[1]), abs(gt[5]))
     snap_dist = INFLOW_SNAP_CELLS * cell_size
     print(f"Conditioning {len(labels)} stream path(s) from {csv_path}...")
 
-    conditioned = 0
-    skipped = 0
-    total_changed = 0
-
-    for label, start_pt, end_pt in zip(labels, starts, ends):
+    raw_starts = [point_to_rc(pt, inv_gt, raster_size) for pt in starts]
+    raw_ends = [point_to_rc(pt, inv_gt, raster_size) for pt in ends]
+    # A start that already sits on another link's end must stay there. Snapping
+    # it onto a stream would break the chain.
+    continues = continuation_mask(raw_starts, raw_ends)
+    resolved_starts = []
+    for label, start_pt, chained_start in zip(labels, starts, continues):
+        if chained_start:
+            print(f"  {label}: start cell continues another link; inflow snap skipped.")
+            resolved_starts.append(start_pt)
+            continue
         start_pt, snapped = snap_inflow_to_stream(start_pt, streams, snap_dist)
         if snapped:
             print(f"  {label}: inflow snapped to the nearest stream.")
@@ -481,41 +567,84 @@ def condition_streams(csv_path, dem_path, fdr_path, lakes_path, streams_path):
                 f"  {label}: inflow is farther than {INFLOW_SNAP_CELLS} cells "
                 "from a stream; using the given point."
             )
-        start_abs = point_to_rc(start_pt, inv_gt, raster_size)
-        end_abs = point_to_rc(end_pt, inv_gt, raster_size)
+        resolved_starts.append(start_pt)
+
+    start_cells = [point_to_rc(pt, inv_gt, raster_size) for pt in resolved_starts]
+    end_cells = raw_ends
+    prepared = []
+    for label, start_abs, end_abs, valley_weight, end_weight in zip(
+        labels, start_cells, end_cells, valley_weights, end_weights,
+    ):
+        item = {
+            "label": label,
+            "valley_weight": valley_weight,
+            "end_weight": end_weight,
+            "window": None,
+            "path": None,
+        }
         if start_abs is None or end_abs is None:
-            skipped += 1
+            prepared.append(item)
             continue
         if start_abs == end_abs:
             print(f"  {label}: start and end fall in the same cell; skipped.")
-            skipped += 1
+            prepared.append(item)
             continue
 
         xoff, yoff, xsize, ysize = path_window(start_abs, end_abs, raster_size)
         start_rc = (start_abs[0] - yoff, start_abs[1] - xoff)
         end_rc = (end_abs[0] - yoff, end_abs[1] - xoff)
-
         dem = dem_band.ReadAsArray(xoff, yoff, xsize, ysize).astype(np.float64)
         valid = np.isfinite(dem)
         if dem_nodata is not None:
             valid &= dem != dem_nodata
         if not (valid[start_rc] and valid[end_rc]):
             print(f"  {label}: start or end cell has no DEM value; skipped.")
-            skipped += 1
+            prepared.append(item)
             continue
 
-        path = route_valley_path(dem, valid, start_rc, end_rc)
+        path = route_valley_path(
+            dem, valid, start_rc, end_rc,
+            valley_weight=valley_weight, end_weight=end_weight,
+        )
         if path is None:
             print(f"  {label}: no path found between start and end; skipped.")
+            prepared.append(item)
+            continue
+        item["window"] = (xoff, yoff, xsize, ysize)
+        item["path"] = path
+        prepared.append(item)
+
+    routed = [item["path"] is not None for item in prepared]
+    drain_flags = drain_end_mask(start_cells, end_cells, routed)
+
+    conditioned = 0
+    skipped = 0
+    total_changed = 0
+    for item, drain_end in zip(prepared, drain_flags):
+        label = item["label"]
+        path = item["path"]
+        if path is None:
             skipped += 1
             continue
 
+        xoff, yoff, xsize, ysize = item["window"]
+        dem = dem_band.ReadAsArray(xoff, yoff, xsize, ysize).astype(np.float64)
+        valid = np.isfinite(dem)
+        if dem_nodata is not None:
+            valid &= dem != dem_nodata
         win_gt = window_geotransform(gt, xoff, yoff)
         lake_mask = build_lake_mask(lakes, win_gt, xsize, ysize, raster_proj)
         fdr_win = fdr_band.ReadAsArray(xoff, yoff, xsize, ysize)
-        updated_fdr, drained = apply_path_to_fdr(fdr_win, path, lake_mask, dem, valid)
+        updated_fdr, drained = apply_path_to_fdr(
+            fdr_win, path, lake_mask, dem, valid, drain_end=drain_end,
+        )
 
-        if not drained:
+        if not drain_end:
+            print(
+                f"  {label}: end cell is the start of another link; "
+                "downhill exit left to the final link."
+            )
+        elif not drained:
             print(
                 f"  WARNING {label}: no drainage route from the end point within "
                 f"{END_MAX_EXIT_CELLS} cells; the end may be a sink. Move the end "
@@ -532,7 +661,13 @@ def condition_streams(csv_path, dem_path, fdr_path, lakes_path, streams_path):
             fdr_band.WriteArray(updated_fdr, xoff, yoff)
         conditioned += 1
         total_changed += changed
-        print(f"  {label}: {len(path)}-cell path, {changed} cell(s) changed.")
+        weights = ""
+        if item["valley_weight"] != VALLEY_SCALE or item["end_weight"] != DIST_WEIGHT:
+            weights = (
+                f" valley_weight={item['valley_weight']:g},"
+                f" end_weight={item['end_weight']:g}."
+            )
+        print(f"  {label}: {len(path)}-cell path, {changed} cell(s) changed.{weights}")
 
     fdr_band.FlushCache()
     ds_fdr = None
@@ -554,7 +689,9 @@ if __name__ == "__main__":
         "--csv",
         default=DEFAULT_CSV,
         help=(
-            "CSV with start_lat,start_lon,end_lat,end_lon (optional id) per path. "
+            "CSV with start_lat,start_lon,end_lat,end_lon per path. "
+            "Optional columns: id, valley_weight, end_weight "
+            "(blank weights use the script defaults). "
             f"Default: {DEFAULT_CSV}"
         ),
     )
