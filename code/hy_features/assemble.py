@@ -24,7 +24,6 @@ from hy_features.json_export import clean_json_records, json_default
 from hy_features.models import CatchmentRegistry
 from hy_features.network import (
     assign_hydrometric_positions,
-    build_channel_network,
     build_dendritic_catchment_table,
     build_hydro_nexus_layer,
     build_hydrographic_network_metadata,
@@ -37,7 +36,6 @@ from hy_features.network import (
 )
 from hy_features.schema import (
     CATCHMENT_ID,
-    CHANNEL_NETWORK_ID,
     CONTRIBUTING_CATCHMENT_ID,
     DEFAULT_DOMAIN_CATCHMENT_ID,
     FEATURE_ID,
@@ -45,8 +43,6 @@ from hy_features.schema import (
     HY_CATCHMENT_AGGREGATE,
     HY_CATCHMENT_AREA,
     HY_CATCHMENT_DIVIDE,
-    HY_CHANNEL,
-    HY_CHANNEL_NETWORK,
     HY_FLOWPATH,
     HY_HYDRO_NEXUS,
     HY_HYDROGRAPHIC_NETWORK,
@@ -56,7 +52,6 @@ from hy_features.schema import (
     IS_LAKE_CATCHMENT,
     MESH_OUTLET_SENTINEL,
     OUTFLOW_NEXUS_ID,
-    REALIZES_CATCHMENT,
     UNDETERMINED_LANGUAGE,
     UPPER_CATCHMENT_ID,
     WATERBODY_ID,
@@ -66,12 +61,10 @@ from hy_features.gauges import build_gauge_catchments, register_gauge_catchments
 from hy_features.names import build_feature_name_table
 from hy_features.stamp import stamp_geofabric_layers
 from hy_features.tables import (
-    CHANNEL_MEMBER_TABLE,
     DIVIDE_ADJACENCY_TABLE,
     FEATURE_NAME_TABLE,
     HYDROMETRIC_STATION_TABLE,
     build_association_tables,
-    build_channel_network_members,
 )
 
 
@@ -136,7 +129,6 @@ def assemble_full_geofabric(
         )
 
     dendritic = build_dendritic_catchment_table(basins, streams, outlet_sentinel=outlet_sentinel)
-    channel, channels = build_channel_network(streams, network_id, domain_catchment_id)
     divides, divide_adjacency = build_catchment_divides(basins)
 
     registry = build_catchment_registry_from_geofabric(basins, streams)
@@ -147,10 +139,7 @@ def assemble_full_geofabric(
         "flowpath": streams,
         "hydro_nexus": nexus,
         "hydro_location": locations,
-        "channel_network": channel,
     }
-    if channels is not None:
-        layers["surface_channel"] = channels
     if hydrometric is not None and not hydrometric.empty:
         layers["hydrometric_feature"] = hydrometric
     if waterbody_layer is not None and not waterbody_layer.empty:
@@ -159,10 +148,7 @@ def assemble_full_geofabric(
     layers = stamp_geofabric_layers(layers, network_id)
     _finalize_registry(registry, layers, dendritic, network_id, domain_catchment_id)
 
-    extra_tables: dict[str, pd.DataFrame] = {
-        DIVIDE_ADJACENCY_TABLE: divide_adjacency,
-        CHANNEL_MEMBER_TABLE: build_channel_network_members(layers),
-    }
+    extra_tables: dict[str, pd.DataFrame] = {DIVIDE_ADJACENCY_TABLE: divide_adjacency}
     gauges_built = build_gauge_catchments(layers, network_id, outlet_sentinel=outlet_sentinel)
     if gauges_built is not None:
         layers["hydrometric_feature"] = gauges_built["hydrometric_feature"]
@@ -186,7 +172,6 @@ def assemble_full_geofabric(
         nexus=layers["hydro_nexus"],
         outlet_sentinel=outlet_sentinel,
         domain_catchment_id=domain_catchment_id,
-        channel_network_id=str(layers["channel_network"][CHANNEL_NETWORK_ID].iloc[0]),
     )
 
     return {
@@ -210,7 +195,7 @@ def _finalize_registry(
     Sync the registry with stamped layers.
 
     ``realizations`` hold only catchmentRealization links (catchment area, flowpath,
-    and the domain's hydrographic / channel network). Nexuses, water bodies, and
+    and the domain's hydrographic network). Nexuses, water bodies, and
     hydrometric features are recorded as ``associations``.
     """
     for _, row in dendritic.iterrows():
@@ -231,11 +216,6 @@ def _finalize_registry(
     for cid in dendritic_ids:
         registry.contain(domain_catchment_id, cid)
     registry.add(domain_catchment_id, HY_HYDROGRAPHIC_NETWORK, network_id, notes="catchmentRealization")
-    channel = layers["channel_network"]
-    registry.add(
-        domain_catchment_id, HY_CHANNEL_NETWORK, str(channel[FEATURE_ID].iloc[0]),
-        notes="catchmentRealization",
-    )
 
     basins = layers["catchment_area"]
     for cid, fid in zip(basins[CATCHMENT_ID], basins[FEATURE_ID]):
@@ -248,11 +228,6 @@ def _finalize_registry(
     flowpaths = layers["flowpath"]
     for cid, fid in zip(flowpaths[FLOWPATH_ID], flowpaths[FEATURE_ID]):
         registry.add(str(cid), HY_FLOWPATH, str(fid), notes="catchmentRealization")
-
-    channels = layers.get("surface_channel")
-    if channels is not None:
-        for cid, fid in zip(channels[REALIZES_CATCHMENT], channels[FEATURE_ID]):
-            registry.add(str(cid), HY_CHANNEL, str(fid), notes="catchmentRealization")
 
     for nexus_id, contributing in zip(nexus[FEATURE_ID], nexus[CONTRIBUTING_CATCHMENT_ID]):
         for cid in str(contributing).split(","):

@@ -46,10 +46,10 @@ module save scimods    # optional; restored by Delineation-Workflow.slurm
 | Software | Purpose (FIR) |
 |----------|----------------|
 | **GDAL 3.9.1** | `gdal_polygonize.py`; pip `GDAL==3.9.1` must match the loaded module |
-| **mpi4py 4.0.0** | `conditionLakes.py` MPI — module load only |
-| **Slurm** | `sbatch`, `srun` — TauDEM MPI passes and `conditionLakes.py` |
+| **mpi4py 4.0.0** | `conditionLakes.py` only when `--ncores` > 1 — module load only |
+| **Slurm** | `sbatch`, `srun` — TauDEM MPI passes. `conditionLakes.py` parallel uses `mpirun` |
 
-TauDEM Pass 1–3 invoke MPI tools via `srun` with `#SBATCH --ntasks=250`. `conditionLakes.py` uses a **separate** smaller `srun` launch (`FLOWPATH_NCORES`).
+TauDEM Pass 1–3 invoke MPI tools via `srun` with `#SBATCH --ntasks=250`. `conditionLakes.py` is separate: `--ncores 1` is a normal Python script (no mpi4py). Parallel lake processing uses `mpirun -np $FLOWPATH_NCORES`, not `srun`.
 
 ### Python venv (FIR)
 
@@ -67,7 +67,7 @@ Day-to-day: `module restore scimods` then `source ~/virtual-envs/scienv/bin/acti
 
 ## Other HPC sites or local setups
 
-Module names and versions differ by cluster (`module spider gdal`, `module spider mpi4py`). On systems **without** an Alliance-style mpi4py module, install MPI Python bindings yourself, for example:
+Module names and versions differ by cluster (`module spider gdal`, `module spider mpi4py`). Serial `conditionLakes.py` (`--ncores 1`) does not need mpi4py. For a parallel run on a system **without** an Alliance-style mpi4py module, install MPI Python bindings yourself, for example:
 
 ```bash
 pip install mpi4py==4.0.0   # after loading your site MPI compiler/module stack
@@ -92,7 +92,7 @@ Adapt `module restore scimods` in `Delineation-Workflow.slurm` to your site’s 
 | **pyproj** | 3.7.1 | CRS transforms (geopandas) |
 | **pytest** | 8.3.4 | `tests/test_hy_features_topology.py` (optional) |
 
-**mpi4py 4.0.0** — required by `conditionLakes.py`. On **FIR**: `module load mpi4py/4.0.0` (not pip). Elsewhere: `pip install mpi4py` or your site’s equivalent.
+**mpi4py 4.0.0** — required only for parallel `conditionLakes.py` (`--ncores` > 1). On **FIR**: `module load mpi4py/4.0.0` (not pip). Elsewhere: `pip install mpi4py` or your site’s equivalent. A one-core run does not import it.
 
 Stdlib only (no pip): `sqlite3` in `getGauges.py`, `hy_features/` JSON export.
 
@@ -269,12 +269,20 @@ outputs/interim/taudem_d8/
 
 Options:
 
-- `--ncores N` — MPI worker ranks (capped at the `srun` task count and at the number of lakes being edited).
+- `--ncores N` — worker count (default: `FLOWPATH_NCORES`, or 1). `1` is a normal Python script. `N>1` is capped at the `mpirun -np` process count and at the number of lakes being edited.
 - `--option full|override` — `full` (default) rebuilds `fdr_lakes.tif` for every lake. `override` re-runs only the lakes listed in `--csv` and pastes them into the existing `fdr_lakes.tif`, first resetting each re-run lake (plus a small ring for old breakout cells) to the original flow directions.
 - `--csv PATH` — outlet override CSV (`lake_id,lat,lon`; default `./outlet_overrides.csv`).
 
+Serial, on a workstation or a compute node:
+
 ```bash
-srun --ntasks=4 python3 conditionLakes.py --option override --csv my_fixes.csv --ncores 4
+python3 code/conditionLakes.py --option override --csv outlet_overrides.csv --ncores 1
+```
+
+Parallel. This Open MPI build has no Slurm PMI support, so start it with `mpirun`:
+
+```bash
+mpirun -np 4 python3 code/conditionLakes.py --option override --csv my_fixes.csv --ncores 4
 ```
 
 Re-run TauDEM Pass 2 / Pass 3 after an override-only run.
@@ -283,23 +291,28 @@ Re-run TauDEM Pass 2 / Pass 3 after an override-only run.
 
 Fixes streams that TauDEM routes the wrong way (road fills, dams, DEM artifacts). Runs right after `conditionLakes.py` and edits `fdr_lakes.tif` in place.
 
-Each row of `stream_conditioning.csv` is one path, from a start point (upstream) to an end point (downstream):
+Each row of `stream_conditioning.csv` is one path, from a start point (upstream) to an end point (downstream). `valley_weight` and `end_weight` are optional. Leave a cell blank to keep the default (`valley_weight` 400, `end_weight` 0.5).
 
 ```csv
-id,start_lat,start_lon,end_lat,end_lon
-bow_fix,51.1784,-115.5708,51.1650,-115.5402
-creek_2,50.9021,-114.8810,50.8893,-114.8467
+id,start_lat,start_lon,end_lat,end_lon,valley_weight,end_weight
+bow_fix,51.1784,-115.5708,51.1650,-115.5402,,
+creek_2,50.9021,-114.8810,50.8893,-114.8467,800,2
+lower,50.8893,-114.8467,50.8800,-114.8300,,
 ```
+
+`valley_weight` is how strongly the path avoids high ground. `end_weight` is the pull toward the end point; `0` turns that pull off.
+
+Rows chain when one start lands in the same grid cell as another row's end. In the example, `lower` starts where `creek_2` ends, so they are one path. Intermediate ends are not sent looking for a downhill exit, and that continuing start is not snapped onto a stream. Only the last link (`lower`) finds a downhill way off its end.
 
 For each row the script:
 
-1. Reprojects both points to the flow-direction grid. Rows with a point outside the raster are skipped.
+1. Reprojects both points to the flow-direction grid. Rows with a point outside the raster are skipped. A start that is not continuing another link is snapped onto a Pass 1 stream when one is within 10 cells.
 2. Takes the rectangle around the two points plus a buffer (`BUFFER_CELLS`, default 50).
-3. Builds a cost surface from the raw DEM: relative elevation in the window (0 on the valley floor, 1 at the highest cell), an uphill penalty, and a small pull toward the end point.
+3. Builds a cost surface from the raw DEM: relative elevation in the window (0 on the valley floor, 1 at the highest cell), an uphill penalty, and a small pull toward the end point. The row's `valley_weight` and `end_weight` replace the defaults when the cells are filled in.
 4. Finds the lowest-cost 8-direction path from start to end, so the path follows the valley the way water would.
-5. Points each path cell's flow direction at the next cell, and points the cells on both sides into the path. If the end cell's flow would run back onto the edits or stop, a mostly-downhill route (up to `END_MAX_EXIT_CELLS` cells) is found from the end to the nearest cell that drains away, and those cells are pointed along it. Lake cells are never changed.
+5. Points each path cell's flow direction at the next cell, and points the cells on both sides into the path. For the last link in a chain (or a link that does not meet another), if the end cell's flow would run back onto the edits or stop, a mostly-downhill route (up to `END_MAX_EXIT_CELLS` cells) is found from the end to the nearest cell that drains away, and those cells are pointed along it. Lake cells are never changed.
 
-A warning is printed if flow leaving the end point runs back onto the path (move the end point further downstream). Weights are constants at the top of the script. If the CSV does not exist, the step is skipped.
+A warning is printed if flow leaving that final end point runs back onto the path (move the end point further downstream). If the CSV does not exist, the step is skipped.
 
 ```bash
 python3 conditionStreams.py --csv stream_conditioning.csv
@@ -523,7 +536,7 @@ outputs/interim/taudem_d8/fdr_lakes.tif
 
 Verify:
 
-- `stream_conditioning.csv` (optional; step is skipped without it)
+- `stream_conditioning.csv` (optional; step is skipped without it). Optional `valley_weight` and `end_weight` columns; blank cells use the defaults. Links chain when one start cell is another row's end cell.
 - Raw DEM on the same grid as `fdr_lakes.tif`
 - Filtered lakes (lake cells are protected)
 

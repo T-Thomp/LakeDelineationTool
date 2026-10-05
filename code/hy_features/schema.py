@@ -25,8 +25,6 @@ HY_IMPOUNDMENT: Final[str] = "HY_Impoundment"
 HY_RESERVOIR: Final[str] = "HY_Reservoir"
 HY_HYDRO_NEXUS: Final[str] = "HY_HydroNexus"
 HY_HYDROGRAPHIC_NETWORK: Final[str] = "HY_HydrographicNetwork"
-HY_CHANNEL_NETWORK: Final[str] = "HY_ChannelNetwork"
-HY_CHANNEL: Final[str] = "HY_Channel"
 HY_CATCHMENT_AGGREGATE: Final[str] = "HY_CatchmentAggregate"
 HY_CATCHMENT_DIVIDE: Final[str] = "HY_CatchmentDivide"
 HY_HYDROMETRIC_NETWORK: Final[str] = "HY_HydrometricNetwork"
@@ -68,11 +66,6 @@ REALIZATION_TYPE: Final[str] = "realization_type"
 FEATURE_TYPE: Final[str] = "feature_type"
 ASSOCIATION_ROLE: Final[str] = "role"
 
-# HY_ChannelNetwork (Section 7.4.1): aggregate of delineated surface channels
-CHANNEL_NETWORK_ID: Final[str] = "channel_network_id"
-CHANNEL_ID: Final[str] = "channel_id"
-SURFACE_CHANNEL_ROLE: Final[str] = "surfaceChannel"
-
 # HY_CatchmentDivide neighbours (catchment_divide_adjacency table)
 ADJACENT_CATCHMENT_ID: Final[str] = "adjacent_catchment_id"
 SHARED_LENGTH_M: Final[str] = "shared_length_m"
@@ -99,7 +92,7 @@ NAME_USAGE_OFFICIAL: Final[str] = "official"
 NAME_USAGE_VERNACULAR: Final[str] = "vernacular"
 
 # Study domain: HY_CatchmentAggregate of every dendritic catchment in the network,
-# realized by the HY_HydrographicNetwork and HY_ChannelNetwork records.
+# realized by the HY_HydrographicNetwork.
 DEFAULT_DOMAIN_CATCHMENT_ID: Final[str] = "domain"
 
 # HY_WaterBody network navigation (Section 7.4.2)
@@ -160,9 +153,6 @@ POINT_TYPE_TO_HYDRO_LOC: Final[dict[str, str]] = {
 
 # Annex B.2 — distanceDescription for positions measured upstream from a reach outlet
 DISTANCE_DESCRIPTION_UPSTREAM: Final[str] = "upstream"
-
-# Drainage pattern of the study channel network (HY_ChannelNetwork.drainagePattern)
-DRAINAGE_PATTERN: Final[str] = "dendritic"
 
 # MESH / WATFLOOD outlet sentinel (documented as nillable outflow nexus)
 DEFAULT_OUTLET_SENTINEL: Final[int] = -9999

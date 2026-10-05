@@ -49,7 +49,7 @@ Status legend:
 | `code` | `catchment_id` = `domain` | **Done** |
 | `containedCatchment` | `catchment_containment` → every dendritic catchment | **Done** |
 | `outflow` | every terminal `nx_out_*` nexus | **Done** |
-| `catchmentRealization` | `HY_HydrographicNetwork`, `HY_ChannelNetwork` | **Done** |
+| `catchmentRealization` | `HY_HydrographicNetwork` | **Done** |
 
 ---
 
@@ -69,7 +69,7 @@ Status legend:
 
 | UML property | Implementation | Status |
 |--------------|----------------|--------|
-| `shape` | single LineString (MultiLineString merged to one curve) | **Done** |
+| `shape` | TauDEM line; a reservoir MultiLineString keeps every dissolved segment | **Done** |
 | `realizedCatchment` | `realizes_catchment` | **Done** |
 | Downstream catchment | `lower_catchment_id` | **Done** |
 | Outflow nexus | `outflow_nexus_id` | **Done** |
@@ -97,29 +97,6 @@ Status legend:
 | Flowpath members | `flowpath_members` | **Done** |
 | `networkWaterBody` | `waterbody_members` + `network_id` on waterbody layer | **Done** |
 | Member link on features | `network_id` column on layers | **Done** |
-
----
-
-## HY_ChannelNetwork
-
-| UML property | Implementation | Status |
-|--------------|----------------|--------|
-| `shape` | none on the network record; geometry is on `surface_channel` | **Done** |
-| `realizedCatchment` | `realizes_catchment` = `domain` | **Done** |
-| `drainagePattern` | `drainage_pattern` = `dendritic` (Annex B.3) | **Done** |
-| `surfaceChannel` | `channel_network_member` role `surfaceChannel` | **Done** |
-| `surfaceDepression` | — | **Out of profile** (stream delineation; lakes are waterbodies) |
-| `flowpath` (inherited) | `flowpath_id` on each member (channel-flowpath) | **Done** |
-| `catchmentArea`, `catchmentDivide` (inherited) | the member catchment's area and divide realizations | **Done** |
-
-## HY_Channel
-
-| UML property | Implementation | Status |
-|--------------|----------------|--------|
-| `shape` | centerline LineString, same curve as the flowpath | **Done** |
-| `channelNetwork` | `channel_network_id` | **Done** |
-| channel-flowpath | `flowpath_id` | **Done** |
-| `stream` | — | **Out of profile** (`HY_River` is not used for reaches) |
 
 ---
 
@@ -213,7 +190,7 @@ Status legend:
 | Concept | Implementation | Status |
 |---------|----------------|--------|
 | Catchment identity | `catchment` table / `catchments` map | **Done** |
-| Realization index | `catchment_realization` / `realizations` (`HY_CatchmentArea`, `HY_CatchmentDivide`, `HY_Flowpath`, `HY_Channel`, `HY_HydrographicNetwork`, `HY_ChannelNetwork`, `HY_HydrometricNetwork`) | **Done** |
+| Realization index | `catchment_realization` / `realizations` (`HY_CatchmentArea`, `HY_CatchmentDivide`, `HY_Flowpath`, `HY_HydrographicNetwork`, `HY_HydrometricNetwork`) | **Done** |
 | Non-realization links | `catchment_association` / `associations` (outflow nexus, `networkWaterBody`, `positionOnRiver`) | **Done** |
 | Nesting | `catchment_containment` / `containments` | **Done** |
 | Referential integrity | `hy_features.validate` | **Done** |

@@ -32,8 +32,6 @@ from hy_features.schema import (
     HY_CATCHMENT_AGGREGATE,
     HY_CATCHMENT_AREA,
     HY_CATCHMENT_DIVIDE,
-    HY_CHANNEL,
-    HY_CHANNEL_NETWORK,
     HY_DENDRITIC_CATCHMENT,
     HY_FLOWPATH,
     HY_HYDROGRAPHIC_NETWORK,
@@ -302,8 +300,8 @@ def test_registry_realizations_and_nexus_associations():
 
     realization_types = {e.realization_type for e in registry.entries}
     assert realization_types == {
-        HY_CATCHMENT_AREA, HY_CATCHMENT_DIVIDE, HY_FLOWPATH, HY_CHANNEL,
-        HY_HYDROGRAPHIC_NETWORK, HY_CHANNEL_NETWORK,
+        HY_CATCHMENT_AREA, HY_CATCHMENT_DIVIDE, HY_FLOWPATH,
+        HY_HYDROGRAPHIC_NETWORK,
     }
     assert set(registry.catchments) == {"1", "2", "domain"}
     domain = registry.catchments["domain"]
@@ -313,7 +311,7 @@ def test_registry_realizations_and_nexus_associations():
     domain_realizations = {
         e.realization_type for e in registry.entries if e.catchment_id == "domain"
     }
-    assert domain_realizations == {HY_HYDROGRAPHIC_NETWORK, HY_CHANNEL_NETWORK}
+    assert domain_realizations == {HY_HYDROGRAPHIC_NETWORK}
 
     nexus_links = {
         (a.catchment_id, a.feature_id) for a in registry.associations
@@ -602,27 +600,41 @@ def test_lake_inflow_location_is_river_mouth_and_confluence_elsewhere():
     assert loc.loc["nx_3", "hydro_loc_type"] == "confluence"
 
 
-def test_channel_network_is_channels_not_a_flowpath_multiline():
-    basins, streams = _minimal_raw_geofabric()
+def test_reservoir_flowpath_keeps_every_dissolved_segment():
+    from shapely.geometry import MultiLineString
+
+    basins = enrich_catchment_areas(gpd.GeoDataFrame(
+        {
+            "DN": [1, 2],
+            "is_lake": [1, 0],
+            "lake_id": [100, -1],
+            "lake_area": [1.0, 0.0],
+            "frac_lake": [1.0, 0.0],
+            "geometry": [
+                Polygon([(8, -2), (12, -2), (12, 6), (8, 6)]),
+                Polygon([(10, -2), (22, -2), (22, 2), (10, 2)]),
+            ],
+        },
+        crs="EPSG:3857",
+    ))
+    reservoir = MultiLineString([[(0, 0), (0, 50)], [(3, 3), (4, 3)]])
+    streams = gpd.GeoDataFrame(
+        {
+            "LINKNO": [1, 2],
+            "DSLINKNO": [2, -9999],
+            "geometry": [reservoir, LineString([(20, 0), (10, 0)])],
+        },
+        crs="EPSG:3857",
+    )
     assembled = assemble_full_geofabric(basins, streams)
-    channel = assembled["layers"]["channel_network"]
-    assert len(channel) == 1
-    row = channel.iloc[0]
-    assert row[HYF_TYPE] == HY_CHANNEL_NETWORK
-    assert row[REALIZES_CATCHMENT] == "domain"
-    assert row["drainage_pattern"] == "dendritic"
-    assert "geometry" not in channel.columns
-    assert row["channel_count"] == 2
-
-    reaches = assembled["layers"]["surface_channel"]
-    assert set(reaches[HYF_TYPE]) == {HY_CHANNEL}
-    assert set(reaches["flowpath_id"]) == {"1", "2"}
-    assert set(reaches.geometry.geom_type) == {"LineString"}
-
-    members = assembled["tables"]["channel_network_member"]
-    assert set(members["role"]) == {"surfaceChannel"}
-    assert set(members[FEATURE_ID]) == set(reaches[FEATURE_ID])
-    assert assembled["hydrographic_network"]["realized_catchment"] == "domain"
+    flowpaths = assembled["layers"]["flowpath"].set_index(FLOWPATH_ID)
+    kept = flowpaths.loc["1"].geometry
+    assert kept.geom_type == "MultiLineString"
+    assert len(kept.geoms) == 2
+    assert kept.equals(reservoir)
+    assert "surface_channel" not in assembled["layers"]
+    assert "channel_network" not in assembled["layers"]
+    assert "channel_network" not in assembled["tables"]
 
 
 def test_lake_outlet_is_the_start_of_the_next_stream():
@@ -663,15 +675,6 @@ def test_lake_outlet_is_the_start_of_the_next_stream():
     assert outlet[WATERBODY_ID] == "100"
 
 
-def test_lake_reaches_stay_channels():
-    assembled = assemble_full_geofabric(_confluence_basins(), _confluence_streams())
-    reaches = assembled["layers"]["surface_channel"]
-    assert set(reaches["realizes_catchment"]) == {"1", "2", "3"}
-    assert set(reaches[HYF_TYPE]) == {HY_CHANNEL}
-    assert "surface_depression" not in assembled["layers"]
-    assert set(assembled["tables"]["channel_network_member"]["role"]) == {"surfaceChannel"}
-
-
 def test_link_tables():
     from hy_features.tables import (
         CATCHMENT_TABLE,
@@ -701,7 +704,7 @@ def test_link_tables():
     assert len(tables[CONTAINMENT_TABLE]) == 3
     realization = tables[REALIZATION_TABLE]
     assert set(realization.loc[realization[CATCHMENT_ID] == "3", "realization_type"]) == {
-        HY_CATCHMENT_AREA, HY_CATCHMENT_DIVIDE, HY_FLOWPATH, HY_CHANNEL,
+        HY_CATCHMENT_AREA, HY_CATCHMENT_DIVIDE, HY_FLOWPATH,
     }
 
 

@@ -13,9 +13,8 @@ This document states encoding conventions reviewers use when comparing GeoPackag
 | Shared nexus | All catchments draining into catchment `X` share one nexus `nx_X` (their `outflow_nexus_id`, and `X`'s `inflow_nexus_id`) |
 | Domain outlet | A catchment with no receiving catchment drains to a terminal nexus `nx_out_{id}`; `lower_catchment_id` and `receiving_catchment_id` are empty |
 | Nexus vs. location | `hydro_nexus` is a non-spatial table. Its positions are `hydro_location` points with `realized_nexus_id` set: one per distinct place a contributor reaches the nexus (tributaries entering a lake at different shore points give several realizations of one nexus) |
-| Study domain | Catchment `domain` (`HY_CatchmentAggregate`) contains every dendritic catchment; it is realized by the `HY_HydrographicNetwork` (`network_id`) and the `HY_ChannelNetwork` (`channel_network`) |
-| Channel vs flowpath | Every delineated reach, including a reach through a lake, is an `HY_Channel` (`ch_{id}`) recognized as the `HY_Flowpath` (`fp_{id}`) of the same catchment. `HY_Depression` is out of profile. The channel network record has no geometry |
-| Flowpath shape | One LineString per catchment. A source MultiLineString is merged into that single curve |
+| Study domain | Catchment `domain` (`HY_CatchmentAggregate`) contains every dendritic catchment; it is realized by the `HY_HydrographicNetwork` (`network_id`) |
+| Flowpath shape | The TauDEM geometry is kept. A reservoir dissolve stays a MultiLineString of every swallowed segment |
 | Aggregated basins | Ids `agg_{LINKNO}`, domain `agg_domain`, network `study_hydrographic_network_aggregated`, all in `geofabric_aggregated.gpkg` |
 | Gauge catchments | Catchment `gauge_{station}` (`HY_CatchmentAggregate`) contains the host catchment and every catchment upstream; its outflow `nx_gauge_{station}` is realized by the station (`hydrometric_feature.realized_nexus_id`, outlet-at-station) |
 | Hydrometric networks | `hmn_{station}` realizes `gauge_{station}`; its stations are the outlet station and every station upstream of it (on the host reach, only stations further from the reach outlet) |
@@ -41,7 +40,6 @@ This document states encoding conventions reviewers use when comparing GeoPackag
 |-------|---------|
 | `network_id` | `study_hydrographic_network` |
 | `domain` catchment id | `domain` |
-| `channel_network.drainage_pattern` | `dendritic` |
 | Name language (`assemble_full_geofabric(name_language=...)`) | `und` (ISO 639-2 undetermined) |
 | Name `usage` (Annex B.4) / `preferred_by` | HydroLAKES names: `conventional` / `HydroLAKES`; HYDAT station names: `official` / `Water Survey of Canada (HYDAT)` |
 | MESH outlet sentinel (legacy remap only) | `-9999` |
@@ -79,8 +77,7 @@ Shapefiles written by the pipeline keep only TauDEM / MESH columns (`DN`, `LINKN
 | Table | HY_Features element |
 |-------|---------------------|
 | `catchment` | Holistic `HY_DendriticCatchment` / `HY_CatchmentAggregate` (`outflow`, `inflow`, `lowerCatchment`, `upperCatchment`) |
-| `catchment_realization` | `catchmentRealization` → `HY_CatchmentArea`, `HY_CatchmentDivide`, `HY_Flowpath`, `HY_Channel`, `HY_HydrographicNetwork`, `HY_ChannelNetwork`, `HY_HydrometricNetwork` |
-| `channel_network_member` | `surfaceChannel` |
+| `catchment_realization` | `catchmentRealization` → `HY_CatchmentArea`, `HY_CatchmentDivide`, `HY_Flowpath`, `HY_HydrographicNetwork`, `HY_HydrometricNetwork` |
 | `catchment_divide_adjacency` | Neighbour across each part of a `HY_CatchmentDivide` (empty = domain boundary) |
 | `hydrometric_network_station` | `networkStation` / `hydrometricNetwork` |
 | `feature_name` | `HY_HydroFeatureName` |

@@ -56,8 +56,7 @@ All paths below are relative to `outputs/working/` unless noted.
 |-------|---------------------|----------|-------|
 | `catchment_area` | `HY_CatchmentArea` | yes | Basin polygons |
 | `catchment_divide` | `HY_CatchmentDivide` | yes | Basin boundaries as lines |
-| `flowpath` | `HY_Flowpath` | yes | One curve per catchment, from inflow to outflow |
-| `surface_channel` | `HY_Channel` | no | Centerline of every delineated reach, including reaches through lakes |
+| `flowpath` | `HY_Flowpath` | yes | TauDEM reach; a reservoir keeps every dissolved segment |
 | `hydro_location` | `HY_HydroLocation` | yes | `nexusRealization` of every nexus, plus pour points not already on a nexus |
 | `waterbody` | `HY_Lake`, `HY_Impoundment` | no | HydroLAKES polygons when available |
 | `hydrometric_feature` | `HY_HydrometricFeature` | no | Gauges in basin |
@@ -67,8 +66,6 @@ All paths below are relative to `outputs/working/` unless noted.
 
 | Table | HY_Features element | Required |
 |-------|---------------------|----------|
-| `channel_network` | `HY_ChannelNetwork` | yes |
-| `channel_network_member` | `surfaceChannel` | when the network has members |
 | `hydro_nexus` | `HY_HydroNexus` | yes |
 | `catchment` | `HY_DendriticCatchment`, `HY_CatchmentAggregate` (holistic catchments) | yes |
 | `catchment_realization` | `catchmentRealization` | yes |
@@ -129,7 +126,7 @@ The `catchment` row `domain` (`hyf_type` = `HY_CatchmentAggregate`) is the encom
 |-----------------------------------|----------------|
 | `containedCatchment` | `catchment_containment` rows `domain` → every dendritic catchment |
 | `outflow` | `outflow_nexus_id` = every terminal `nx_out_*` nexus (comma-separated) |
-| `catchmentRealization` | `catchment_realization` rows → `HY_HydrographicNetwork` (`network_id`) and `HY_ChannelNetwork` (`channel_network`) |
+| `catchmentRealization` | `catchment_realization` rows → `HY_HydrographicNetwork` (`network_id`) |
 
 ### Aggregated basins (`geofabric_aggregated.gpkg`)
 
@@ -168,7 +165,7 @@ Types `2` and `3` map to **`HY_Impoundment`**, an OGC **`HY_WaterBody` subtype**
 
 ### HY_Flowpath (`flowpath` layer)
 
-A flowpath is the hydrologic path of a water particle from the catchment inflow to its outflow (Section 7.3). It is a catchment realization, not a channel. In this dendritic fabric each catchment has one flowpath, and the shape is a single curve (a MultiLineString is merged to one LineString). The outflow and inflow nexus ids are the nodes that bound that edge.
+A flowpath is the hydrologic path of a water particle from the catchment inflow to its outflow (Section 7.3). TauDEM does not delineate channels, so stream reaches are only `HY_Flowpath`. Each catchment has one flowpath. A reservoir dissolve stays a MultiLineString of every swallowed segment, the same geometry as the stream shapefile. The outflow and inflow nexus ids are the nodes that bound that edge.
 
 | HY_Features property / association | Implementation column | TauDEM / legacy source |
 |-----------------------------------|----------------------|------------------------|
@@ -176,7 +173,7 @@ A flowpath is the hydrologic path of a water particle from the catchment inflow 
 | Flowpath id | `flowpath_id` | `LINKNO` |
 | `realizedCatchment` | `realizes_catchment` | equals `catchment_id` |
 | Catchment code | `catchment_id` | `LINKNO` (1:1 link–catchment) |
-| `shape` | LineString | stream centerline, one curve |
+| `shape` | LineString or MultiLineString | TauDEM centerline; reservoir dissolve keeps every segment |
 | `lowerCatchment` | `lower_catchment_id` | `DSLINKNO`; blanked at outlet sentinel |
 | `outflow` | `outflow_nexus_id` | derived |
 | `inflow` | `inflow_nexus_id` | derived |
@@ -303,43 +300,14 @@ JSON record at `hydrographic_network.json` → `hydrographic_network`:
 | Domain outlets | `outlet_catchments` |
 | Flowpath members | `flowpath_members` |
 | Water-body members | `waterbody_members` |
-| Channel network | `channel_network_id` |
 | `HY_HydroNexus.contributingCatchment` links | `nexus_contributing_catchment` |
-
-### HY_ChannelNetwork (`channel_network` table)
-
-The channel network is the network of delineated stream channels (Section 7.4.1), separate from the hydrographic network of waterbodies. It realizes `domain` as an aggregate of `HY_Channel` features, including reaches that pass through lake catchments. Depressions are out of this stream-delineation profile. The network record has no geometry: the shape of an `HY_HydroNetwork` is the geometry of its parts.
-
-| HY_Features property / association | Implementation column | Notes |
-|-----------------------------------|----------------------|-------|
-| Feature type | `hyf_type` = `HY_ChannelNetwork` | |
-| Identifier | `channel_network_id` = `feature_id` | `{network_id}_channels` |
-| `realizedCatchment` | `realizes_catchment` | `domain` |
-| `drainagePattern` | `drainage_pattern` | `dendritic` (Annex B.3) |
-| `surfaceChannel` | `channel_network_member.role` = `surfaceChannel` | `surface_channel` layer |
-| `surfaceDepression` | — | out of profile |
-| `shape` | — | carried by the channel centerlines |
-
-### HY_Channel (`surface_channel` layer)
-
-One channel per delineated reach, including a reach through a lake catchment. The channel-flowpath constraint recognizes it as that catchment's `HY_Flowpath`; the geometry is the flowpath centerline, so a position can be measured along the channel.
-
-| HY_Features property / association | Implementation column | Notes |
-|-----------------------------------|----------------------|-------|
-| Feature type | `hyf_type` = `HY_Channel` | |
-| Identifier | `feature_id` | `ch_{channel_id}` |
-| `channelNetwork` | `channel_network_id` | |
-| `realizedCatchment` | `realizes_catchment` | the dendritic catchment |
-| channel-flowpath | `flowpath_id` | the `HY_Flowpath` with the same id |
-| `shape` | LineString | flowpath centerline |
-| `stream` | — | not encoded; this profile does not type stream reaches as `HY_River` |
 
 ## Catchment registry
 
 `catchment_registry.json` separates **holistic catchment identity** from geometric realizations (OGC Section 7.2). The GeoPackage tables carry the same content.
 
 - `catchments` — one entry per `catchment_id` (dendritic catchments and the `domain` aggregate) with nexus and neighbour links
-- `realizations` — `catchmentRealization` rows: `HY_CatchmentArea`, `HY_CatchmentDivide`, `HY_Flowpath`, and `HY_Channel` per catchment; `HY_HydrographicNetwork` and `HY_ChannelNetwork` for `domain`; `HY_CatchmentArea` and `HY_HydrometricNetwork` per gauge catchment
+- `realizations` — `catchmentRealization` rows: `HY_CatchmentArea`, `HY_CatchmentDivide`, and `HY_Flowpath` per catchment; `HY_HydrographicNetwork` for `domain`; `HY_CatchmentArea` and `HY_HydrometricNetwork` per gauge catchment
 - `associations` — non-realization links: each catchment's outflow `HY_HydroNexus`, lake catchments' `HY_Lake` / `HY_Impoundment` (`networkWaterBody`), and `HY_HydrometricFeature` positions
 - `containments` — `containingCatchment` → `containedCatchment` pairs
 
@@ -384,7 +352,7 @@ Use `--preset taudem_raw` for minimal TauDEM naming. Add custom presets or `--ov
 |--------|------|
 | `hy_features/schema.py` | Column names, type codes, vocabulary |
 | `hy_features/enrich.py` | Add HY columns to pipeline GeoDataFrames |
-| `hy_features/network.py` | Nexuses and their hydro locations, channel network, dendritic table, waterbody links, gauge positioning |
+| `hy_features/network.py` | Nexuses and their hydro locations, dendritic table, waterbody links, gauge positioning |
 | `hy_features/tables.py` | Holistic catchment and link tables |
 | `hy_features/divides.py` | Catchment divides and adjacency |
 | `hy_features/gauges.py` | Gauge catchments, gauge nexuses, hydrometric networks |
