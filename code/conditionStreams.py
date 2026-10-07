@@ -69,15 +69,15 @@ BUFFER_CELLS = 50            # cells added around the start/end bounding box
 # so the new path leaves the existing channel. Farther points are used as given.
 INFLOW_SNAP_CELLS = 10
 BASE_COST = 1.0              # cost of one straight step on the valley floor
-VALLEY_SCALE = 400.0         # how strongly high ground is avoided (valley_weight default)
+VALLEY_SCALE = 1.5         # how strongly high ground is avoided (valley_weight default)
 VALLEY_POWER = 2.0           # >1 keeps the valley floor cheap and walls steep
 # Climbing costs UPHILL_PENALTY per full window relief, so water-like downhill
 # routes win over shortcuts that go up and over a rise.
-UPHILL_PENALTY = 1000.0
+UPHILL_PENALTY = 100.0
 # Small pull toward the end point so the path does not wander on flat ground.
 # Added per cell as end_weight * distance_to_end / max_distance. Set to 0 to disable.
 # DIST_WEIGHT is the default end_weight when the CSV cell is blank.
-DIST_WEIGHT = 0.5
+DIST_WEIGHT = 0.1
 
 # Max D8 steps traced downstream from the end cell when checking for flow loops.
 MAX_LOOP_TRACE_STEPS = 1000
