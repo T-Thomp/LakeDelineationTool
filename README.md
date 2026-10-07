@@ -127,6 +127,7 @@ Python preprocessing
 
 • conditionStreams.py (optional)
     Force flow along user-defined valley paths
+    Each path can set its own valley_weight and end_weight
     Edits fdr_lakes.tif in place
 
        │
@@ -291,16 +292,16 @@ Re-run TauDEM Pass 2 / Pass 3 after an override-only run.
 
 Fixes streams that TauDEM routes the wrong way (road fills, dams, DEM artifacts). Runs right after `conditionLakes.py` and edits `fdr_lakes.tif` in place.
 
-Each row of `stream_conditioning.csv` is one path, from a start point (upstream) to an end point (downstream). `valley_weight` and `end_weight` are optional. Leave a cell blank to keep the default (`valley_weight` 400, `end_weight` 0.5).
+Each row of `stream_conditioning.csv` is one path, from a start point (upstream) to an end point (downstream). `valley_weight` and `end_weight` are optional, and they are chosen per path. Leave a cell blank, or omit the columns, to keep the defaults (`valley_weight` 1.5, `end_weight` 0.1). A filled cell replaces that default for that row only.
 
 ```csv
 id,start_lat,start_lon,end_lat,end_lon,valley_weight,end_weight
 bow_fix,51.1784,-115.5708,51.1650,-115.5402,,
-creek_2,50.9021,-114.8810,50.8893,-114.8467,800,2
+creek_2,50.9021,-114.8810,50.8893,-114.8467,4,0
 lower,50.8893,-114.8467,50.8800,-114.8300,,
 ```
 
-`valley_weight` is how strongly the path avoids high ground. `end_weight` is the pull toward the end point; `0` turns that pull off.
+`valley_weight` is how strongly the path avoids high ground. Raise it when the path still climbs out of the valley; lower it when the path is too tightly pinned to the lowest cells. `end_weight` is the pull toward the end point, which keeps the path from wandering on flat ground. `0` turns that pull off. Non-numeric values are rejected.
 
 Rows chain when one start lands in the same grid cell as another row's end. In the example, `lower` starts where `creek_2` ends, so they are one path. Intermediate ends are not sent looking for a downhill exit, and that continuing start is not snapped onto a stream. Only the last link (`lower`) finds a downhill way off its end.
 
@@ -536,7 +537,7 @@ outputs/interim/taudem_d8/fdr_lakes.tif
 
 Verify:
 
-- `stream_conditioning.csv` (optional; step is skipped without it). Optional `valley_weight` and `end_weight` columns; blank cells use the defaults. Links chain when one start cell is another row's end cell.
+- `stream_conditioning.csv` (optional; step is skipped without it). Optional `valley_weight` and `end_weight` columns, one pair per path. Blank cells use the defaults (1.5 and 0.1). Links chain when one start cell is another row's end cell.
 - Raw DEM on the same grid as `fdr_lakes.tif`
 - Filtered lakes (lake cells are protected)
 
