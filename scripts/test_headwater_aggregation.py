@@ -34,6 +34,8 @@ def make_network(rows: list[dict]) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
       "DN": r["id"],
       "area_km2": r["area"],
       "is_lake": int(r.get("lake", 0)),
+      "lake_area": r.get("lake_area_m2", 0.0),
+      "frac_lake": r.get("frac_lake", 0.0),
       "STATION_NU": r.get("gauge", ""),
       "geometry": geom,
     })
@@ -189,7 +191,25 @@ def main() -> None:
     ],
     {94: {91, 92, 93, 94}, 95: {95}},
   )
+  check_lake_fraction()
   print("All tests passed.")
+
+
+def check_lake_fraction() -> None:
+  """Aggregation must carry lake_area / frac_lake through, not recompute them."""
+  rows = [
+    {"id": 1, "down": 3, "area": 500, "lake": 1, "lake_area_m2": 125e6, "frac_lake": 0.2},
+    {"id": 2, "down": 3, "area": 500, "lake": 1, "lake_area_m2": 900e6, "frac_lake": 0.9},
+    {"id": 3, "down": OUT, "area": 500},
+  ]
+  _, agg_b, _, _ = aggregate(rows)
+  by_id = agg_b.set_index("LINKNO")
+  assert by_id.loc[1, "frac_lake"] == 0.2, f"lake 1 frac_lake changed: {by_id.loc[1, 'frac_lake']}"
+  assert by_id.loc[2, "frac_lake"] == 0.9, f"lake 2 frac_lake changed: {by_id.loc[2, 'frac_lake']}"
+  assert by_id.loc[3, "frac_lake"] == 0.0, f"no lake: expected 0, got {by_id.loc[3, 'frac_lake']}"
+  assert by_id.loc[1, "lake_area"] == 125e6, "lake_area must stay in m2"
+  assert (by_id["frac_lake"] <= 1.0).all(), "frac_lake must be a 0-1 fraction"
+  print("PASS lake fraction carried through unchanged")
 
 
 if __name__ == "__main__":
