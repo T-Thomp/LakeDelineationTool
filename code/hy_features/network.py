@@ -20,7 +20,6 @@ from hy_features.schema import (
     DISTANCE_FROM_OUTLET_M,
     DISTANCE_FROM_OUTLET_PCT,
     DOWNSTREAM_WATERBODY_ID,
-    DRAINAGE_PATTERN,
     FLOWPATH_ID,
     HOST_FLOWPATH_ID,
     HYF_TYPE,
@@ -414,61 +413,6 @@ def build_nexus_hydro_locations(
     return gpd.GeoDataFrame(records, columns=columns, geometry="geometry", crs=streams.crs)
 
 
-def build_channel_network(
-    streams: gpd.GeoDataFrame,
-    network_id: str,
-    domain_catchment_id: str,
-) -> tuple[pd.DataFrame, gpd.GeoDataFrame | None]:
-    """
-    HY_ChannelNetwork as an aggregate of surface channels (Section 7.4.1).
-
-    This is a stream-delineation fabric: every reach is an HY_Channel, including
-    reaches through lake catchments. The network realizes the study-domain catchment
-    and has no geometry of its own. Each channel's centerline is that catchment's
-    flowpath (channel-flowpath). Lakes stay on the hydrographic network as waterbodies.
-    """
-    from hy_features.schema import (
-        CHANNEL_ID,
-        CHANNEL_NETWORK_ID,
-        HY_CHANNEL,
-        HY_CHANNEL_NETWORK,
-        REALIZES_CATCHMENT,
-    )
-
-    channel_network_id = f"{network_id}_channels"
-    link_col = _link_col(streams)
-
-    channel_rows: list[dict] = []
-    for _, row in streams.iterrows():
-        cid = normalize_id(row[link_col])
-        line = _as_linestring(row.geometry)
-        if line is None:
-            continue
-        channel_rows.append({
-            CHANNEL_ID: cid,
-            HYF_TYPE: HY_CHANNEL,
-            HYF_TYPE_URI: hyf_type_uri(HY_CHANNEL),
-            CHANNEL_NETWORK_ID: channel_network_id,
-            REALIZES_CATCHMENT: cid,
-            FLOWPATH_ID: cid,
-            "geometry": line,
-        })
-
-    network = pd.DataFrame([{
-        CHANNEL_NETWORK_ID: channel_network_id,
-        HYF_TYPE: HY_CHANNEL_NETWORK,
-        HYF_TYPE_URI: hyf_type_uri(HY_CHANNEL_NETWORK),
-        REALIZES_CATCHMENT: domain_catchment_id,
-        "drainage_pattern": DRAINAGE_PATTERN,
-        "channel_count": len(channel_rows),
-    }])
-    channels = (
-        gpd.GeoDataFrame(channel_rows, geometry="geometry", crs=streams.crs)
-        if channel_rows else None
-    )
-    return network, channels
-
-
 def _link_nexuses(
     gdf: gpd.GeoDataFrame,
     id_col: str,
@@ -818,7 +762,6 @@ def build_hydrographic_network_metadata(
     nexus: pd.DataFrame | None = None,
     outlet_sentinel: int = DEFAULT_OUTLET_SENTINEL,
     domain_catchment_id: str = "domain",
-    channel_network_id: str | None = None,
 ) -> dict:
     """HY_HydrographicNetwork metadata record (Section 7.4.2)."""
     link_col = _link_col(streams)
@@ -853,7 +796,6 @@ def build_hydrographic_network_metadata(
         "hyf_type_uri": hyf_type_uri(HY_HYDROGRAPHIC_NETWORK),
         "realized_catchment": domain_catchment_id,
         "outlet_catchments": outlet_catchments,
-        "channel_network_id": channel_network_id,
         "flowpath_members": flowpath_ids,
         "waterbody_members": wb_list,
         "flowpath_count": len(flowpath_ids),

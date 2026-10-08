@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import geopandas as gpd
 import pandas as pd
+
+if TYPE_CHECKING:
+    from hy_features.models import CatchmentRegistry
 
 from hy_features.schema import (
     CATCHMENT_ID,
     FLOWPATH_ID,
-    FRAC_LAKE,
     HOST_FLOWPATH_ID,
     HYDRO_LOC_TYPE,
     HYF_TYPE,
@@ -122,9 +126,6 @@ def enrich_flowpaths(gdf: gpd.GeoDataFrame, outlet_sentinel: int = -9999) -> gpd
     out[CATCHMENT_ID] = out[FLOWPATH_ID]
     out[REALIZES_CATCHMENT] = out[CATCHMENT_ID]
     out[HYF_TYPE] = HY_FLOWPATH
-    # HY_Flowpath shape is one curve connecting inflow to outflow (Section 7.3).
-    from hy_features.network import _as_linestring
-    out = out.set_geometry([_as_linestring(geom) or geom for geom in out.geometry])
 
     if down_col in out.columns:
         out[LOWER_CATCHMENT_ID] = out[down_col].map(
@@ -226,7 +227,7 @@ def enrich_hydrometric_features(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 def build_catchment_registry_from_geofabric(
     basins: gpd.GeoDataFrame,
     streams: gpd.GeoDataFrame,
-) -> "CatchmentRegistry":
+) -> CatchmentRegistry:
     """
     Register one holistic catchment per basin / flowpath id (enriched layers).
 

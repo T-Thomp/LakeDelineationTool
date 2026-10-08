@@ -26,12 +26,10 @@ Shapefiles (`basins.shp`, `streams.shp`, gauges, pour points) are **legacy TauDE
 | `HY_CatchmentAggregate` | `geofabric.gpkg` → `catchment` row `domain` (the study domain containing every dendritic catchment) |
 | `HY_CatchmentArea` | `geofabric.gpkg` → `catchment_area`; `gauge_catchment` for gauge catchments |
 | `HY_CatchmentDivide` | `geofabric.gpkg` → `catchment_divide` (catchment boundary line; neighbours in `catchment_divide_adjacency`) |
-| `HY_Flowpath` | `geofabric.gpkg` → `flowpath` (one curve per catchment, inflow to outflow) |
+| `HY_Flowpath` | `geofabric.gpkg` → `flowpath` (TauDEM reach; reservoir dissolves keep every segment) |
 | `HY_HydroNexus` | `geofabric.gpkg` → `hydro_nexus` table (topological, no geometry) |
 | `HY_HydroLocation` | `geofabric.gpkg` → `hydro_location` (one or more per nexus as `nexusRealization`, plus pour points) |
 | `HY_HydrographicNetwork` | `hydrographic_network.json` → `hydrographic_network` (realizes `domain`) |
-| `HY_ChannelNetwork` | `geofabric.gpkg` → `channel_network` (non-spatial; realizes `domain`; `drainagePattern`) |
-| `HY_Channel` | `geofabric.gpkg` → `surface_channel` (every delineated reach, including lake reaches; `surfaceChannel`) |
 | `HY_Lake` / `HY_Impoundment` | `geofabric.gpkg` → `waterbody` (when HydroLAKES supplied) |
 | `HY_HydrometricFeature` | `geofabric.gpkg` → `hydrometric_feature` (when gauges supplied) |
 | `HY_HydrometricNetwork` | `geofabric.gpkg` → `hydrometric_network` table, one per gauge catchment (when gauges supplied) |
@@ -39,7 +37,7 @@ Shapefiles (`basins.shp`, `streams.shp`, gauges, pour points) are **legacy TauDE
 | `HY_IndirectPosition` | Columns on `hydrometric_feature` (river referencing) |
 | `HY_HydroFeatureName` | `geofabric.gpkg` → `feature_name` table (water body and station names) |
 
-Every 0..* association is also stored one link per row in a non-spatial GeoPackage table: `catchment_realization`, `catchment_association`, `catchment_containment`, `catchment_upper_catchment`, `nexus_contributing_catchment`, `channel_network_member`, `waterbody_upstream_waterbody`, `hydrometric_network_station`.
+Every 0..* association is also stored one link per row in a non-spatial GeoPackage table: `catchment_realization`, `catchment_association`, `catchment_containment`, `catchment_upper_catchment`, `nexus_contributing_catchment`, `waterbody_upstream_waterbody`, `hydrometric_network_station`.
 
 When `basinAggregation.py` runs with HY_Features enabled, `geofabric_aggregated.gpkg` carries the same profile for the aggregated basins (ids `agg_{LINKNO}`). Its `catchment_containment` links each aggregate (`containingCatchment`) to the `geofabric.gpkg` catchments merged into it (`containedCatchment`).
 
@@ -50,9 +48,8 @@ Conventions: [`hy_features_implementation_conventions.md`](hy_features_implement
 ### Out of scope (explicit non-claims)
 
 - `HY_Reservoir`, `HY_WaterBodyStratum` (storage model §7.4.4)
-- `HY_Depression` and `HY_ChannelNetwork.surfaceDepression` (stream delineation; lakes remain `HY_Lake` / `HY_Impoundment` waterbodies)
-- `HY_River`, `HY_Canal`, `HY_Lagoon`, `HY_Estuary` as **waterbody** polygons (stream reaches are `HY_Flowpath` and `HY_Channel`; `HY_Channel.stream` is not populated)
-- `HY_Channel` bed profiles and `HY_Depression.confinedWaterBody`
+- `HY_Channel`, `HY_ChannelNetwork`, and `HY_Depression` (TauDEM delineates flowpaths, not channels; lakes remain `HY_Lake` / `HY_Impoundment` waterbodies)
+- `HY_River`, `HY_Canal`, `HY_Lagoon`, `HY_Estuary` as **waterbody** polygons (stream reaches are `HY_Flowpath`)
 - `HY_CartographicRealization`, `HY_HydroNetwork` (non-dendritic realizations)
 - `HY_InteriorCatchment`, `HY_ExorheicDrainage`, `HY_EndorheicDrainage`, etc.
 - `conjointCatchment`, `encompassingCatchment` and other catchment associations besides `upperCatchment` / `lowerCatchment` / `containing` / `containedCatchment`

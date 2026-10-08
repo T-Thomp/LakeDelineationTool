@@ -68,9 +68,19 @@ def _upstream_members(host: str, upstream_map: dict[str, list[str]]) -> list[str
 
 
 def _union(polygons: list) -> Any:
-    merged = shapely.coverage_union_all(polygons)
-    if merged.is_empty or not merged.is_valid:
-        merged = shapely.union_all(polygons)
+    """Union catchment polygons. Overlaps fall back to a full union."""
+    parts = [geom for geom in polygons if geom is not None and not geom.is_empty]
+    if not parts:
+        return shapely.Polygon()
+    if len(parts) == 1:
+        return parts[0]
+    merged = None
+    try:
+        merged = shapely.coverage_union_all(parts)
+    except shapely.errors.GEOSException:
+        merged = None
+    if merged is None or merged.is_empty or not merged.is_valid:
+        merged = shapely.union_all([shapely.make_valid(geom) for geom in parts])
     return merged
 
 
