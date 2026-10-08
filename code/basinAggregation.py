@@ -69,12 +69,10 @@ ENABLE_HY_FEATURES = False  # overridden by HY_FEATURES_ENABLED env var if set
 # COLUMN NAMES — legacy TauDEM/MESH fields on disk. See docs/hy_features_mapping.md.
 # ==============================================================================
 from hy_features.schema import (
-  FRAC_LAKE,
   LEGACY_BASIN_ID,
   LEGACY_FLOWPATH_ID,
   LEGACY_GAUGE_IDS,
   LEGACY_IS_LAKE,
-  LEGACY_LAKE_AREA,
   LEGACY_LOWER_ID,
 )
 
@@ -83,8 +81,6 @@ RIVER_ID = LEGACY_FLOWPATH_ID     # LINKNO
 NEXT_DOWN_ID = LEGACY_LOWER_ID    # DSLINKNO
 GAUGE_IDS = LEGACY_GAUGE_IDS      # STATION_NU
 LAKE_FLAG = LEGACY_IS_LAKE
-LAKE_AREA = LEGACY_LAKE_AREA
-FRAC_LAKE_AREA = FRAC_LAKE
 
 AREA_KM2 = "area_km2"             # local subbasin area (km²)
 UP_AREA = "DSContArea"            # cumulative drainage area at the pour point (m²)
@@ -668,9 +664,8 @@ def build_outputs(
   agg_basin[NEXT_DOWN_ID] = agg_basin[RIVER_ID].map(g.down).astype("int64")
   agg_basin[UP_AREA] = agg_basin[RIVER_ID].map(up_area_km2) / AREA_SCALE
   agg_basin[RIVER_ID] = agg_basin[RIVER_ID].astype("int64")
-  if FRAC_LAKE_AREA in agg_basin.columns and LAKE_AREA in agg_basin.columns:
-    lake_area = pd.to_numeric(agg_basin[LAKE_AREA], errors="coerce").fillna(0.0)
-    agg_basin[FRAC_LAKE_AREA] = (lake_area / agg_basin[AREA_KM2].replace(0, np.nan)).fillna(0.0)
+  # frac_lake / lake_area are carried over from the survivor's own row. Lakes are never
+  # merged, so a lake basin keeps its exact polygon and combiningBasins.py's value stays valid.
   agg_basin = agg_basin[[RIVER_ID] + [c for c in agg_basin.columns if c != RIVER_ID]]
 
   # --- Streams: dissolve each aggregate's channel reaches ---
