@@ -379,7 +379,7 @@ def extract_reservoir_io_points(paths):
 
         export_geopackage({"hydro_location": export_gdf}, paths["out"].replace(".shp", ".gpkg"))
     
-    print("\n" + "="*40 + f"\nFINISH: Processing complete.\n" + "="*40)
+    print("\n" + "="*40 + "\nFINISH: Processing complete.\n" + "="*40)
 
 
 # =====================================================================

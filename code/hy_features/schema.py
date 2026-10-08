@@ -22,13 +22,11 @@ HY_HYDRO_LOCATION: Final[str] = "HY_HydroLocation"
 HY_HYDROMETRIC_FEATURE: Final[str] = "HY_HydrometricFeature"
 HY_LAKE: Final[str] = "HY_Lake"
 HY_IMPOUNDMENT: Final[str] = "HY_Impoundment"
-HY_RESERVOIR: Final[str] = "HY_Reservoir"
 HY_HYDRO_NEXUS: Final[str] = "HY_HydroNexus"
 HY_HYDROGRAPHIC_NETWORK: Final[str] = "HY_HydrographicNetwork"
 HY_CATCHMENT_AGGREGATE: Final[str] = "HY_CatchmentAggregate"
 HY_CATCHMENT_DIVIDE: Final[str] = "HY_CatchmentDivide"
 HY_HYDROMETRIC_NETWORK: Final[str] = "HY_HydrometricNetwork"
-HY_INDIRECT_POSITION: Final[str] = "HY_IndirectPosition"
 
 # ---------------------------------------------------------------------------
 # Canonical output column names (GeoPackage-friendly, >10 chars OK)
@@ -87,9 +85,7 @@ UNDETERMINED_LANGUAGE: Final[str] = "und"  # ISO 639-2 "undetermined"
 
 # Annex B.4 — HY_NameUsage vocabulary
 NAME_USAGE_CONVENTIONAL: Final[str] = "conventional"
-NAME_USAGE_HISTORICAL: Final[str] = "historical"
 NAME_USAGE_OFFICIAL: Final[str] = "official"
-NAME_USAGE_VERNACULAR: Final[str] = "vernacular"
 
 # Study domain: HY_CatchmentAggregate of every dendritic catchment in the network,
 # realized by the HY_HydrographicNetwork.
@@ -111,7 +107,6 @@ DRAINAGE_PATTERN_COL: Final[str] = "drainage_pattern"
 HYF_TYPE_URI: Final[str] = "hyf_type_uri"
 NETWORK_ID: Final[str] = "network_id"
 DEFAULT_NETWORK_ID: Final[str] = "study_hydrographic_network"
-CONFORMANCE_PROFILE: Final[str] = "LakeDelineationTool-DendriticGeofabric-1.0"
 
 # GF_Feature / HY_HydroFeature metadata
 FEATURE_ID: Final[str] = "feature_id"
@@ -131,14 +126,12 @@ LEGACY_GAUGE_IDS: Final[str] = "STATION_NU"
 HYLAKES_ID: Final[str] = "Hylak_id"
 HYLAKES_LAKE_TYPE: Final[str] = "Lake_type"
 HYLAKES_LAKE_NAME: Final[str] = "Lake_name"
-HYLAKES_NATURAL_LAKE: Final[int] = 1
 HYLAKES_RESERVOIR: Final[int] = 2
 HYLAKES_LAKE_CONTROL: Final[int] = 3
 LAKE_TYPE: Final[str] = "lake_type"
 LEGACY_LAKE_TYPE: Final[str] = "Lake_type"
 
 # Annex B.1 — hydroLocationType vocabulary (subset used by this workflow)
-HYDRO_LOC_POUR_POINT: Final[str] = "pour point"
 HYDRO_LOC_CONFLUENCE: Final[str] = "confluence"
 HYDRO_LOC_RIVER_MOUTH: Final[str] = "river mouth"
 HYDRO_LOC_HYDROMETRIC: Final[str] = "hydrometric station"
@@ -185,8 +178,6 @@ OUTPUT_TO_CANONICAL: Final[dict[str, dict[str, str]]] = {
     layer: {v: k for k, v in mapping.items()}
     for layer, mapping in DEFAULT_LAYER_ALIASES.items()
 }
-MESH_TO_CANONICAL = OUTPUT_TO_CANONICAL  # backward compatible
-
 
 def hyf_type_uri(short_code: str) -> str:
     """Return OGC Definitions Server URI for a HY_Features type code."""
@@ -258,6 +249,3 @@ def classify_waterbody(lake_type: int | float | None) -> str:
     if lt in (HYLAKES_RESERVOIR, HYLAKES_LAKE_CONTROL):
         return HY_IMPOUNDMENT
     return HY_LAKE
-
-
-WATERBODY_HYF_TYPES: Final[frozenset[str]] = frozenset({HY_LAKE, HY_IMPOUNDMENT})

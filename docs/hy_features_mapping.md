@@ -322,11 +322,11 @@ The check also runs after every export and prints `PASS` / `FAIL` with each erro
 
 ## Downstream model remapping
 
-The canonical interchange product is `geofabric.gpkg`. It also keeps the TauDEM source columns (`DN`, `LINKNO`, `DSLINKNO`, …) alongside the canonical ones; regenerate a model-specific product with [`remap_fields.py`](../remap_fields.py):
+The canonical interchange product is `geofabric.gpkg`. It also keeps the TauDEM source columns (`DN`, `LINKNO`, `DSLINKNO`, …) alongside the canonical ones; regenerate a model-specific product with [`code/remap_fields.py`](../code/remap_fields.py):
 
 ```bash
-python remap_fields.py --list-presets
-python remap_fields.py --preset mesh \
+python code/remap_fields.py --list-presets
+python code/remap_fields.py --preset mesh \
   --basins outputs/working/geofabric.gpkg \
   --streams outputs/working/geofabric.gpkg \
   --drop-metadata \

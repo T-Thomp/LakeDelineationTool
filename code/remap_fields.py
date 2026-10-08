@@ -39,7 +39,6 @@ from hy_features.field_remap import (
     build_custom_mapping,
     get_model_mapping,
     list_available_mappings,
-    list_model_names,
     load_model_presets,
     remap_vector_file,
 )
