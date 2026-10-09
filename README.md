@@ -90,7 +90,6 @@ Adapt `module restore scimods` in `Delineation-Workflow.slurm` to your site’s 
 | **fiona** | 1.10.1 | Shapefile driver (geopandas) |
 | **pyogrio** | 0.10.0 | GeoPackage / fast vector I/O (geopandas) |
 | **pyproj** | 3.7.1 | CRS transforms (geopandas) |
-| **pytest** | 8.3.4 | `tests/test_hy_features_topology.py` (optional) |
 
 **mpi4py 4.0.0** — required only for parallel `conditionLakes.py` (`--ncores` > 1). On **FIR**: `module load mpi4py/4.0.0` (not pip). Elsewhere: `pip install mpi4py` or your site’s equivalent. A one-core run does not import it.
 
