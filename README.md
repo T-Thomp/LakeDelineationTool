@@ -355,6 +355,19 @@ outputs/final/
 
 ---
 
+### `reproject.py` *(Optional)*
+
+Standalone post-step. Not run by the slurm job. Reprojects the aggregated basins and streams to a CRS you pass with `--prj`.
+
+```bash
+python3 code/reproject.py --prj WGS84
+python3 code/reproject.py --prj EPSG:3978
+```
+
+`--prj` accepts `WGS84`, `EPSG:4326`, `EPSG4326`, or a PROJ string. Defaults are `outputs/final/basins_aggregated.shp` and `streams_aggregated.shp`.
+
+---
+
 
 ### `basinTrimming.ipynb`
 
