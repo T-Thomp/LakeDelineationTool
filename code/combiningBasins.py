@@ -27,7 +27,7 @@ B. OUTLET SELECTION (when a lake has multiple outflows)
    rank_algorithmic_outflow()            -> gauge -> doutend -> strmOrder -> area
 
    Uses vector attributes only (no rasters). Ranking priority matches
-   rasterFlowpathEdit.py, but strmOrder replaces raster local_accum.
+   conditionLakes.py, but strmOrder replaces raster local_accum.
 
 C. INTERNAL LINK IDENTIFICATION ("swallow" set)
    collect_internal_links()
@@ -38,9 +38,10 @@ C. INTERNAL LINK IDENTIFICATION ("swallow" set)
 
 D. STREAM TOPOLOGY REWIRING & HYDROMETRIC AGGREGATION
    dissolve() internal links by merged_ID (winning outlet LINKNO)
+   StraightL is set afterward from the merged line's endpoints
    compute_lake_path_metrics() traces the longest inflow-to-outlet path through
      each lake and recalculates Length, strmDrop, StraightL, DOUTEND/START/MID,
-     and Slope for the merged link
+     Slope, DSContArea (outlet value), and USContArea (outlet DS minus basin area)
    Rewire DSLINKNO so merged lake links drain to the link downstream of the winner
 
 E. BASIN FABRIC ASSEMBLY
@@ -55,7 +56,7 @@ Inputs
   outputs/prep/lakes.shp                              (reservoir polygons)
   outputs/interim/taudem_pass3/snapped-outlets.shp        (lake in/outflow points)
   outputs/prep/gauges.shp
-  outlet_overrides.csv (optional; shared with rasterFlowpathEdit.py)
+  outlet_overrides.csv (optional; shared with conditionLakes.py)
 
 Outputs
 -------
@@ -68,10 +69,10 @@ import os
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import shapely
 from shapely.geometry import Point
 
 from outlet_overrides import load_overrides
-from hy_features.config import hy_features_enabled
 from pipeline_paths import (
     PATHS as PIPELINE_PATHS,
     PREP_GAUGES,
@@ -79,9 +80,6 @@ from pipeline_paths import (
     SNAPPED_OUTLETS,
     WORKING,
     WORKING_BASINS_MERGED,
-    WORKING_CATCHMENT_REGISTRY,
-    WORKING_GEOFABRIC_GPKG,
-    WORKING_HYDRO_NETWORK_JSON,
     WORKING_STREAMS_MERGED,
     ensure_output_dirs,
 )
@@ -93,7 +91,6 @@ GAUGE_SEARCH_RADIUS = 750       # meters; max distance to count a gauge as "near
 MIN_INTERNAL_STREAM_LEN = 180   # meters; stream-lake overlap length that triggers swallow
 OVERRIDES_CSV = "outlet_overrides.csv"
 OUTPUT_DIR = str(WORKING)
-ENABLE_HY_FEATURES = False      # overridden by HY_FEATURES_ENABLED env var if set
 
 PATHS = {
     "basins": PIPELINE_PATHS["pass3_basins"],
@@ -246,7 +243,7 @@ def filter_upstream_duplicate_outflows(candidates, link_to_downstream):
       - is downstream of it on the same network (link_a flows into link_b), OR
       - shares the same link_no but has higher strm_order (tie-break)
 
-    This mirrors rasterFlowpathEdit.filter_upstream_duplicates(), but uses
+    This mirrors conditionLakes.filter_upstream_duplicates(), but uses
     strmOrder instead of raster accumulation for same-link ties.
     """
     surviving = []
@@ -394,7 +391,7 @@ def collect_internal_links(lake_geom, in_pts, raw_outflow_candidates, streams, b
 # ==============================================================================
 # D. STREAM TOPOLOGY REWIRING & HYDROMETRIC AGGREGATION
 # ==============================================================================
-def compute_lake_path_metrics(links, target_exit, streams_work, down_map):
+def compute_lake_path_metrics(links, target_exit, streams_work, down_map, basin_area_m2=0.0):
     """
     Trace the longest inflow-to-outlet path through internal lake links and
     derive hydrometric attributes for the merged reservoir segment.
@@ -406,12 +403,12 @@ def compute_lake_path_metrics(links, target_exit, streams_work, down_map):
 
       Length    - sum of segment lengths along the path
       strmDrop  - sum of segment strmDrop values
-      StraightL - straight-line distance from upstream end (coords[-1]) of the first
-                  segment to downstream end (coords[0]) of the last segment
       DOUTEND   - minimum DOUTEND among path segments (most downstream point)
       DOUTSTART - DOUTEND + Length
       DOUTMID   - average of DOUTSTART and DOUTEND
       Slope     - strmDrop / Length (computed after assignment)
+      DSContArea - winning outlet DSContArea
+      USContArea - that value minus the merged basin area
     """
     internal_set = set(links)
     inflows = [
@@ -423,7 +420,6 @@ def compute_lake_path_metrics(links, target_exit, streams_work, down_map):
     best_path_metrics = {
         "Length": 0.0,
         "strmDrop": 0.0,
-        "StraightL": 0.0,
         "DOUTEND": 0.0,
         "DOUTSTART": 0.0,
         "DOUTMID": 0.0,
@@ -452,10 +448,6 @@ def compute_lake_path_metrics(links, target_exit, streams_work, down_map):
             else 0.0
         )
 
-        start_geom = path_segments[0].geometry
-        end_geom = path_segments[-1].geometry
-        path_straight = Point(start_geom.coords[-1]).distance(Point(end_geom.coords[0]))
-
         path_dout_end = (
             min(seg["DOUTEND"] for seg in path_segments)
             if "DOUTEND" in path_segments[0]
@@ -469,12 +461,20 @@ def compute_lake_path_metrics(links, target_exit, streams_work, down_map):
             best_path_metrics = {
                 "Length": path_length,
                 "strmDrop": path_drop,
-                "StraightL": path_straight,
                 "DOUTEND": path_dout_end,
                 "DOUTSTART": path_dout_start,
                 "DOUTMID": path_dout_mid,
             }
 
+    ds = 0.0
+    if "DSContArea" in streams_work.columns:
+        outlet = streams_work.loc[streams_work["LINKNO"] == target_exit, "DSContArea"]
+        if not outlet.empty:
+            val = pd.to_numeric(outlet.iloc[0], errors="coerce")
+            if pd.notna(val):
+                ds = float(val)
+    best_path_metrics["DSContArea"] = ds
+    best_path_metrics["USContArea"] = max(0.0, ds - float(basin_area_m2))
     return best_path_metrics
 
 
@@ -495,6 +495,26 @@ def build_stream_agg_logic(streams):
     return agg_logic
 
 
+def straight_length(geom):
+    """Distance between the first and last vertex of a reach."""
+    if geom is None or geom.is_empty:
+        return 0.0
+    if geom.geom_type == "MultiLineString":
+        merged = shapely.line_merge(geom)
+        if not merged.is_empty:
+            geom = merged
+    if geom.geom_type == "MultiLineString":
+        coords = [xy for part in geom.geoms for xy in part.coords]
+    elif geom.geom_type == "LineString":
+        coords = list(geom.coords)
+    else:
+        return 0.0
+    if len(coords) < 2:
+        return 0.0
+    (x0, y0), (x1, y1) = coords[0][:2], coords[-1][:2]
+    return float(((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5)
+
+
 def apply_lake_metrics(streams_dissolved, lake_metrics):
     """Assign path-traced hydrometric values and recalculate Slope on merged links."""
     for merged_id, metrics in lake_metrics.items():
@@ -510,16 +530,6 @@ def apply_lake_metrics(streams_dissolved, lake_metrics):
             streams_dissolved.loc[idx, "Slope"] = metrics["strmDrop"] / metrics["Length"]
         elif "Slope" in streams_dissolved.columns:
             streams_dissolved.loc[idx, "Slope"] = 0.0
-
-
-# ==============================================================================
-# E. EXPORT
-# ==============================================================================
-def export_shapefile(gdf, filename):
-    """Write a shapefile with short column names and wide DBF numeric fields."""
-    from hy_features.export import export_shapefile_legacy
-
-    export_shapefile_legacy(gdf, filename)
 
 
 # ==============================================================================
@@ -544,7 +554,7 @@ def process_reservoir_basins():
     lakes = gpd.read_file(PATHS["lakes"])
     streams = gpd.read_file(PATHS["streams"])
     intersection = gpd.read_file(PATHS["intersection"])
-    from hy_features.export import strip_point_join_artifacts
+    from hy_features.export import export_shapefile, strip_point_join_artifacts
 
     gauges = strip_point_join_artifacts(gpd.read_file(PATHS["gauges"]))
 
@@ -574,6 +584,7 @@ def process_reservoir_basins():
     terminal_link_ids = set(streams["DSLINKNO"].unique())
 
     lake_to_links = {}      # lake_id -> list of internal link IDs to dissolve
+    lake_to_basin_area = {}  # lake_id -> merged basin area (m²)
     lake_to_outlet = {}     # lake_id -> DSLINKNO of winning outlet (downstream link)
     lake_to_winner = {}     # lake_id -> winning outlet LINKNO itself
     all_swallowed_ids = set()
@@ -629,7 +640,6 @@ def process_reservoir_basins():
         if swallowed_basins.empty:
             continue
 
-        lake_to_links[l_id] = list(internal_links)
         all_swallowed_ids.update(internal_links)
 
         merged_geom = swallowed_basins.geometry.union_all()
@@ -638,6 +648,8 @@ def process_reservoir_basins():
         lake_area_km2 = float(pd.to_numeric(lake_polys.iloc[0]["Lake_area"], errors="coerce") or 0.0)
         lake_area_m2 = lake_area_km2 * 1e6
         basin_area_m2 = float(merged_geom.area)
+        lake_to_links[l_id] = list(internal_links)
+        lake_to_basin_area[l_id] = basin_area_m2
 
         # Fraction of the merged basin covered by lake (works if basins are later split)
         intersection_geom = merged_geom.intersection(lake_geom)
@@ -677,6 +689,7 @@ def process_reservoir_basins():
             swallowed_map[link] = new_id
         lake_metrics[new_id] = compute_lake_path_metrics(
             links, winner_id, streams_work, down_map,
+            basin_area_m2=lake_to_basin_area.get(l_id, 0.0),
         )
 
     # Assign merged_ID: swallowed links get the winning outlet LINKNO; others keep LINKNO
@@ -701,6 +714,8 @@ def process_reservoir_basins():
     # Redirect any DSLINKNO that pointed to a swallowed link to the merged winner ID
     streams_dissolved["DSLINKNO"] = streams_dissolved["DSLINKNO"].replace(swallowed_map)
     streams_dissolved = streams_dissolved.drop(columns=["USLINKNO1", "USLINKNO2"], errors="ignore")
+    if "StraightL" in streams_dissolved.columns:
+        streams_dissolved["StraightL"] = streams_dissolved.geometry.map(straight_length)
 
     # --- E. Assemble final basin fabric ---
     # Drop every swallowed subbasin, then append one merged reservoir polygon per lake.
@@ -725,37 +740,11 @@ def process_reservoir_basins():
     ensure_output_dirs()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    waterbodies = None
-    try:
-        waterbodies = gpd.read_file(PATHS["lakes"])
-        if waterbodies.crs != target_crs:
-            waterbodies = waterbodies.to_crs(target_crs)
-    except Exception:
-        pass
+    from hy_features.network import repair_flowpath_geometries
 
-    if hy_features_enabled(default=ENABLE_HY_FEATURES):
-        from hy_features.assemble import assemble_full_geofabric, export_full_geofabric
-        from hy_features.export import export_shapefile_legacy
-
-        assembled = assemble_full_geofabric(
-            final_geofabric,
-            streams_dissolved,
-            gauges=gauges,
-            waterbodies=waterbodies,
-        )
-
-        export_full_geofabric(
-            assembled,
-            gpkg_path=str(WORKING_GEOFABRIC_GPKG),
-            registry_path=str(WORKING_CATCHMENT_REGISTRY),
-            metadata_path=str(WORKING_HYDRO_NETWORK_JSON),
-        )
-
-        export_shapefile_legacy(assembled["layers"]["catchment_area"], str(WORKING_BASINS_MERGED))
-        export_shapefile_legacy(assembled["layers"]["flowpath"], str(WORKING_STREAMS_MERGED))
-    else:
-        export_shapefile(final_geofabric, str(WORKING_BASINS_MERGED))
-        export_shapefile(streams_dissolved, str(WORKING_STREAMS_MERGED))
+    streams_dissolved = repair_flowpath_geometries(streams_dissolved, basins=final_geofabric)
+    export_shapefile(final_geofabric, str(WORKING_BASINS_MERGED))
+    export_shapefile(streams_dissolved, str(WORKING_STREAMS_MERGED))
     print("Processing complete.")
 
 

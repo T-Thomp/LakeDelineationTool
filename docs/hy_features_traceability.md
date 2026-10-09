@@ -17,10 +17,10 @@ Status legend:
 
 | UML / requirement | Implementation | Status |
 |-------------------|----------------|--------|
-| Unique feature identifier | `feature_id` (prefixed GF id) + type-specific codes | **Done** |
+| Unique feature identifier | `feature_id` (prefixed GF id) + type-specific codes | **Done** (checked by `hy_features.validate`) |
 | Geometry (`shape`) | GeoPackage geometry column | **Done** |
 | Feature type code | `hyf_type` | **Done** |
-| Definitions Server URI | `hyf_type_uri` | **Done** |
+| Definitions Server URI | `hyf_type_uri` | **Done** (checked against `hyf_type`) |
 
 ---
 
@@ -28,17 +28,28 @@ Status legend:
 
 | UML property | Implementation | Status |
 |--------------|----------------|--------|
-| `code` | `catchment_id` in `dendritic_catchment` | **Done** |
+| `code` | `catchment_id` in the `catchment` table | **Done** |
 | `outflow` | `outflow_nexus_id` | **Done** |
 | `inflow` | `inflow_nexus_id` | **Done** |
 | `lowerCatchment` | `lower_catchment_id` | **Done** |
-| `upperCatchment` | `upper_catchment_id` | **Done** |
-| `containingCatchment` | — | **N/A** (nested management units not modeled) |
-| `containedCatchment` | — | **N/A** |
+| `upperCatchment` | `catchment_upper_catchment` table | **Done** |
+| `containingCatchment` | `catchment_containment` — `domain`; in the aggregated product, the fine catchments' `agg_*` aggregate | **Done** |
+| `containedCatchment` | `catchment_containment` (aggregated product: `agg_*` → fine catchments) | **Done** |
 | `conjointCatchment` | — | **N/A** |
 | `encompassingCatchment` | — | **N/A** |
-| `catchmentRealization` | `catchment_registry.json` → `realizations` | **Done** |
-| `single-Outflow` / nillable outlet | Empty `receiving_catchment_id` at domain outlet; sentinel `-9999` documented | **Done** |
+| `catchmentRealization` | `catchment_realization` table | **Done** |
+| `single-Outflow` | One `outflow_nexus_id` per catchment; domain outlets drain to terminal nexus `nx_out_{id}` | **Done** (checked by `hy_features.validate`) |
+
+---
+
+## HY_CatchmentAggregate (study domain)
+
+| UML property | Implementation | Status |
+|--------------|----------------|--------|
+| `code` | `catchment_id` = `domain` | **Done** |
+| `containedCatchment` | `catchment_containment` → every dendritic catchment | **Done** |
+| `outflow` | every terminal `nx_out_*` nexus | **Done** |
+| `catchmentRealization` | `HY_HydrographicNetwork` | **Done** |
 
 ---
 
@@ -54,15 +65,14 @@ Status legend:
 
 ---
 
-## HY_FlowPath
+## HY_Flowpath
 
 | UML property | Implementation | Status |
 |--------------|----------------|--------|
-| `shape` | line geometry | **Done** |
+| `shape` | TauDEM line; a reservoir MultiLineString keeps every dissolved segment | **Done** |
 | `realizedCatchment` | `realizes_catchment` | **Done** |
 | Downstream catchment | `lower_catchment_id` | **Done** |
 | Outflow nexus | `outflow_nexus_id` | **Done** |
-| `drainagePattern` | `drainage_pattern` = `dendritic` | **Done** |
 
 ---
 
@@ -70,10 +80,11 @@ Status legend:
 
 | UML property | Implementation | Status |
 |--------------|----------------|--------|
-| `contributingCatchment` | `contributing_catchment_id` | **Done** |
+| `contributingCatchment` (0..*) | `nexus_contributing_catchment` table | **Done** |
 | `receivingCatchment` | `receiving_catchment_id` (nillable at outlet) | **Done** |
-| `nexusRealization` | `hydro_nexus` geometry + `catchment_registry.json` realizations (`notes`: `nexusRealization`) | **Done** |
+| `nexusRealization` (0..*) | `hydro_location` rows with `realized_nexus_id`; at least one per nexus | **Done** |
 | Feature identifier | `nexus_id` | **Done** |
+| No own geometry (topological) | `hydro_nexus` is a non-spatial table | **Done** |
 
 ---
 
@@ -82,10 +93,9 @@ Status legend:
 | UML property | Implementation | Status |
 |--------------|----------------|--------|
 | Network identifier | `network_id` in JSON | **Done** |
-| `drainagePattern` | `drainage_pattern` | **Done** |
+| `realizedCatchment` | `realized_catchment` = `domain` (`HY_CatchmentAggregate`) | **Done** |
 | Flowpath members | `flowpath_members` | **Done** |
 | `networkWaterBody` | `waterbody_members` + `network_id` on waterbody layer | **Done** |
-| `realizedCatchment` | — | **N/A** (network spans whole study domain) |
 | Member link on features | `network_id` column on layers | **Done** |
 
 ---
@@ -98,7 +108,7 @@ Status legend:
 | `name` | `feature_name` from HydroLAKES `Lake_name` | **Done** |
 | `hyf_type` | `HY_Lake` / `HY_Impoundment` from `Lake_type` | **Done** |
 | Feature identifier | `waterbody_id`, `feature_id` | **Done** |
-| `upstreamWaterBody` | `upstream_waterbody_id` | **Done** — graph walk via dendritic catchments |
+| `upstreamWaterBody` (0..*) | `upstream_waterbody_id` (comma-separated, one per upstream branch) | **Done** — graph walk via dendritic catchments |
 | `downstreamWaterBody` | `downstream_waterbody_id` | **Done** |
 | `hydrographicNetwork` | `network_id` | **Done** |
 
@@ -113,8 +123,43 @@ Status legend:
 | `positionOnRiver` → reference nexus | `reference_nexus_id` | **Done** |
 | `positionOnRiver` → distance | `distance_from_outlet_m`, `distance_from_outlet_pct` | **Done** |
 | Station identifier | `station_code` | **Done** |
-| `hydrometricNetwork` | — | **N/A** (single stations, no network aggregate) |
+| `hydrometricNetwork` (0..*) | `hydrometric_network_station` — the station's own network and every downstream station's | **Done** |
+| `realizedNexus` / outlet-at-station | `realized_nexus_id` = `nx_gauge_{station}`, outflow of the gauge catchment | **Done** (host catchment not split at the station) |
 | Placement coverage | Only placed gauges exported; unplaced omitted with warning | **Done** |
+
+---
+
+## HY_HydrometricNetwork
+
+| UML property | Implementation | Status |
+|--------------|----------------|--------|
+| Feature identifier | `hmn_{station}` | **Done** |
+| `realizedCatchment` | `realizes_catchment` = `gauge_{station}` (`HY_CatchmentAggregate`) | **Done** |
+| `networkStation` (0..*) | `hydrometric_network_station` | **Done** |
+| `shape`, `flowpath`, `catchmentDivide`, `catchmentArea` (inherited) | via the gauge catchment's `gauge_catchment` polygon and member catchments | **Partial** (no own geometry) |
+
+---
+
+## HY_CatchmentDivide
+
+| UML property | Implementation | Status |
+|--------------|----------------|--------|
+| `shape` | catchment polygon boundary (ring) | **Done** |
+| `realizedCatchment` | `realizes_catchment` | **Done** |
+| Adjacent catchments | `catchment_divide_adjacency` | **Done** (profile extension) |
+
+---
+
+## HY_HydroFeatureName
+
+| UML property | Implementation | Status |
+|--------------|----------------|--------|
+| `name` | `feature_name.name` | **Done** |
+| `usage` | `usage` (Annex B.4) | **Done** |
+| `preferredBy` | `preferred_by` | **Done** |
+| `namesPart` | `names_part` = `false` | **Done** |
+| `variantSpelling` | `variant_spelling` = `false` | **Done** |
+| Language | `language` (ISO 639) | **Done** (profile extension) |
 
 ---
 
@@ -123,8 +168,8 @@ Status legend:
 | UML property | Implementation | Status |
 |--------------|----------------|--------|
 | `shape` | point geometry | **Done** |
-| `hydroLocationType` | `hydro_loc_type` (Annex B.1 subset) | **Done** |
-| `realizedNexus` | `realized_nexus_id` (= `nexus_id`) | **Done** |
+| `hydroLocationType` | `hydro_loc_type` (Annex B.1: `confluence`, `river mouth`, `catchment outlet`, `hydrometric station`) | **Done** |
+| `realizedNexus` | `realized_nexus_id` — set on every network-derived location; empty on pour points not near a nexus | **Done** |
 | `referencedPosition` | — | **N/A** (gauges use hydrometric layer) |
 
 ---
@@ -135,7 +180,8 @@ Status legend:
 |--------------|----------------|--------|
 | `linearElement` | `linear_element_id` | **Done** |
 | `referenceLocation` | `reference_nexus_id` | **Done** |
-| Distance expression | `distance_from_outlet_m`, `distance_from_outlet_pct` | **Done** |
+| `distanceExpression` | `distance_from_outlet_m`, `distance_from_outlet_pct` | **Done** |
+| `distanceDescription` | `distance_description` = `upstream` (Annex B.2) | **Done** |
 
 ---
 
@@ -143,9 +189,11 @@ Status legend:
 
 | Concept | Implementation | Status |
 |---------|----------------|--------|
-| Catchment identity | `catchments` map | **Done** |
-| Realization index | `realizations` list | **Done** |
-| Waterbody realization type | `HY_Lake` / `HY_Impoundment` from `lake_type` | **Done** |
+| Catchment identity | `catchment` table / `catchments` map | **Done** |
+| Realization index | `catchment_realization` / `realizations` (`HY_CatchmentArea`, `HY_CatchmentDivide`, `HY_Flowpath`, `HY_HydrographicNetwork`, `HY_HydrometricNetwork`) | **Done** |
+| Non-realization links | `catchment_association` / `associations` (outflow nexus, `networkWaterBody`, `positionOnRiver`) | **Done** |
+| Nesting | `catchment_containment` / `containments` | **Done** |
+| Referential integrity | `hy_features.validate` | **Done** |
 
 ---
 

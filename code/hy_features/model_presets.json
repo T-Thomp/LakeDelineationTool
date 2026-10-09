@@ -4,11 +4,11 @@
     "outlet_sentinel": -9999,
     "layers": {
       "catchment_area": {
-        "catchment_id": "LINKNO",
+        "catchment_id": "DN",
         "is_lake_catchment": "is_lake",
         "waterbody_id": "lake_id",
         "lake_area_m2": "lake_area",
-        "STATION_NU": "STATION_N"
+        "STATION_NU": "STATION_NU"
       },
       "flowpath": {
         "flowpath_id": "LINKNO",

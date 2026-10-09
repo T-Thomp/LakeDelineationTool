@@ -20,9 +20,11 @@ from hy_features.schema import (
     CONTRIBUTING_CATCHMENT_ID,
     DEFAULT_LAYER_ALIASES,
     DEFAULT_OUTLET_SENTINEL,
+    DISTANCE_DESCRIPTION,
     DISTANCE_FROM_OUTLET_M,
     DISTANCE_FROM_OUTLET_PCT,
     DRAINAGE_PATTERN_COL,
+    FEATURE_ID,
     FLOWPATH_ID,
     FRAC_LAKE,
     HOST_FLOWPATH_ID,
@@ -32,17 +34,13 @@ from hy_features.schema import (
     INFLOW_NEXUS_ID,
     IS_LAKE_CATCHMENT,
     LAKE_AREA_M2,
-    LEGACY_BASIN_ID,
-    LEGACY_FLOWPATH_ID,
     LEGACY_GAUGE_IDS,
-    LEGACY_IS_LAKE,
-    LEGACY_LAKE_AREA,
-    LEGACY_LAKE_ID,
-    LEGACY_LOWER_ID,
     LINEAR_ELEMENT_ID,
     LOWER_CATCHMENT_ID,
+    NETWORK_ID,
     NEXUS_ID,
     OUTFLOW_NEXUS_ID,
+    REALIZED_NEXUS_ID,
     REALIZES_CATCHMENT,
     RECEIVING_CATCHMENT_ID,
     REFERENCE_NEXUS_ID,
@@ -54,7 +52,7 @@ from hy_features.schema import (
 
 _PRESETS_PATH = Path(__file__).resolve().parent / "model_presets.json"
 
-# Columns removed with drop_metadata / drop_hyf_metadata (HY_Features semantics only)
+# Columns removed with drop_metadata (HY_Features semantics only)
 METADATA_COLUMNS = {
     HYF_TYPE,
     HYF_TYPE_URI,
@@ -69,16 +67,16 @@ METADATA_COLUMNS = {
     LINEAR_ELEMENT_ID,
     DISTANCE_FROM_OUTLET_M,
     DISTANCE_FROM_OUTLET_PCT,
+    DISTANCE_DESCRIPTION,
     DRAINAGE_PATTERN_COL,
     NEXUS_ID,
+    REALIZED_NEXUS_ID,
     CONTRIBUTING_CATCHMENT_ID,
     RECEIVING_CATCHMENT_ID,
     STATION_CODE,
+    FEATURE_ID,
+    NETWORK_ID,
 }
-
-# Backward-compatible alias
-HYF_METADATA_COLUMNS = METADATA_COLUMNS
-
 
 def load_model_presets(path: Path | str | None = None) -> dict[str, dict[str, Any]]:
     """
@@ -106,10 +104,6 @@ def load_model_presets(path: Path | str | None = None) -> dict[str, dict[str, An
     return presets
 
 
-def list_model_names(path: Path | str | None = None) -> list[str]:
-    return sorted(load_model_presets(path).keys())
-
-
 def get_model_mapping(
     layer_kind: str,
     preset: str = "mesh",
@@ -130,11 +124,6 @@ def get_model_mapping(
         )
     sentinel = int(spec.get("outlet_sentinel", DEFAULT_OUTLET_SENTINEL))
     return dict(layers[layer_kind]), sentinel
-
-
-def get_default_mapping(layer_kind: str, preset: str = "mesh") -> dict[str, str]:
-    mapping, _ = get_model_mapping(layer_kind, preset=preset)
-    return mapping
 
 
 def list_available_mappings(
@@ -253,15 +242,6 @@ def apply_field_remap(
     return out
 
 
-def apply_mesh_remap(*args, **kwargs):
-    """Deprecated alias for :func:`apply_field_remap`."""
-    if "model" in kwargs:
-        kwargs["preset"] = kwargs.pop("model")
-    if kwargs.pop("drop_hyf_metadata", False):
-        kwargs["drop_metadata"] = True
-    return apply_field_remap(*args, **kwargs)
-
-
 def remap_vector_file(
     input_path: str,
     output_path: str,
@@ -297,17 +277,18 @@ def remap_vector_file(
         suffix = output_path.rsplit(".", 1)[-1].lower()
         driver = "GPKG" if suffix == "gpkg" else "ESRI Shapefile"
 
+    if driver == "ESRI Shapefile":
+        from hy_features.export import HY_ONLY_COLUMNS, check_shapefile_columns
+
+        if mapping is None:
+            mapping, _ = get_model_mapping(layer_kind, preset=preset, preset_path=preset_path)
+        keep = set(mapping.values())
+        drop = [c for c in remapped.columns if c in HY_ONLY_COLUMNS and c not in keep]
+        remapped = remapped.drop(columns=drop)
+        check_shapefile_columns(remapped, output_path)
+
     remapped.to_file(output_path, driver=driver)
     return remapped
-
-
-def remap_file(*args, **kwargs):
-    """Deprecated alias for :func:`remap_vector_file`."""
-    if "model" in kwargs:
-        kwargs["preset"] = kwargs.pop("model")
-    if kwargs.pop("drop_hyf_metadata", False):
-        kwargs["drop_metadata"] = True
-    return remap_vector_file(*args, **kwargs)
 
 
 CANONICAL_COLUMNS_BY_LAYER: dict[str, list[str]] = {

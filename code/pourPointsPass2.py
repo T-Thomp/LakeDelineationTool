@@ -331,13 +331,13 @@ def extract_reservoir_io_points(paths):
         lake_pts = gpd.GeoDataFrame(columns=['name', 'point_type', 'geometry'], crs=streams_gdf.crs)
 
     os.makedirs(os.path.dirname(paths["out_lake_nodes"]), exist_ok=True)
-    from hy_features.export import export_shapefile_legacy, strip_point_join_artifacts
+    from hy_features.export import export_shapefile, strip_point_join_artifacts
 
     if hy_features_enabled(default=ENABLE_HY_FEATURES):
         from hy_features.enrich import enrich_hydro_locations
 
         lake_pts = enrich_hydro_locations(lake_pts)
-    export_shapefile_legacy(strip_point_join_artifacts(lake_pts), paths["out_lake_nodes"])
+    export_shapefile(strip_point_join_artifacts(lake_pts), paths["out_lake_nodes"])
     if hy_features_enabled(default=ENABLE_HY_FEATURES):
         from hy_features.export import export_geopackage
 
@@ -373,13 +373,13 @@ def extract_reservoir_io_points(paths):
         from hy_features.enrich import enrich_hydro_locations
 
         export_gdf = enrich_hydro_locations(export_gdf)
-    export_shapefile_legacy(strip_point_join_artifacts(export_gdf), paths["out"])
+    export_shapefile(strip_point_join_artifacts(export_gdf), paths["out"])
     if hy_features_enabled(default=ENABLE_HY_FEATURES):
         from hy_features.export import export_geopackage
 
         export_geopackage({"hydro_location": export_gdf}, paths["out"].replace(".shp", ".gpkg"))
     
-    print("\n" + "="*40 + f"\nFINISH: Processing complete.\n" + "="*40)
+    print("\n" + "="*40 + "\nFINISH: Processing complete.\n" + "="*40)
 
 
 # =====================================================================
