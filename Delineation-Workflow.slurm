@@ -21,8 +21,9 @@
 #        v
 #   [Python] filterLakes.py      -- clip HydroLAKES reservoirs to basin
 #            getGauges.py        -- find stream gauges inside basin
-#            conditionLakes.py   -- fix flow dirs inside each lake (MPI-parallel;
-#                                   writes fdr_lakes.tif; see FLOWPATH_NCORES)
+#            conditionLakes.py   -- fix flow dirs inside each lake
+#                                   (serial, or mpirun when FLOWPATH_NCORES>1;
+#                                   writes fdr_lakes.tif)
 #            conditionStreams.py -- (optional) force flow along CSV valley paths
 #                                   in fdr_lakes.tif
 #        v
@@ -44,15 +45,19 @@
 #   outputs/interim/taudem_d8/   -- Pass 1–2 TauDEM rasters and vectors
 #   outputs/interim/taudem_pass3/ -- Pass 3 TauDEM outputs
 #
-# KEY DIRECTORIES (auto-detected from this script's location)
+# KEY DIRECTORIES
 # ------------------------------------------------------------
-#   DATA_DIR                     -- SLURM_SUBMIT_DIR (where you ran sbatch; dem/, outputs/, …)
-#   CODE_DIR                     -- DATA_DIR/code/ (Python scripts + pipeline_paths.py)
+#   DATA_DIR / LAKE_DELINEATION_ROOT
+#       Study folder: study_settings.py and outputs/ (TauDEM + Python).
+#       Default: the directory where you ran sbatch.
+#       Override: export LAKE_DELINEATION_ROOT=/path/to/study in §0.
+#   CODE_DIR
+#       Python scripts. $SUBMIT_DIR/code if present, else $DATA_DIR/code.
 #
 # SETUP CHECKLIST (paths & knobs to edit when adapting this workflow)
 # --------------------------------------------------------------------
-# Work top-to-bottom. Slurm cd's to DATA_DIR; Python runs from CODE_DIR.
-# Relative paths in pipeline_paths.py resolve against DATA_DIR (LAKE_DELINEATION_ROOT).
+# Work top-to-bottom. Slurm cd's to DATA_DIR so ./ CSVs resolve there.
+# Python and TauDEM both write under DATA_DIR/outputs (LAKE_DELINEATION_ROOT).
 #
 # [ ] study_settings.py  (copy from study_settings.example.py; edit at study root)
 #       INPUT_DEM          -- elevation GeoTIFF
@@ -64,8 +69,9 @@
 #       PATH to TauDEM     -- export PATH="$HOME/taudem-build/taudem:$PATH" (§0)
 #       VENV               -- Python venv activate (pip install -r requirements.txt)
 #       STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
-#       FLOWPATH_NCORES    -- MPI worker ranks for conditionLakes.py (see §0)
+#       FLOWPATH_NCORES    -- conditionLakes.py workers (1 = plain python; >1 = mpirun)
 #       HY_FEATURES_ENABLED -- unset/off by default; export =1 to enable HY geofabric
+#       LAKE_DELINEATION_ROOT -- optional; study folder for all outputs (TauDEM + Python)
 #       #SBATCH --account / --ntasks / --mem-per-cpu / --time
 #
 # [ ] filterLakes.py
@@ -84,7 +90,7 @@
 #       lakes / gauges     -- outputs/prep/lakes.shp, outputs/prep/gauges.shp
 #       outlet_overrides.csv (optional manual lake outlets)
 #       outputs            -- outputs/interim/taudem_d8/fdr_lakes.tif
-#       Launch             -- MUST use srun/mpirun (mpi4py); see FLOWPATH_NCORES
+#       Launch             -- --ncores 1: python3 directly. N>1: mpirun -np N (not srun)
 #
 # [ ] conditionStreams.py  (--csv; runs right after conditionLakes.py)
 #       stream_conditioning.csv (optional; id,start_lat,start_lon,end_lat,end_lon,
@@ -130,8 +136,8 @@
 #
 # HPC modules (this script: module restore scimods) — FIR-tested:
 #   GDAL        -- gdal_polygonize.py (must match GDAL==3.9.1 in requirements.txt)
-#   mpi4py      -- conditionLakes.py MPI (FIR: module load only; not in requirements.txt)
-#   Slurm       -- sbatch / srun (self-built TauDEM MPI + conditionLakes MPI)
+#   mpi4py      -- conditionLakes.py only when FLOWPATH_NCORES>1 (FIR: module load only)
+#   Slurm       -- sbatch / srun for TauDEM. conditionLakes parallel uses mpirun
 #
 # TauDEM (not a cluster module): compile with MPI; add install dir to PATH in §0.
 #
@@ -144,7 +150,7 @@
 # Python venv (VENV below): load modules, activate venv, pip install -r requirements.txt
 #   GDAL 3.9.1, geopandas 1.0.1, pandas 2.2.3, numpy 1.26.4, scipy 1.15.2,
 #   shapely 2.0.7, fiona 1.10.1, pyogrio 0.10.0, pyproj 3.7.1
-#   mpi4py — FIR: module load mpi4py/4.0.0 only
+#   mpi4py — only if FLOWPATH_NCORES>1. FIR: module load mpi4py/4.0.0 only
 # =============================================================================
 
 #SBATCH --account=rrg-alpie
@@ -178,14 +184,42 @@ module restore scimods
 
 # export PATH="$HOME/taudem-build/taudem:$PATH"   # Set taudem:PATH here or set it in .bashrc file
 
-# Project root = directory where you ran sbatch (not the read-only job spool copy).
-# Slurm sets SLURM_SUBMIT_DIR; fall back to script location for local/interactive runs.
+# Study folder: study_settings.py and all products (TauDEM rasters + Python shapefiles).
+# Uncomment to send the job somewhere other than where you ran sbatch.
+# Leave unset to use SLURM_SUBMIT_DIR.
+
+
+# export LAKE_DELINEATION_ROOT="~/directory/to/study"
+
+
+# Directory where you ran sbatch (not the read-only job spool copy). Used to find code/.
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
-    DATA_DIR="$SLURM_SUBMIT_DIR"
+    SUBMIT_DIR="$SLURM_SUBMIT_DIR"
 else
-    DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    SUBMIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
-CODE_DIR="$DATA_DIR/code"
+
+if [[ -n "${LAKE_DELINEATION_ROOT:-}" ]]; then
+    if [[ ! -d "${LAKE_DELINEATION_ROOT}" ]]; then
+        echo "ERROR: LAKE_DELINEATION_ROOT is not a directory: ${LAKE_DELINEATION_ROOT}"
+        exit 1
+    fi
+    DATA_DIR="$(cd "${LAKE_DELINEATION_ROOT}" && pwd)"
+else
+    DATA_DIR="$SUBMIT_DIR"
+fi
+export LAKE_DELINEATION_ROOT="$DATA_DIR"
+
+if [[ -d "$SUBMIT_DIR/code" ]]; then
+    CODE_DIR="$SUBMIT_DIR/code"
+elif [[ -d "$DATA_DIR/code" ]]; then
+    CODE_DIR="$DATA_DIR/code"
+else
+    echo "ERROR: no code/ directory next to the slurm submit dir or under LAKE_DELINEATION_ROOT"
+    echo "  looked in: $SUBMIT_DIR/code"
+    echo "  and:       $DATA_DIR/code"
+    exit 1
+fi
 
 OUTPUT_ROOT="$DATA_DIR/outputs"
 INT_DIR="$OUTPUT_ROOT/interim/taudem_d8"       # Pass 1 & 2 TauDEM rasters/shapefiles
@@ -198,14 +232,13 @@ FINAL_DIR="$OUTPUT_ROOT/final"                 # Deliverables (basins, pour poin
 # Applied identically in all three TauDEM passes.
 STREAM_THRESHOLD=5555
 
-# Worker MPI ranks for conditionLakes.py (lake flow-path edits).
+# Workers for conditionLakes.py (lake flow-path edits).
 #
-# conditionLakes.py uses mpi4py: each rank processes a batch of lakes in
-# parallel (partitioned by estimated lake cell count). Rank 0 builds the output
-# GeoTIFF and merges masked FDR patches from all workers.
-#
-#   FLOWPATH_NCORES  -- active worker count (env + --ncores)
-#   srun --ntasks    -- must be >= FLOWPATH_NCORES (extra ranks stay idle)
+# FLOWPATH_NCORES=1 runs as a normal Python script and does not import mpi4py.
+# FLOWPATH_NCORES>1 partitions lakes across MPI ranks (by estimated cell count).
+# Rank 0 builds the output GeoTIFF and merges masked FDR patches.
+# Launch that case with mpirun -np N. srun direct-launch aborts in MPI_Init
+# because this Open MPI build has no Slurm PMI support.
 #
 FLOWPATH_NCORES=16
 
@@ -218,8 +251,9 @@ FLOWPATH_NCORES=16
 VENV="/home/$USER/virtual-envs/scienv/bin/activate"
 
 mkdir -p "$INT_DIR" "$PASS3_DIR" "$PREP_DIR" "$WORKING_DIR" "$FINAL_DIR"
-export LAKE_DELINEATION_ROOT="$DATA_DIR"
 cd "$DATA_DIR" || exit 1
+echo "Study root (LAKE_DELINEATION_ROOT): $DATA_DIR"
+echo "Python scripts (CODE_DIR):          $CODE_DIR"
 
 if [[ ! -f "${DATA_DIR}/study_settings.py" ]]; then
     echo "ERROR: ${DATA_DIR}/study_settings.py not found"
@@ -313,28 +347,25 @@ gdal_polygonize.py \
 #   outputs/interim/taudem_d8/fdr_lakes.tif  -- full-domain FDR copy with
 #                                                      lake interiors patched only
 #
-# MPI launch (required for parallel lake processing):
-#   export FLOWPATH_NCORES=N
-#   srun --ntasks=N --cpus-per-task=1 python3 conditionLakes.py --ncores N
+# Serial (workstation, login node, or compute node). No mpirun, srun, or mpi4py:
+#   python3 code/conditionLakes.py --ncores 1
 #
-#   --ncores caps active workers at min(N, srun task count). If you omit srun,
-#   mpi4py sees a single rank and runs serially regardless of --ncores.
+# Parallel, from inside this allocation. Use mpirun, not srun:
+#   mpirun -np 16 python3 code/conditionLakes.py --ncores 16
 #
-# Re-run standalone (from DATA_DIR, after Pass 1 + filterLakes + getGauges):
+# --ncores 1 always wins, even if FLOWPATH_NCORES is larger.
+# --ncores N>1 is capped at the mpirun process count and at the number of lakes.
+#
+# Re-run standalone (from the study root, after Pass 1 + filterLakes + getGauges):
 #   source "$VENV"
-#   export FLOWPATH_NCORES=16
-#   srun --ntasks=16 --cpus-per-task=1 \
-#       python3 conditionLakes.py --ncores 16
-#
-# Serial debug (interactive node, no srun):
-#   python3 conditionLakes.py --ncores 1
+#   python3 code/conditionLakes.py --option override --csv outlet_overrides.csv --ncores 1
 #
 # Override-only re-run (fix individual lakes without a full rebuild):
 #   Re-runs only the lakes listed in the CSV and pastes them into the existing
 #   fdr_lakes.tif. Workers are capped at the number of lakes in the CSV.
 #   Re-run TauDEM Pass 2 / Pass 3 afterwards for the change to take effect.
-#   srun --ntasks=4 --cpus-per-task=1 \
-#       python3 conditionLakes.py --option override --csv my_fixes.csv --ncores 4
+#   python3 code/conditionLakes.py --option override --csv my_fixes.csv --ncores 1
+#   mpirun -np 4 python3 code/conditionLakes.py --option override --csv my_fixes.csv --ncores 4
 #
 # Stream conditioning (serial; skipped if the CSV does not exist):
 #   python3 conditionStreams.py --csv stream_conditioning.csv
@@ -347,10 +378,12 @@ python3 "$CODE_DIR/getGauges.py"
 
 echo " before conditionLakes.py $(date)"
 export FLOWPATH_NCORES
-srun --ntasks="${FLOWPATH_NCORES}" --cpus-per-task=1 \
-    python3 "$CODE_DIR/conditionLakes.py" --ncores "${FLOWPATH_NCORES}"
-# Serial fallback (interactive debug on a login/compute node):
-# python3 conditionLakes.py --ncores 1
+if [[ "${FLOWPATH_NCORES}" -le 1 ]]; then
+    python3 "$CODE_DIR/conditionLakes.py" --ncores 1
+else
+    mpirun -np "${FLOWPATH_NCORES}" \
+        python3 "$CODE_DIR/conditionLakes.py" --ncores "${FLOWPATH_NCORES}"
+fi
 echo " after conditionLakes.py $(date)"
 
 python3 "$CODE_DIR/conditionStreams.py" --csv "./stream_conditioning.csv"
