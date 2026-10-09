@@ -37,7 +37,9 @@ Algorithm (repeat until an iteration merges nothing):
   upstream basin in the linear pass (the gauge keeps its id and outlet).
 
 The surviving aggregate always keeps its original LINKNO, DSLINKNO and pour-point
-attributes. DSContArea is recomputed from the aggregated network.
+attributes. USContArea / DSContArea follow the merge type: a linear merge keeps
+the upstream USContArea and the downstream DSContArea; a sideways merge sums the
+two DSContArea values.
 """
 
 from __future__ import annotations
@@ -255,6 +257,8 @@ class AggregateGraph:
     length: dict[int, float],
     is_lake: dict[int, bool],
     is_gauge: dict[int, bool],
+    us_cont: dict[int, float],
+    ds_cont: dict[int, float],
     border: dict[int, dict[int, float]],
     outlet_value: int = OUTLET_VALUE,
   ) -> None:
@@ -264,6 +268,8 @@ class AggregateGraph:
     self.length = dict(length)
     self.is_lake = dict(is_lake)
     self.is_gauge = dict(is_gauge)
+    self.us_cont = dict(us_cont)
+    self.ds_cont = dict(ds_cont)
     self.members: dict[int, list[int]] = {a: [a] for a in self.down}
     self.stream_members: dict[int, list[int]] = {a: [a] for a in self.down}
     self.border: dict[int, dict[int, float]] = {
@@ -328,6 +334,14 @@ class AggregateGraph:
       self.stream_members[target].extend(source_streams)
       self.length[target] += source_length
     self.area[target] += self.area.pop(source)
+    if add_stream:
+      # Linear: combined reach starts at the upstream US and ends at the target DS.
+      self.us_cont[target] = self.us_cont.pop(source)
+      self.ds_cont.pop(source)
+    else:
+      # Sideways: surviving channel keeps its US; DS is the two pour-point areas summed.
+      self.ds_cont[target] = self.ds_cont[target] + self.ds_cont.pop(source)
+      self.us_cont.pop(source)
 
     source_border = self.border.pop(source)
     target_border = self.border[target]
@@ -371,12 +385,23 @@ def build_graph(
     outlet_value,
   )
   river_len_km = dict(zip(river[RIVER_ID].astype(int), river[LENGTH] * LENGTH_SCALE))
+  river_us = {}
+  river_ds = {}
+  if US_AREA in river.columns:
+    river_us = dict(zip(river[RIVER_ID].astype(int), pd.to_numeric(river[US_AREA], errors="coerce").fillna(0.0)))
+  if UP_AREA in river.columns:
+    river_ds = dict(zip(river[RIVER_ID].astype(int), pd.to_numeric(river[UP_AREA], errors="coerce").fillna(0.0)))
+  area_m2 = {int(i): float(v) / AREA_SCALE for i, v in per_id["area"].items()}
+  us_cont = {i: float(river_us.get(i, 0.0)) for i in basin_ids}
+  ds_cont = {i: float(river_ds[i]) if i in river_ds else area_m2[i] for i in basin_ids}
   return AggregateGraph(
     down=down,
     area={int(i): float(v) for i, v in per_id["area"].items()},
     length={i: float(river_len_km.get(i, 0.0)) for i in basin_ids},
     is_lake={int(i): bool(v) for i, v in per_id["is_lake"].items()},
     is_gauge={int(i): bool(v) for i, v in per_id["is_gauge"].items()},
+    us_cont=us_cont,
+    ds_cont=ds_cont,
     border=shared_border_lengths(basin),
     outlet_value=outlet_value,
   )
@@ -578,13 +603,6 @@ def _slope_from_strm_drop_and_length(
   return slope.mask(slope >= 1.0, min_riv_slope)
 
 
-def _cumulative_area_km2(g: AggregateGraph) -> dict[int, float]:
-  total: dict[int, float] = {}
-  for a in g.upstream_first(list(g.down)):
-    total[a] = g.area[a] + sum(total[u] for u in g.inflows[a])
-  return total
-
-
 def _merge_lines(geom):
   if geom is None or geom.geom_type != "MultiLineString":
     return geom
@@ -639,10 +657,9 @@ def build_outputs(
   outlet_value = g.outlet_value
   owner = {m: a for a, ms in g.members.items() for m in ms}
   stream_owner = {m: a for a, ms in g.stream_members.items() for m in ms}
-  up_area_km2 = _cumulative_area_km2(g)
 
   def us_links(a: int) -> list[int]:
-    ups = sorted(g.inflows[a], key=lambda u: -up_area_km2[u])
+    ups = sorted(g.inflows[a], key=lambda u: -g.ds_cont.get(u, 0.0))
     return (ups + [-1, -1])[:2]
 
   # --- Basins: dissolve members; attributes from the survivor's own row ---
@@ -662,7 +679,7 @@ def build_outputs(
   agg_basin = agg_basin.reset_index()
   agg_basin[AREA_KM2] = agg_basin[RIVER_ID].map(g.area)
   agg_basin[NEXT_DOWN_ID] = agg_basin[RIVER_ID].map(g.down).astype("int64")
-  agg_basin[UP_AREA] = agg_basin[RIVER_ID].map(up_area_km2) / AREA_SCALE
+  agg_basin[UP_AREA] = agg_basin[RIVER_ID].map(g.ds_cont)
   agg_basin[RIVER_ID] = agg_basin[RIVER_ID].astype("int64")
   # frac_lake / lake_area are carried over from the survivor's own row. Lakes are never
   # merged, so a lake basin keeps its exact polygon and combiningBasins.py's value stays valid.
@@ -684,11 +701,9 @@ def build_outputs(
     agg_river[LENGTH], agg_river[STRM_DROP], min_riv_slope
   )
   agg_river[LENGTH] = agg_river[LENGTH].clip(lower=min_riv_length / LENGTH_SCALE)
-  agg_river[UP_AREA] = agg_river[RIVER_ID].map(up_area_km2) / AREA_SCALE
+  agg_river[UP_AREA] = agg_river[RIVER_ID].map(g.ds_cont)
   if US_AREA in agg_river.columns:
-    agg_river[US_AREA] = (
-      agg_river[RIVER_ID].map(up_area_km2) - agg_river[RIVER_ID].map(g.area)
-    ) / AREA_SCALE
+    agg_river[US_AREA] = agg_river[RIVER_ID].map(g.us_cont)
   for i, col in enumerate(US_LINK_COLS):
     if col in agg_river.columns:
       agg_river[col] = agg_river[RIVER_ID].map(lambda a: us_links(a)[i]).astype("int64")

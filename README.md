@@ -396,12 +396,6 @@ outputs/final/
 
 Aggregates small upstream subbasins into larger watershed units. The merge threshold **`MIN_SUB_AREA`** (default 100 km²) is applied to **local** subbasin area — the size of each catchment polygon alone — not cumulative upstream drainage.
 
-| Setting | Default | Role |
-|---------|---------|------|
-| **`area_km2`** | from `basins.shp`, else polygon area × 10⁻⁶ | Local subbasin area (km²) used for the merge threshold |
-| **`UP_AREA`** (`DSContArea`) | TauDEM column | Cumulative area at the pour point (m²); recomputed after merges |
-| **`MIN_SUB_AREA`** | 100 km² | Subbasins with local area below this merge downstream |
-
 Lakes are never merged. `frac_lake` and `lake_area` are copied from each surviving basin; they are not recomputed.
 
 Outputs:
@@ -674,7 +668,7 @@ Update:
 Review:
 
 - `area_km2` — local subbasin area (km²). Used if present; otherwise polygon area in m² × 10⁻⁶
-- `DSContArea` — cumulative drainage at the pour point (m²); recomputed after merges
+- `DSContArea` / `USContArea` — linear merges keep the upstream `USContArea` and downstream `DSContArea`; sideways merges sum `DSContArea`
 - `MIN_SUB_AREA` — merge threshold in km² applied to **local** area
 - `MIN_RIV_SLOPE`
 - `MIN_RIV_LENGTH`
