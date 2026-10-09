@@ -857,11 +857,11 @@ def run_aggregation(
   os.makedirs(os.path.dirname(output_rivers_path) or ".", exist_ok=True)
 
   print(f"Writing aggregated basins ({len(agg_basins)} features): {output_basins_path}")
-  from hy_features.export import export_shapefile_legacy
+  from hy_features.export import export_shapefile
 
-  export_shapefile_legacy(agg_basins, output_basins_path)
+  export_shapefile(agg_basins, output_basins_path)
   print(f"Writing aggregated rivers ({len(agg_rivers)} features): {output_rivers_path}")
-  export_shapefile_legacy(agg_rivers, output_rivers_path)
+  export_shapefile(agg_rivers, output_rivers_path)
 
   if hy_features_enabled(default=ENABLE_HY_FEATURES):
     from hy_features.aggregate import export_aggregated_geofabric
