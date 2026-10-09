@@ -283,7 +283,7 @@ Re-run TauDEM Pass 2 / Pass 3 after an override-only run.
 
 Fixes streams that TauDEM routes the wrong way (road fills, dams, DEM artifacts). Runs right after `conditionLakes.py` and edits `fdr_lakes.tif` in place.
 
-Each row of `stream_conditioning.csv` is one path, from a start point (upstream) to an end point (downstream). `valley_weight` and `end_weight` are optional. Leave a cell blank to keep the default (`valley_weight` 400, `end_weight` 0.5).
+Each row of `stream_conditioning.csv` is one path, from a start point (upstream) to an end point (downstream). `valley_weight` and `end_weight` are optional. Leave a cell blank to keep the default (`valley_weight` 1.5, `end_weight` 0.1).
 
 ```csv
 id,start_lat,start_lon,end_lat,end_lon,valley_weight,end_weight
