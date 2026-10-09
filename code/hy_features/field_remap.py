@@ -52,7 +52,7 @@ from hy_features.schema import (
 
 _PRESETS_PATH = Path(__file__).resolve().parent / "model_presets.json"
 
-# Columns removed with drop_metadata / drop_hyf_metadata (HY_Features semantics only)
+# Columns removed with drop_metadata (HY_Features semantics only)
 METADATA_COLUMNS = {
     HYF_TYPE,
     HYF_TYPE_URI,

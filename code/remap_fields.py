@@ -86,19 +86,9 @@ def main(argv: list[str] | None = None) -> int:
         help="List available presets and exit.",
     )
     parser.add_argument(
-        "--list-models",
-        action="store_true",
-        help="Alias for --list-presets.",
-    )
-    parser.add_argument(
         "--preset",
         default="mesh",
         help="Preset name (default: mesh). See hy_features/model_presets.json.",
-    )
-    parser.add_argument(
-        "--model",
-        dest="preset",
-        help="Alias for --preset.",
     )
     parser.add_argument(
         "--preset-file",
@@ -133,11 +123,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Remove hyf_type, nexus ids, and other HY-only metadata columns.",
     )
     parser.add_argument(
-        "--drop-hyf-metadata",
-        action="store_true",
-        help="Alias for --drop-metadata.",
-    )
-    parser.add_argument(
         "--keep-ids-as-string",
         action="store_true",
         help="Do not coerce ID columns to integers.",
@@ -155,9 +140,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
-    drop_metadata = args.drop_metadata or args.drop_hyf_metadata
+    drop_metadata = args.drop_metadata
 
-    if args.list_presets or args.list_models:
+    if args.list_presets:
         presets = load_model_presets(args.preset_file)
         print("Available presets:\n")
         for name in sorted(presets):

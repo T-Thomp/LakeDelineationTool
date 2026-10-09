@@ -31,7 +31,6 @@ from hy_features.assemble import assemble_full_geofabric, export_full_geofabric
 
 | Script | When assembly runs | Optional inputs |
 |--------|-------------------|-----------------|
-| `combiningBasins.py` | After reservoir merge | Gauges, HydroLAKES polygons |
 | `cleanGeofabric.py` | After phantom-stream cleanup | Gauges, HydroLAKES, pour points (`outputs/final/pour_points.shp`) |
 | `basinAggregation.py` | After aggregation | — (writes `geofabric_aggregated.gpkg`) |
 

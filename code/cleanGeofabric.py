@@ -77,9 +77,9 @@ def bypass_phantom_streams(streams_path, basins_path, output_path):
     print(f"Phantom segments remaining: {len(phantom_map)}")
 
     if len(phantom_map) == 0:
-        from hy_features.export import export_shapefile_legacy
+        from hy_features.export import export_shapefile
 
-        export_shapefile_legacy(streams, output_path)
+        export_shapefile(streams, output_path)
         return
 
     # Use a dictionary of lookups for faster access during the merge loop
@@ -240,9 +240,9 @@ def bypass_phantom_streams(streams_path, basins_path, output_path):
     # ---------------------------------------------------------------
     # Write shapefile
     # ---------------------------------------------------------------
-    from hy_features.export import export_shapefile_legacy
+    from hy_features.export import export_shapefile
 
-    export_shapefile_legacy(cleaned, output_path)
+    export_shapefile(cleaned, output_path)
     print(f"Cleaned network successfully saved to: {output_path}")
     print(f"Final stream segments written: {len(cleaned)}")
     print(f"Removed phantom segments: {len(phantom_map)}")
@@ -268,9 +268,9 @@ def dissolve_split_basins(input_path, output_path):
 
     # 3. Restore coordinate metadata and save standard export
     dissolved_basins.set_crs(original_crs, allow_override=True, inplace=True)
-    from hy_features.export import export_shapefile_legacy
+    from hy_features.export import export_shapefile
 
-    export_shapefile_legacy(dissolved_basins, output_path)
+    export_shapefile(dissolved_basins, output_path)
     print(f"Successfully saved dissolved basins to {output_path}")
 
 
@@ -381,9 +381,9 @@ def add_gauge_info_to_basins(input_path, gauge_path, output_path):
     # 7. Fill basins without stations with an empty string
     basins["STATION_NU"] = basins["STATION_NU"].fillna("")
 
-    from hy_features.export import export_shapefile_legacy
+    from hy_features.export import export_shapefile
 
-    export_shapefile_legacy(basins, output_path)
+    export_shapefile(basins, output_path)
 
 
 def run_clean_geofabric(*, delete_interim: bool | None = None) -> None:
