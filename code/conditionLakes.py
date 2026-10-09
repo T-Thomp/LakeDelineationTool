@@ -47,7 +47,13 @@ Run modes (--option)
                    to the original FDR, so edits from the previous outlet choice
                    do not linger.
 
-  python3 conditionLakes.py --option override --csv my_fixes.csv --ncores 4
+  Serial (workstation or compute node; mpi4py is not imported):
+
+    python3 conditionLakes.py --option override --csv my_fixes.csv --ncores 1
+
+  Parallel (Open MPI via mpirun; this build has no Slurm PMI support):
+
+    mpirun -np 4 python3 conditionLakes.py --option override --csv my_fixes.csv --ncores 4
 """
 
 import argparse
@@ -874,20 +880,116 @@ def load_gauges(gauges_vector_path, raster_proj):
     return strip_point_join_artifacts(gpd.read_file(gauges_vector_path)).to_crs(raster_proj)
 
 
+class SerialComm:
+    """One-process stand-in for ``MPI.COMM_WORLD``. Does not import mpi4py."""
+
+    def Get_rank(self):
+        return 0
+
+    def Get_size(self):
+        return 1
+
+    def bcast(self, obj, root=0):
+        return obj
+
+    def scatter(self, sendobj, root=0):
+        return sendobj[0]
+
+    def gather(self, sendobj, root=0):
+        return [sendobj]
+
+
+def requested_worker_count(ncores):
+    """
+    Resolve ``--ncores``.
+
+    An explicit value wins. Otherwise use ``FLOWPATH_NCORES``, then 1.
+    """
+    if ncores is None:
+        ncores = int(os.environ.get("FLOWPATH_NCORES", "1"))
+    else:
+        ncores = int(ncores)
+    if ncores < 1:
+        raise ValueError(f"--ncores must be >= 1 (got {ncores})")
+    return ncores
+
+
+def mpi_launch_rank_size():
+    """Rank and size from mpirun, or ``(0, 1)`` for a normal process.
+
+    A Slurm job step also exports ``PMI_SIZE``. Ignore that while ``SLURM_STEP_ID``
+    is set, so ``python3 ... --ncores 1`` on a compute node stays a single process.
+    """
+    size = os.environ.get("OMPI_COMM_WORLD_SIZE")
+    if size:
+        rank = os.environ.get("OMPI_COMM_WORLD_RANK") or "0"
+        return int(rank), int(size)
+
+    in_slurm_step = bool(os.environ.get("SLURM_STEP_ID") or os.environ.get("SLURM_STEPID"))
+    if not in_slurm_step:
+        size = os.environ.get("PMI_SIZE")
+        if size:
+            rank = os.environ.get("PMI_RANK") or "0"
+            return int(rank), int(size)
+    return 0, 1
+
+
+def init_comm(ncores):
+    """
+    Return the communicator for lake processing.
+
+    One core is an ordinary Python process: mpi4py is not imported, so the
+    script runs on a workstation or a Slurm compute node with no launcher.
+    More than one core imports mpi4py and must be started with
+    ``mpirun -np N``.
+    """
+    requested = requested_worker_count(ncores)
+    launch_rank, launch_size = mpi_launch_rank_size()
+
+    if requested == 1:
+        if launch_size > 1:
+            if launch_rank == 0:
+                print(
+                    "ERROR: --ncores 1 is a normal Python script. "
+                    "Start it directly, not under mpirun:\n"
+                    "  python3 code/conditionLakes.py --ncores 1"
+                )
+            raise SystemExit(1)
+        return SerialComm()
+
+    if launch_size < 2:
+        raise SystemExit(
+            f"ERROR: --ncores {requested} needs an MPI launch of {requested} "
+            f"processes. Start it with:\n"
+            f"  mpirun -np {requested} python3 code/conditionLakes.py "
+            f"--ncores {requested}\n"
+            f"Use mpirun for this script. srun direct-launch has no PMI support "
+            f"in this Open MPI build.\n"
+            f"For a normal serial script:\n"
+            f"  python3 code/conditionLakes.py --ncores 1"
+        )
+
+    try:
+        from mpi4py import MPI
+    except ImportError as exc:
+        raise SystemExit(
+            "ERROR: --ncores > 1 requires mpi4py. "
+            "On FIR: module load mpi4py/4.0.0. "
+            "Elsewhere: pip install mpi4py. "
+            "Or run serially with --ncores 1."
+        ) from exc
+    return MPI.COMM_WORLD
+
+
 def resolve_worker_count(requested_ncores, comm):
     """
-    Choose how many MPI ranks actively process lakes.
+    Choose how many ranks actively process lakes.
 
-    Under MPI (size > 1), the launcher (srun/mpirun) sets rank count; --ncores
-    can request fewer active ranks than were launched. In serial mode (size == 1),
-    defaults to 1 or FLOWPATH_NCORES.
+    ``mpirun -np`` sets the rank count. ``--ncores`` can request fewer active
+    ranks than were launched. A serial run has one rank.
     """
+    requested_ncores = requested_worker_count(requested_ncores)
     mpi_size = comm.Get_size()
-    if requested_ncores is None:
-        requested_ncores = int(os.environ.get("FLOWPATH_NCORES", "1"))
-    else:
-        requested_ncores = int(requested_ncores)
-
     if mpi_size > 1:
         return max(1, min(requested_ncores, mpi_size))
     return max(1, requested_ncores)
@@ -1343,8 +1445,10 @@ def process_raster_reservoir_routing(
     them into the existing output_fdr_path, after resetting each re-run lake's
     area to the original FDR.
 
-    Lakes are partitioned across MPI ranks by estimated grid-cell count, processed
-    in parallel, then merged on rank 0 using masked writes (only edited cells).
+    Lakes are partitioned across workers by estimated grid-cell count, processed
+    in parallel when more than one core is requested, then merged on rank 0
+    using masked writes (only edited cells). ``--ncores 1`` stays in this
+    process and does not import mpi4py.
 
     Workflow per lake:
       1. Read a raster window around the lake bbox.
@@ -1359,13 +1463,12 @@ def process_raster_reservoir_routing(
     The output file is a full copy of the input FDR raster with only lake
     interiors modified. All non-lake cells are untouched.
     """
-    from mpi4py import MPI
-
     if comm is None:
-        comm = MPI.COMM_WORLD
+        comm = init_comm(ncores)
 
     rank = comm.Get_rank()
     mpi_size = comm.Get_size()
+    serial = isinstance(comm, SerialComm)
 
     if mode not in ("full", "override"):
         raise ValueError(f"Unknown mode {mode!r}; expected 'full' or 'override'.")
@@ -1504,7 +1607,8 @@ def process_raster_reservoir_routing(
             print(
                 f"WARNING: Requested {worker_count} core(s) but only {mpi_size} MPI "
                 f"rank(s) were launched; using {mpi_size}. Launch with "
-                f"srun/mpirun -n {worker_count} to use more."
+                f"mpirun -np {worker_count} python3 code/conditionLakes.py "
+                f"--ncores {worker_count}."
             )
         worker_count = mpi_size
     if worker_count > total_lakes:
@@ -1519,8 +1623,13 @@ def process_raster_reservoir_routing(
         batches = partition_lakes_by_cell_count(lake_cell_counts, worker_count)
         scatter_batches = batches + [[] for _ in range(max(0, mpi_size - len(batches)))]
         scatter_batches = scatter_batches[:mpi_size]
-        print(f"\nBeginning processing run with {worker_count} active MPI rank(s) "
-              f"({mpi_size} launched)...")
+        if serial:
+            print("\nBeginning serial processing run (1 core, MPI not used)...")
+        else:
+            print(
+                f"\nBeginning processing run with {worker_count} active MPI rank(s) "
+                f"({mpi_size} launched)..."
+            )
         _print_partition_summary(batches, lake_cell_counts)
         print("-" * 90)
     else:
@@ -1572,9 +1681,13 @@ def process_raster_reservoir_routing(
         fdr_band.FlushCache()
         ds_fdr = None
         print("-" * 90)
+        if serial:
+            how = "1 core (MPI not used)"
+        else:
+            how = f"{worker_count} MPI rank(s)"
         print(
             f"Process complete. Wrote {patches_written} lake patch(es) from "
-            f"{total_lakes} reservoir(s) using {worker_count} MPI rank(s)."
+            f"{total_lakes} reservoir(s) using {how}."
         )
 
 
@@ -1587,9 +1700,10 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help=(
-            "Number of MPI ranks to use for lake processing (default: FLOWPATH_NCORES "
-            "env var or 1). Launch with srun/mpirun; capped by the number of ranks "
-            "started and by the number of lakes being edited."
+            "Worker count (default: FLOWPATH_NCORES env var, or 1). "
+            "--ncores 1 runs as a normal Python script and does not import mpi4py. "
+            "For N>1, launch with: mpirun -np N python3 code/conditionLakes.py --ncores N. "
+            "Capped by the number of ranks started and by the number of lakes being edited."
         ),
     )
     parser.add_argument(
