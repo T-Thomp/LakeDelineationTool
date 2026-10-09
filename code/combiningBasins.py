@@ -740,6 +740,9 @@ def process_reservoir_basins():
     ensure_output_dirs()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    from hy_features.network import repair_flowpath_geometries
+
+    streams_dissolved = repair_flowpath_geometries(streams_dissolved, basins=final_geofabric)
     export_shapefile(final_geofabric, str(WORKING_BASINS_MERGED))
     export_shapefile(streams_dissolved, str(WORKING_STREAMS_MERGED))
     print("Processing complete.")

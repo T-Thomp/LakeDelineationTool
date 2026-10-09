@@ -8,7 +8,7 @@ from collections import defaultdict
 
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, MultiLineString, Point
 from shapely.ops import linemerge
 
 from hy_features.schema import (
@@ -74,20 +74,181 @@ def _projected(gdf: gpd.GeoDataFrame, crs=None) -> gpd.GeoDataFrame:
     return gdf
 
 
+def _line_parts(geom) -> list[LineString]:
+    """Non-empty line parts, including lines stored inside a GeometryCollection."""
+    if geom is None:
+        return []
+    try:
+        if pd.isna(geom):
+            return []
+    except (TypeError, ValueError):
+        pass
+    if getattr(geom, "is_empty", True):
+        return []
+    gtype = getattr(geom, "geom_type", "")
+    if gtype == "LineString":
+        return [geom] if geom.length > 0 else []
+    if gtype in ("MultiLineString", "GeometryCollection"):
+        parts: list[LineString] = []
+        for part in geom.geoms:
+            parts.extend(_line_parts(part))
+        return parts
+    return []
+
+
 def _as_linestring(geom) -> LineString | None:
     """Normalize a flowpath geometry to a single LineString."""
-    if geom is None or geom.is_empty:
+    parts = _line_parts(geom)
+    if not parts:
         return None
-    if geom.geom_type == "LineString":
-        return geom
-    if geom.geom_type == "MultiLineString":
-        merged = linemerge(geom)
-        if merged.geom_type == "LineString":
-            return merged
-        parts = [part for part in getattr(merged, "geoms", []) if part.length > 0]
-        if not parts:
-            return None
+    if len(parts) == 1:
+        return parts[0]
+    merged = linemerge(parts)
+    if getattr(merged, "geom_type", None) == "LineString" and not merged.is_empty:
+        return merged
+    recovered = _line_parts(merged)
+    if not recovered:
         return max(parts, key=lambda part: part.length)
+    return max(recovered, key=lambda part: part.length)
+
+
+def coerce_flowpath_geometry(geom):
+    """
+    LineString or MultiLineString for a flowpath.
+
+    GeometryCollections from a line dissolve (and empty collections left by a
+    null reach) are reduced to their line parts. Returns None when no line remains.
+    """
+    parts = _line_parts(geom)
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    merged = linemerge(parts)
+    recovered = _line_parts(merged)
+    if len(recovered) == 1:
+        return recovered[0]
+    if recovered:
+        return MultiLineString(recovered)
+    return MultiLineString(parts)
+
+
+def _connector_from_downstream(down_geom) -> LineString | None:
+    """Short line whose pour point (``coords[0]``) is the next reach's upstream end."""
+    parts = _line_parts(down_geom)
+    if not parts:
+        return None
+    line = max(parts, key=lambda part: part.length)
+    coords = list(line.coords)
+    if len(coords) < 2 or coords[-1] == coords[-2]:
+        return None
+    return LineString([coords[-1], coords[-2]])
+
+
+def _line_from_basin_polygon(geom) -> LineString | None:
+    """A line from the basin interior to its boundary, for a reach with no channel."""
+    if geom is None or getattr(geom, "is_empty", True):
+        return None
+    poly = geom
+    if poly.geom_type == "GeometryCollection":
+        polys = [part for part in poly.geoms if part.geom_type in ("Polygon", "MultiPolygon")]
+        if not polys:
+            return None
+        poly = max(polys, key=lambda part: part.area)
+    if poly.geom_type == "MultiPolygon":
+        poly = max(poly.geoms, key=lambda part: part.area)
+    exterior = getattr(poly, "exterior", None)
+    if exterior is None:
+        return None
+    point = poly.representative_point()
+    coords = list(exterior.coords)
+    if not coords:
+        return None
+    end = coords[0]
+    if (point.x, point.y) == tuple(end[:2]):
+        if len(coords) < 2:
+            return None
+        end = coords[1]
+    if (point.x, point.y) == tuple(end[:2]):
+        return None
+    return LineString([point, end])
+
+
+def repair_flowpath_geometries(
+    streams: gpd.GeoDataFrame,
+    basins: gpd.GeoDataFrame | None = None,
+    outlet_sentinel: int = DEFAULT_OUTLET_SENTINEL,
+) -> gpd.GeoDataFrame:
+    """
+    Give every flowpath a line.
+
+    Dissolving a null channel yields an empty GeometryCollection, which a
+    shapefile then stores as a missing geometry. The replacement pours onto the
+    downstream reach (TauDEM keeps that pour point at ``coords[0]``). A domain
+    outlet with no downstream line gets a line across its basin polygon.
+    """
+    if streams is None or streams.empty:
+        return streams
+
+    out = streams.copy()
+    link_col = _link_col(out)
+    down_col = _raw_down_col(out) if _raw_down_col(out) in out.columns else None
+    geoms = [coerce_flowpath_geometry(geom) for geom in out.geometry]
+    id_to_pos = {normalize_id(fid): i for i, fid in enumerate(out[link_col])}
+    down_values = out[down_col].tolist() if down_col else [None] * len(out)
+
+    basin_geom: dict[str, object] = {}
+    if basins is not None and not basins.empty:
+        for col in (CATCHMENT_ID, LEGACY_BASIN_ID, LEGACY_FLOWPATH_ID):
+            if col in basins.columns:
+                basin_geom = {
+                    normalize_id(cid): geom
+                    for cid, geom in zip(basins[col], basins.geometry)
+                }
+                break
+
+    rebuilt: list[str] = []
+    for i, geom in enumerate(geoms):
+        if geom is not None:
+            continue
+        fid = normalize_id(out.iloc[i][link_col])
+        line = _downstream_connector(fid, id_to_pos, geoms, down_values, outlet_sentinel)
+        if line is None:
+            line = _line_from_basin_polygon(basin_geom.get(fid))
+        if line is None:
+            continue
+        geoms[i] = line
+        rebuilt.append(fid)
+
+    if rebuilt:
+        shown = ", ".join(rebuilt[:8])
+        extra = f" … ({len(rebuilt)} total)" if len(rebuilt) > 8 else ""
+        print(f"Rebuilt {len(rebuilt)} flowpath(s) with no line geometry: {shown}{extra}")
+
+    out = out.set_geometry(gpd.GeoSeries(geoms, index=out.index, crs=out.crs))
+    return out
+
+
+def _downstream_connector(
+    start_id: str,
+    id_to_pos: dict[str, int],
+    geoms: list,
+    down_values: list,
+    outlet_sentinel: int,
+) -> LineString | None:
+    """Walk downstream until a real line can host this reach's pour point."""
+    visited = {start_id}
+    pos = id_to_pos.get(start_id)
+    while pos is not None:
+        down = _parse_downstream_id(down_values[pos], outlet_sentinel)
+        if not down or down in visited:
+            return None
+        visited.add(down)
+        pos = id_to_pos.get(down)
+        if pos is None:
+            return None
+        if geoms[pos] is not None:
+            return _connector_from_downstream(geoms[pos])
     return None
 
 
@@ -155,17 +316,6 @@ def _id_sort_key(value: str) -> tuple[int, float, str]:
         return (1, 0.0, value)
 
 
-def _line_parts(geom) -> list[LineString]:
-    if geom is None or geom.is_empty:
-        return []
-    if geom.geom_type == "LineString":
-        return [geom]
-    if geom.geom_type == "MultiLineString":
-        return [part for part in geom.geoms if part.geom_type == "LineString" and not part.is_empty]
-    line = _as_linestring(geom)
-    return [line] if line is not None else []
-
-
 def _upstream_start(line: LineString) -> Point:
     """Upstream end of a TauDEM reach. The pour point is ``coords[0]``."""
     return Point(line.coords[-1])
@@ -221,6 +371,10 @@ def _outlet_point_for_reach(
 
     line = _as_linestring(row.geometry)
     if line is None:
+        if lower:
+            down_row = _flowpath_row(streams_indexed, lower)
+            if down_row is not None:
+                return _next_stream_start(down_row.geometry, near_geom)
         return None
     end_a, end_b = _line_endpoints(line)  # end_a = coords[0], TauDEM downstream / pour point
 

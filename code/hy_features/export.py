@@ -217,6 +217,21 @@ def export_registry_json(registry: CatchmentRegistry, output_path: str | Path) -
     output_path.write_text(json.dumps(payload, indent=2, default=json_default), encoding="utf-8")
 
 
+def _materialize_frame(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Copy column values into a new frame so later writes are not on a slice."""
+    geom_name = gdf.geometry.name
+    data: dict[str, object] = {}
+    for col in gdf.columns:
+        if col == geom_name:
+            continue
+        series = gdf[col]
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
+        data[col] = series.to_numpy(copy=True)
+    geometry = gpd.GeoSeries(list(gdf.geometry), index=gdf.index, crs=gdf.crs, name=geom_name)
+    return gpd.GeoDataFrame(data, geometry=geometry, crs=gdf.crs)
+
+
 def export_shapefile(gdf: gpd.GeoDataFrame, filename: str | Path) -> None:
     """
     Write shapefile with short column names and wide DBF floats (Fiona schema).
@@ -227,8 +242,9 @@ def export_shapefile(gdf: gpd.GeoDataFrame, filename: str | Path) -> None:
     export_gdf = prepare_shapefile_frame(gdf, filename)
     if not export_gdf.columns.is_unique:
         export_gdf = export_gdf.loc[:, ~export_gdf.columns.duplicated()]
-    # A fresh frame so column writes are not treated as assignment on a slice.
-    export_gdf = gpd.GeoDataFrame(export_gdf, geometry=export_gdf.geometry.name, crs=export_gdf.crs)
+    # New columns from copied arrays. Wrapping the same frame keeps pandas'
+    # "copy of a slice" flag and warns on the next column write.
+    export_gdf = _materialize_frame(export_gdf)
 
     float_cols = export_gdf.select_dtypes(include=["float64", "float32"]).columns
     for col in float_cols:

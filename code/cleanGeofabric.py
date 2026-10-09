@@ -78,7 +78,9 @@ def bypass_phantom_streams(streams_path, basins_path, output_path):
 
     if len(phantom_map) == 0:
         from hy_features.export import export_shapefile
+        from hy_features.network import repair_flowpath_geometries
 
+        streams = repair_flowpath_geometries(streams, basins=basins)
         export_shapefile(streams, output_path)
         return
 
@@ -186,6 +188,9 @@ def bypass_phantom_streams(streams_path, basins_path, output_path):
     # Remove remaining phantom rows
     # ---------------------------------------------------------------
     cleaned = streams[~streams["LINKNO"].isin(phantom_map.keys())].copy()
+    from hy_features.network import repair_flowpath_geometries
+
+    cleaned = repair_flowpath_geometries(cleaned, basins=basins)
 
     # ---------------------------------------------------------------
     # Recalculate geometry-derived fields
