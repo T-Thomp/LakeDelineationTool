@@ -186,8 +186,11 @@ module restore scimods
 
 # Study folder: study_settings.py and all products (TauDEM rasters + Python shapefiles).
 # Uncomment to send the job somewhere other than where you ran sbatch.
-# Leave unset to use SLURM_SUBMIT_DIR (same behaviour as before).
-# export LAKE_DELINEATION_ROOT="/project/6102189/tylerrt/my-bow-study"
+# Leave unset to use SLURM_SUBMIT_DIR.
+
+
+# export LAKE_DELINEATION_ROOT="~/directory/to/study"
+
 
 # Directory where you ran sbatch (not the read-only job spool copy). Used to find code/.
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
