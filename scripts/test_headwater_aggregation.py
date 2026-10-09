@@ -24,8 +24,36 @@ MIN = 100.0
 OUT = ba.OUTLET_VALUE
 
 
+def _taudem_cont_areas(rows: list[dict]) -> tuple[dict[int, float], dict[int, float]]:
+  """US/DS contributing area in m² from local area_km2, walking upstream first."""
+  ids = [r["id"] for r in rows]
+  area_m2 = {r["id"]: r["area"] / ba.AREA_SCALE for r in rows}
+  inflows: dict[int, list[int]] = {i: [] for i in ids}
+  for r in rows:
+    if r["down"] in inflows:
+      inflows[r["down"]].append(r["id"])
+  us: dict[int, float] = {}
+  ds: dict[int, float] = {}
+  remaining = set(ids)
+  while remaining:
+    progressed = False
+    for i in list(remaining):
+      if all(u in ds for u in inflows[i]):
+        us[i] = sum(ds[u] for u in inflows[i])
+        ds[i] = us[i] + area_m2[i]
+        remaining.remove(i)
+        progressed = True
+    if not progressed:
+      for i in remaining:
+        us[i] = 0.0
+        ds[i] = area_m2[i]
+      break
+  return us, ds
+
+
 def make_network(rows: list[dict]) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
   """rows: id, down, area, [length_km, lake, gauge, box]."""
+  us, ds = _taudem_cont_areas(rows)
   basins, streams = [], []
   for r in rows:
     geom = box(*r["box"]) if "box" in r else box(r["id"] * 10, 0, r["id"] * 10 + 1, 1)
@@ -47,7 +75,8 @@ def make_network(rows: list[dict]) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
       "Length": r.get("length_km", 1.0) * 1000.0,
       "strmDrop": 1.0,
       "Slope": 0.001,
-      "DSContArea": 0.0,
+      "USContArea": us[r["id"]],
+      "DSContArea": ds[r["id"]],
       "geometry": LineString([(x0 + 0.1, y0 + 0.5), (x1 - 0.1, y0 + 0.5)]),
     })
   crs = "EPSG:3857"
@@ -192,6 +221,7 @@ def main() -> None:
     {94: {91, 92, 93, 94}, 95: {95}},
   )
   check_lake_fraction()
+  check_cont_area()
   print("All tests passed.")
 
 
@@ -210,6 +240,32 @@ def check_lake_fraction() -> None:
   assert by_id.loc[1, "lake_area"] == 125e6, "lake_area must stay in m2"
   assert (by_id["frac_lake"] <= 1.0).all(), "frac_lake must be a 0-1 fraction"
   print("PASS lake fraction carried through unchanged")
+
+
+def check_cont_area() -> None:
+  """Linear keeps upstream US + downstream DS; sideways sums DS."""
+  linear_rows = [
+    {"id": 51, "down": 52, "area": 20},
+    {"id": 52, "down": 53, "area": 300, "gauge": "05AA002"},
+    {"id": 53, "down": OUT, "area": 20},
+  ]
+  us, ds = _taudem_cont_areas(linear_rows)
+  _, _, agg_r, _ = aggregate(linear_rows)
+  by_id = agg_r.set_index("LINKNO")
+  assert abs(by_id.loc[52, "USContArea"] - us[51]) < 1e-6, "linear US should be the upstream USContArea"
+  assert abs(by_id.loc[52, "DSContArea"] - ds[52]) < 1e-6, "linear DS should be the downstream DSContArea"
+
+  side_rows = [
+    {"id": 1, "down": 3, "area": 30, "length_km": 5},
+    {"id": 2, "down": 3, "area": 200, "length_km": 2},
+    {"id": 3, "down": OUT, "area": 500},
+  ]
+  us, ds = _taudem_cont_areas(side_rows)
+  _, _, agg_r, _ = aggregate(side_rows)
+  by_id = agg_r.set_index("LINKNO")
+  assert abs(by_id.loc[1, "USContArea"] - us[1]) < 1e-6, "sideways US should stay on the surviving reach"
+  assert abs(by_id.loc[1, "DSContArea"] - (ds[1] + ds[2])) < 1e-6, "sideways DS should sum both pour-point areas"
+  print("PASS USContArea / DSContArea merge rules")
 
 
 if __name__ == "__main__":
