@@ -170,9 +170,6 @@ DEFAULT_LAYER_ALIASES: Final[dict[str, dict[str, str]]] = {
     },
 }
 
-# Backward-compatible alias
-MESH_FIELD_ALIASES: Final[dict[str, dict[str, str]]] = DEFAULT_LAYER_ALIASES
-
 # Reverse lookup: output name -> canonical (for documentation)
 OUTPUT_TO_CANONICAL: Final[dict[str, dict[str, str]]] = {
     layer: {v: k for k, v in mapping.items()}

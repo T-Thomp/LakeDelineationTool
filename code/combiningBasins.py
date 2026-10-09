@@ -41,8 +41,7 @@ D. STREAM TOPOLOGY REWIRING & HYDROMETRIC AGGREGATION
    StraightL is set afterward from the merged line's endpoints
    compute_lake_path_metrics() traces the longest inflow-to-outlet path through
      each lake and recalculates Length, strmDrop, StraightL, DOUTEND/START/MID,
-     Slope, DSContArea (winning outlet DSContArea), and USContArea (that value
-     minus the merged basin area) for the merged link
+     Slope, DSContArea (outlet value), and USContArea (outlet DS minus basin area)
    Rewire DSLINKNO so merged lake links drain to the link downstream of the winner
 
 E. BASIN FABRIC ASSEMBLY
@@ -397,43 +396,6 @@ def collect_internal_links(lake_geom, in_pts, raw_outflow_candidates, streams, b
 # ==============================================================================
 # D. STREAM TOPOLOGY REWIRING & HYDROMETRIC AGGREGATION
 # ==============================================================================
-def _upstream_link_ids(row):
-    ups = []
-    for col in ("USLINKNO1", "USLINKNO2"):
-        if col not in row.index:
-            continue
-        try:
-            uid = int(row[col])
-        except (TypeError, ValueError):
-            continue
-        if uid > 0:
-            ups.append(uid)
-    return ups
-
-
-def _is_lake_inflow_link(row, internal_set) -> bool:
-    """True if this internal link is fed from outside the lake (or has no upstream)."""
-    ups = _upstream_link_ids(row)
-    if not ups:
-        return True
-    return any(uid not in internal_set for uid in ups)
-
-
-def _numeric_area(value) -> float:
-    val = pd.to_numeric(value, errors="coerce")
-    return 0.0 if pd.isna(val) else float(val)
-
-
-def _lake_cont_areas(target_exit, streams_work, basin_area_m2):
-    """DS is the winning outlet's DSContArea; US is that minus the merged basin."""
-    ds = 0.0
-    outlet = streams_work.loc[streams_work["LINKNO"] == target_exit]
-    if not outlet.empty and "DSContArea" in outlet.columns:
-        ds = _numeric_area(outlet.iloc[0]["DSContArea"])
-    us = max(0.0, ds - float(basin_area_m2))
-    return us, ds
-
-
 def compute_lake_path_metrics(links, target_exit, streams_work, down_map, basin_area_m2=0.0):
     """
     Trace the longest inflow-to-outlet path through internal lake links and
@@ -450,20 +412,14 @@ def compute_lake_path_metrics(links, target_exit, streams_work, down_map, basin_
       DOUTSTART - DOUTEND + Length
       DOUTMID   - average of DOUTSTART and DOUTEND
       Slope     - strmDrop / Length (computed after assignment)
-      DSContArea - winning outlet DSContArea (same pour point after the merge)
-      USContArea - DSContArea minus the merged basin area (m²)
+      DSContArea - winning outlet DSContArea
+      USContArea - that value minus the merged basin area
     """
-    lake_us, lake_ds = _lake_cont_areas(target_exit, streams_work, basin_area_m2)
     internal_set = set(links)
-    inflows = []
-    for link in links:
-        rows = streams_work.loc[streams_work["LINKNO"] == link]
-        if rows.empty:
-            continue
-        row = rows.iloc[0]
-        if not _is_lake_inflow_link(row, internal_set):
-            continue
-        inflows.append(link)
+    inflows = [
+        link for link in links
+        if streams_work.loc[streams_work["LINKNO"] == link, "USLINKNO1"].values[0] not in internal_set
+    ]
 
     max_path_len = 0.0
     best_path_metrics = {
@@ -472,8 +428,6 @@ def compute_lake_path_metrics(links, target_exit, streams_work, down_map, basin_
         "DOUTEND": 0.0,
         "DOUTSTART": 0.0,
         "DOUTMID": 0.0,
-        "USContArea": lake_us,
-        "DSContArea": lake_ds,
     }
 
     for start in inflows:
@@ -515,10 +469,17 @@ def compute_lake_path_metrics(links, target_exit, streams_work, down_map, basin_
                 "DOUTEND": path_dout_end,
                 "DOUTSTART": path_dout_start,
                 "DOUTMID": path_dout_mid,
-                "USContArea": lake_us,
-                "DSContArea": lake_ds,
             }
 
+    ds = 0.0
+    if "DSContArea" in streams_work.columns:
+        outlet = streams_work.loc[streams_work["LINKNO"] == target_exit, "DSContArea"]
+        if not outlet.empty:
+            val = pd.to_numeric(outlet.iloc[0], errors="coerce")
+            if pd.notna(val):
+                ds = float(val)
+    best_path_metrics["DSContArea"] = ds
+    best_path_metrics["USContArea"] = max(0.0, ds - float(basin_area_m2))
     return best_path_metrics
 
 
@@ -577,16 +538,6 @@ def apply_lake_metrics(streams_dissolved, lake_metrics):
 
 
 # ==============================================================================
-# E. EXPORT
-# ==============================================================================
-def export_shapefile(gdf, filename):
-    """Write a shapefile with short column names and wide DBF numeric fields."""
-    from hy_features.export import export_shapefile_legacy
-
-    export_shapefile_legacy(gdf, filename)
-
-
-# ==============================================================================
 # MAIN PIPELINE
 # ==============================================================================
 def process_reservoir_basins():
@@ -608,7 +559,7 @@ def process_reservoir_basins():
     lakes = gpd.read_file(PATHS["lakes"])
     streams = gpd.read_file(PATHS["streams"])
     intersection = gpd.read_file(PATHS["intersection"])
-    from hy_features.export import strip_point_join_artifacts
+    from hy_features.export import export_shapefile, strip_point_join_artifacts
 
     gauges = strip_point_join_artifacts(gpd.read_file(PATHS["gauges"]))
 

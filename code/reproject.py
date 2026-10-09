@@ -19,7 +19,7 @@ from pathlib import Path
 import geopandas as gpd
 from pyproj import CRS
 
-from hy_features.export import export_shapefile_legacy
+from hy_features.export import export_shapefile
 from pipeline_paths import FINAL_BASINS_AGG, FINAL_STREAMS_AGG, ensure_output_dirs
 
 
@@ -57,7 +57,7 @@ def reproject_shapefile(src: Path, dst: Path, crs: CRS) -> None:
     if gdf.crs != crs:
         gdf = gdf.to_crs(crs)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    export_shapefile_legacy(gdf, dst)
+    export_shapefile(gdf, dst)
     print(f"Wrote {dst}  ({len(gdf)} features, {crs.to_string()})")
 
 

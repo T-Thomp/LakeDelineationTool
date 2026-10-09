@@ -794,14 +794,14 @@ def run_aggregation(
   else:
     agg_basins, agg_rivers, log = basin_aggregation(basins, rivers, **kwargs)
 
-  from hy_features.export import export_shapefile_legacy
+  from hy_features.export import export_shapefile
 
   os.makedirs(os.path.dirname(output_basins_path) or ".", exist_ok=True)
   os.makedirs(os.path.dirname(output_rivers_path) or ".", exist_ok=True)
   print(f"Writing aggregated basins ({len(agg_basins)} features): {output_basins_path}")
-  export_shapefile_legacy(agg_basins, output_basins_path)
+  export_shapefile(agg_basins, output_basins_path)
   print(f"Writing aggregated rivers ({len(agg_rivers)} features): {output_rivers_path}")
-  export_shapefile_legacy(agg_rivers, output_rivers_path)
+  export_shapefile(agg_rivers, output_rivers_path)
   write_merge_log(log, merge_log_path)
 
   if want_membership:

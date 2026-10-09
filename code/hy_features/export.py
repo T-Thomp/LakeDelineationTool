@@ -217,7 +217,7 @@ def export_registry_json(registry: CatchmentRegistry, output_path: str | Path) -
     output_path.write_text(json.dumps(payload, indent=2, default=json_default), encoding="utf-8")
 
 
-def export_shapefile_legacy(gdf: gpd.GeoDataFrame, filename: str | Path) -> None:
+def export_shapefile(gdf: gpd.GeoDataFrame, filename: str | Path) -> None:
     """
     Write shapefile with short column names and wide DBF floats (Fiona schema).
 
