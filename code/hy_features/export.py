@@ -226,7 +226,9 @@ def export_shapefile(gdf: gpd.GeoDataFrame, filename: str | Path) -> None:
     """
     export_gdf = prepare_shapefile_frame(gdf, filename)
     if not export_gdf.columns.is_unique:
-        export_gdf = export_gdf.loc[:, ~export_gdf.columns.duplicated()].copy()
+        export_gdf = export_gdf.loc[:, ~export_gdf.columns.duplicated()]
+    # A fresh frame so column writes are not treated as assignment on a slice.
+    export_gdf = gpd.GeoDataFrame(export_gdf, geometry=export_gdf.geometry.name, crs=export_gdf.crs)
 
     float_cols = export_gdf.select_dtypes(include=["float64", "float32"]).columns
     for col in float_cols:

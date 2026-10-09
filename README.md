@@ -488,6 +488,8 @@ python3 /path/to/LakeDelineationTool/code/validate_study.py
 
 The study folder needs `study_settings.py` (copy from `study_settings.example.py`). Relative paths in that file (`dem/your-dem.tif`) are resolved against the study root. Absolute paths are used as written.
 
+To include outlet or stream overrides in the result, put `outlet_overrides.csv` and `stream_conditioning.csv` in that same folder. The pipeline reads them from the study root (`./outlet_overrides.csv`, `./stream_conditioning.csv`).
+
 The `code/` scripts do **not** have to live in the study folder. Point `LAKE_DELINEATION_ROOT` at the study and run the scripts from the repo (or any clone):
 
 ```bash
@@ -517,7 +519,7 @@ Do not `cd` into `code/` and run the scripts from there. `.` would then be `code
 export LAKE_DELINEATION_ROOT="/project/6102189/tylerrt/my-bow-study"
 ```
 
-That folder needs `study_settings.py`. `code/` can stay next to the slurm script (the submit directory). Leave the export unset and the job uses the directory where you ran `sbatch`, same as before. The slurm script `cd`s to the study root so `./outlet_overrides.csv` and `./stream_conditioning.csv` resolve there.
+That folder needs `study_settings.py`. Put `outlet_overrides.csv` and `stream_conditioning.csv` there as well when those overrides should be part of the result. `code/` can stay next to the slurm script (the submit directory). Leave the export unset and the job uses the directory where you ran `sbatch`, same as before. The slurm script `cd`s to the study root so those CSVs resolve there.
 
 Job logs (`delineate_<jobid>.out`) still land in the submit directory, not the study folder.
 

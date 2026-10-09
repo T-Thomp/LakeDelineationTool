@@ -73,7 +73,6 @@ import shapely
 from shapely.geometry import Point
 
 from outlet_overrides import load_overrides
-from hy_features.config import hy_features_enabled
 from pipeline_paths import (
     PATHS as PIPELINE_PATHS,
     PREP_GAUGES,
@@ -81,9 +80,6 @@ from pipeline_paths import (
     SNAPPED_OUTLETS,
     WORKING,
     WORKING_BASINS_MERGED,
-    WORKING_CATCHMENT_REGISTRY,
-    WORKING_GEOFABRIC_GPKG,
-    WORKING_HYDRO_NETWORK_JSON,
     WORKING_STREAMS_MERGED,
     ensure_output_dirs,
 )
@@ -95,7 +91,6 @@ GAUGE_SEARCH_RADIUS = 750       # meters; max distance to count a gauge as "near
 MIN_INTERNAL_STREAM_LEN = 180   # meters; stream-lake overlap length that triggers swallow
 OVERRIDES_CSV = "outlet_overrides.csv"
 OUTPUT_DIR = str(WORKING)
-ENABLE_HY_FEATURES = False      # overridden by HY_FEATURES_ENABLED env var if set
 
 PATHS = {
     "basins": PIPELINE_PATHS["pass3_basins"],
@@ -744,31 +739,6 @@ def process_reservoir_basins():
 
     ensure_output_dirs()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    waterbodies = None
-    try:
-        waterbodies = gpd.read_file(PATHS["lakes"])
-        if waterbodies.crs != target_crs:
-            waterbodies = waterbodies.to_crs(target_crs)
-    except Exception as exc:
-        print(f"No waterbody layer for HY_Features assembly: {exc}")
-
-    if hy_features_enabled(default=ENABLE_HY_FEATURES):
-        from hy_features.assemble import assemble_full_geofabric, export_full_geofabric
-
-        assembled = assemble_full_geofabric(
-            final_geofabric,
-            streams_dissolved,
-            gauges=gauges,
-            waterbodies=waterbodies,
-        )
-
-        export_full_geofabric(
-            assembled,
-            gpkg_path=str(WORKING_GEOFABRIC_GPKG),
-            registry_path=str(WORKING_CATCHMENT_REGISTRY),
-            metadata_path=str(WORKING_HYDRO_NETWORK_JSON),
-        )
 
     export_shapefile(final_geofabric, str(WORKING_BASINS_MERGED))
     export_shapefile(streams_dissolved, str(WORKING_STREAMS_MERGED))
