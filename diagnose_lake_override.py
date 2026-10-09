@@ -43,7 +43,7 @@ from pipeline_paths import (  # noqa: E402
     TAUDEM_D8,
     ensure_output_dirs,
 )
-from rasterFlowpathEdit import (  # noqa: E402
+from conditionLakes import (  # noqa: E402
     D8_OFFSETS,
     _lookup_tables_from_streams_gdf,
     build_lake_through_stream_linknos,

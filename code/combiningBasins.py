@@ -27,7 +27,7 @@ B. OUTLET SELECTION (when a lake has multiple outflows)
    rank_algorithmic_outflow()            -> gauge -> doutend -> strmOrder -> area
 
    Uses vector attributes only (no rasters). Ranking priority matches
-   rasterFlowpathEdit.py, but strmOrder replaces raster local_accum.
+   conditionLakes.py, but strmOrder replaces raster local_accum.
 
 C. INTERNAL LINK IDENTIFICATION ("swallow" set)
    collect_internal_links()
@@ -55,7 +55,7 @@ Inputs
   outputs/prep/lakes.shp                              (reservoir polygons)
   outputs/interim/taudem_pass3/snapped-outlets.shp        (lake in/outflow points)
   outputs/prep/gauges.shp
-  outlet_overrides.csv (optional; shared with rasterFlowpathEdit.py)
+  outlet_overrides.csv (optional; shared with conditionLakes.py)
 
 Outputs
 -------
@@ -246,7 +246,7 @@ def filter_upstream_duplicate_outflows(candidates, link_to_downstream):
       - is downstream of it on the same network (link_a flows into link_b), OR
       - shares the same link_no but has higher strm_order (tie-break)
 
-    This mirrors rasterFlowpathEdit.filter_upstream_duplicates(), but uses
+    This mirrors conditionLakes.filter_upstream_duplicates(), but uses
     strmOrder instead of raster accumulation for same-link ties.
     """
     surviving = []
