@@ -1,5 +1,5 @@
 """
-Raster flow-path editor for instream reservoirs.
+Lake flow-direction conditioning for instream reservoirs.
 
 Called by Delineation-Workflow.slurm after TauDEM Pass 1 and the
 filterLakes / getGauges steps. It reads the original TauDEM flow-direction
@@ -47,7 +47,13 @@ Run modes (--option)
                    to the original FDR, so edits from the previous outlet choice
                    do not linger.
 
-  python3 rasterFlowpathEdit.py --option override --csv my_fixes.csv --ncores 4
+  Serial (workstation or compute node; mpi4py is not imported):
+
+    python3 conditionLakes.py --option override --csv my_fixes.csv --ncores 1
+
+  Parallel (Open MPI via mpirun; this build has no Slurm PMI support):
+
+    mpirun -np 4 python3 conditionLakes.py --option override --csv my_fixes.csv --ncores 4
 """
 
 import argparse
@@ -168,29 +174,6 @@ def build_lake_through_stream_linknos(lakes_gdf, streams_gdf):
     return lake_through_linknos
 
 
-def trace_flow_enters_lake(start_rc, fdr_win, lake_mask):
-    """Follow D8 downstream from start_rc; True if the path re-enters the lake."""
-    height, width = lake_mask.shape
-    row, col = start_rc
-    visited = set()
-
-    while (row, col) not in visited:
-        visited.add((row, col))
-        if lake_mask[row, col]:
-            return True
-
-        dr, dc = get_d8_offset(fdr_win[row, col])
-        if dr == 0 and dc == 0:
-            return False
-
-        nrow, ncol = row + dr, col + dc
-        if not (0 <= nrow < height and 0 <= ncol < width):
-            return False
-        row, col = nrow, ncol
-
-    return False
-
-
 def _override_outward_ray(target_rc, lake_mask):
     """
     Unit step vector from a shoreline cell outward, away from local lake interior.
@@ -233,7 +216,7 @@ def is_link_upstream_of(link_a, link_b, link_to_downstream):
     return False
 
 
-def trace_fdr_to_stream_link(
+def trace_breakout_flow(
     start_rc,
     fdr_win,
     src_win,
@@ -242,34 +225,42 @@ def trace_fdr_to_stream_link(
     lake_mask,
     max_steps=MAX_BREAKOUT_TRACE_STEPS,
 ):
-    """Follow D8 downstream until a stream-network cell; return (LINKNO, hit_rc) or (None, None)."""
+    """
+    Follow D8 downstream from a breakout tip.
+
+    Returns (outcome, link_no, hit_rc), where outcome is:
+      "lake"   - flow runs back into the reservoir
+      "sink"   - flow stops (no direction) or loops
+      "stream" - flow reaches a stream cell (link_no, hit_rc set)
+      "away"   - flow leaves the window or runs max_steps without returning
+    """
     height, width = lake_mask.shape
     row, col = start_rc
     visited = set()
 
     for _ in range(max_steps):
         if (row, col) in visited:
-            return None, None
+            return "sink", -1, None
         visited.add((row, col))
 
         if lake_mask[row, col]:
-            return None, None
+            return "lake", -1, None
 
         if int(src_win[row, col]) == 1:
             link_no = wsno_to_link.get(int(w_win[row, col]), -1)
             if link_no > 0:
-                return link_no, (row, col)
+                return "stream", link_no, (row, col)
 
         dr, dc = get_d8_offset(fdr_win[row, col])
         if dr == 0 and dc == 0:
-            return None, None
+            return "sink", -1, None
 
         nrow, ncol = row + dr, col + dc
         if not (0 <= nrow < height and 0 <= ncol < width):
-            return None, None
+            return "away", -1, None
         row, col = nrow, ncol
 
-    return None, None
+    return "away", -1, None
 
 
 def is_acceptable_outflow_link(
@@ -323,6 +314,33 @@ def is_acceptable_outflow_link(
     return True
 
 
+def _next_breakout_cell(current_rc, origin_rc, step_r, step_c, lake_mask, carved):
+    """
+    Next D8 neighbour of current_rc along the outward ray from origin_rc.
+
+    Only non-lake, not-yet-carved neighbours that move outward are allowed, so
+    every carved cell drains straight into the one after it. Picks the one
+    closest to the ray line, then the one furthest along it.
+    """
+    ysize, xsize = lake_mask.shape
+    best = None
+    for dr, dc in D8_DIRS:
+        nr, nc = current_rc[0] + dr, current_rc[1] + dc
+        if not (0 <= nr < ysize and 0 <= nc < xsize):
+            continue
+        if lake_mask[nr, nc] or (nr, nc) in carved:
+            continue
+        if dr * step_r + dc * step_c <= 0:
+            continue
+        rel_r, rel_c = nr - origin_rc[0], nc - origin_rc[1]
+        along = rel_r * step_r + rel_c * step_c
+        off_ray = abs(rel_r * step_c - rel_c * step_r)
+        key = (off_ray, -along)
+        if best is None or key < best[0]:
+            best = (key, (nr, nc))
+    return best[1] if best else None
+
+
 def compute_override_breakout_path(
     target_rc,
     lake_mask,
@@ -341,9 +359,10 @@ def compute_override_breakout_path(
     """
     Carve outward one exterior cell at a time along the local-centroid ray.
 
-    After each new cell the temporary FDR is updated and flow is traced to the
-    stream network. Success when the hit link passes vector-graph and (when
-    needed) local_accum checks relative to the override reference outlet.
+    After each new cell the temporary FDR is updated and flow is traced from
+    the tip. Success once that flow does not return to the lake and does not
+    stop in a sink. If it reaches a stream, that link must also pass the
+    vector-graph and local_accum checks (so an inflow branch is rejected).
     """
     ray = _override_outward_ray(target_rc, lake_mask)
     if ray is None:
@@ -351,35 +370,31 @@ def compute_override_breakout_path(
 
     step_r, step_c = ray
     ysize, xsize = lake_mask.shape
-    curr_r, curr_c = float(target_rc[0]), float(target_rc[1])
     breakout_path = []
     last_fixed_rc = target_rc
-    temp_fdr = fdr_win.copy()
+    carved = {target_rc}
+    # Validate against the lake as it will be written: every lake cell routed to
+    # the outlet, so a carve that leads back into the lake is caught.
+    temp_fdr = route_centerline_to_target(fdr_win, lake_mask, target_rc, lock_target_value=False)
     outside_steps = 0
 
     while outside_steps < max_steps:
-        curr_r += step_r
-        curr_c += step_c
-        next_r, next_c = int(np.round(curr_r)), int(np.round(curr_c))
-
-        if not (0 <= next_r < ysize and 0 <= next_c < xsize):
+        next_rc = _next_breakout_cell(
+            last_fixed_rc, target_rc, step_r, step_c, lake_mask, carved,
+        )
+        if next_rc is None:
             break
+        next_r, next_c = next_rc
 
-        if lake_mask[next_r, next_c]:
-            continue
-
-        breakout_path.append((last_fixed_rc, (next_r, next_c)))
+        breakout_path.append((last_fixed_rc, next_rc))
         cr, cc = last_fixed_rc
-        temp_fdr[cr, cc] = get_d8_direction(last_fixed_rc, (next_r, next_c))
-        last_fixed_rc = (next_r, next_c)
+        temp_fdr[cr, cc] = get_d8_direction(last_fixed_rc, next_rc)
+        carved.add(next_rc)
+        last_fixed_rc = next_rc
         outside_steps += 1
 
-        tip_rc = (next_r, next_c)
-        if trace_flow_enters_lake(tip_rc, temp_fdr, lake_mask):
-            continue
-
-        hit_link, hit_rc = trace_fdr_to_stream_link(
-            tip_rc,
+        outcome, hit_link, hit_rc = trace_breakout_flow(
+            (next_r, next_c),
             temp_fdr,
             src_win,
             w_win,
@@ -387,14 +402,9 @@ def compute_override_breakout_path(
             lake_mask,
             max_trace_steps,
         )
-        if hit_link is None:
-            # Flow no longer re-enters the lake but the tip is still off-network;
-            # accept when anchored to a nearby stream exit (same as legacy short breakout).
-            if ref_link > 0:
-                return breakout_path, True, ref_link
+        if outcome in ("lake", "sink"):
             continue
-
-        if is_acceptable_outflow_link(
+        if outcome == "stream" and not is_acceptable_outflow_link(
             hit_link,
             hit_rc,
             lake_through_linknos,
@@ -403,7 +413,8 @@ def compute_override_breakout_path(
             ref_accum,
             ref_link,
         ):
-            return breakout_path, True, hit_link
+            continue
+        return breakout_path, True, hit_link if hit_link > 0 else ref_link
 
     return breakout_path, False, -1
 
@@ -869,20 +880,116 @@ def load_gauges(gauges_vector_path, raster_proj):
     return strip_point_join_artifacts(gpd.read_file(gauges_vector_path)).to_crs(raster_proj)
 
 
+class SerialComm:
+    """One-process stand-in for ``MPI.COMM_WORLD``. Does not import mpi4py."""
+
+    def Get_rank(self):
+        return 0
+
+    def Get_size(self):
+        return 1
+
+    def bcast(self, obj, root=0):
+        return obj
+
+    def scatter(self, sendobj, root=0):
+        return sendobj[0]
+
+    def gather(self, sendobj, root=0):
+        return [sendobj]
+
+
+def requested_worker_count(ncores):
+    """
+    Resolve ``--ncores``.
+
+    An explicit value wins. Otherwise use ``FLOWPATH_NCORES``, then 1.
+    """
+    if ncores is None:
+        ncores = int(os.environ.get("FLOWPATH_NCORES", "1"))
+    else:
+        ncores = int(ncores)
+    if ncores < 1:
+        raise ValueError(f"--ncores must be >= 1 (got {ncores})")
+    return ncores
+
+
+def mpi_launch_rank_size():
+    """Rank and size from mpirun, or ``(0, 1)`` for a normal process.
+
+    A Slurm job step also exports ``PMI_SIZE``. Ignore that while ``SLURM_STEP_ID``
+    is set, so ``python3 ... --ncores 1`` on a compute node stays a single process.
+    """
+    size = os.environ.get("OMPI_COMM_WORLD_SIZE")
+    if size:
+        rank = os.environ.get("OMPI_COMM_WORLD_RANK") or "0"
+        return int(rank), int(size)
+
+    in_slurm_step = bool(os.environ.get("SLURM_STEP_ID") or os.environ.get("SLURM_STEPID"))
+    if not in_slurm_step:
+        size = os.environ.get("PMI_SIZE")
+        if size:
+            rank = os.environ.get("PMI_RANK") or "0"
+            return int(rank), int(size)
+    return 0, 1
+
+
+def init_comm(ncores):
+    """
+    Return the communicator for lake processing.
+
+    One core is an ordinary Python process: mpi4py is not imported, so the
+    script runs on a workstation or a Slurm compute node with no launcher.
+    More than one core imports mpi4py and must be started with
+    ``mpirun -np N``.
+    """
+    requested = requested_worker_count(ncores)
+    launch_rank, launch_size = mpi_launch_rank_size()
+
+    if requested == 1:
+        if launch_size > 1:
+            if launch_rank == 0:
+                print(
+                    "ERROR: --ncores 1 is a normal Python script. "
+                    "Start it directly, not under mpirun:\n"
+                    "  python3 code/conditionLakes.py --ncores 1"
+                )
+            raise SystemExit(1)
+        return SerialComm()
+
+    if launch_size < 2:
+        raise SystemExit(
+            f"ERROR: --ncores {requested} needs an MPI launch of {requested} "
+            f"processes. Start it with:\n"
+            f"  mpirun -np {requested} python3 code/conditionLakes.py "
+            f"--ncores {requested}\n"
+            f"Use mpirun for this script. srun direct-launch has no PMI support "
+            f"in this Open MPI build.\n"
+            f"For a normal serial script:\n"
+            f"  python3 code/conditionLakes.py --ncores 1"
+        )
+
+    try:
+        from mpi4py import MPI
+    except ImportError as exc:
+        raise SystemExit(
+            "ERROR: --ncores > 1 requires mpi4py. "
+            "On FIR: module load mpi4py/4.0.0. "
+            "Elsewhere: pip install mpi4py. "
+            "Or run serially with --ncores 1."
+        ) from exc
+    return MPI.COMM_WORLD
+
+
 def resolve_worker_count(requested_ncores, comm):
     """
-    Choose how many MPI ranks actively process lakes.
+    Choose how many ranks actively process lakes.
 
-    Under MPI (size > 1), the launcher (srun/mpirun) sets rank count; --ncores
-    can request fewer active ranks than were launched. In serial mode (size == 1),
-    defaults to 1 or FLOWPATH_NCORES.
+    ``mpirun -np`` sets the rank count. ``--ncores`` can request fewer active
+    ranks than were launched. A serial run has one rank.
     """
+    requested_ncores = requested_worker_count(requested_ncores)
     mpi_size = comm.Get_size()
-    if requested_ncores is None:
-        requested_ncores = int(os.environ.get("FLOWPATH_NCORES", "1"))
-    else:
-        requested_ncores = int(requested_ncores)
-
     if mpi_size > 1:
         return max(1, min(requested_ncores, mpi_size))
     return max(1, requested_ncores)
@@ -1338,8 +1445,10 @@ def process_raster_reservoir_routing(
     them into the existing output_fdr_path, after resetting each re-run lake's
     area to the original FDR.
 
-    Lakes are partitioned across MPI ranks by estimated grid-cell count, processed
-    in parallel, then merged on rank 0 using masked writes (only edited cells).
+    Lakes are partitioned across workers by estimated grid-cell count, processed
+    in parallel when more than one core is requested, then merged on rank 0
+    using masked writes (only edited cells). ``--ncores 1`` stays in this
+    process and does not import mpi4py.
 
     Workflow per lake:
       1. Read a raster window around the lake bbox.
@@ -1354,13 +1463,12 @@ def process_raster_reservoir_routing(
     The output file is a full copy of the input FDR raster with only lake
     interiors modified. All non-lake cells are untouched.
     """
-    from mpi4py import MPI
-
     if comm is None:
-        comm = MPI.COMM_WORLD
+        comm = init_comm(ncores)
 
     rank = comm.Get_rank()
     mpi_size = comm.Get_size()
+    serial = isinstance(comm, SerialComm)
 
     if mode not in ("full", "override"):
         raise ValueError(f"Unknown mode {mode!r}; expected 'full' or 'override'.")
@@ -1499,7 +1607,8 @@ def process_raster_reservoir_routing(
             print(
                 f"WARNING: Requested {worker_count} core(s) but only {mpi_size} MPI "
                 f"rank(s) were launched; using {mpi_size}. Launch with "
-                f"srun/mpirun -n {worker_count} to use more."
+                f"mpirun -np {worker_count} python3 code/conditionLakes.py "
+                f"--ncores {worker_count}."
             )
         worker_count = mpi_size
     if worker_count > total_lakes:
@@ -1514,8 +1623,13 @@ def process_raster_reservoir_routing(
         batches = partition_lakes_by_cell_count(lake_cell_counts, worker_count)
         scatter_batches = batches + [[] for _ in range(max(0, mpi_size - len(batches)))]
         scatter_batches = scatter_batches[:mpi_size]
-        print(f"\nBeginning processing run with {worker_count} active MPI rank(s) "
-              f"({mpi_size} launched)...")
+        if serial:
+            print("\nBeginning serial processing run (1 core, MPI not used)...")
+        else:
+            print(
+                f"\nBeginning processing run with {worker_count} active MPI rank(s) "
+                f"({mpi_size} launched)..."
+            )
         _print_partition_summary(batches, lake_cell_counts)
         print("-" * 90)
     else:
@@ -1567,9 +1681,13 @@ def process_raster_reservoir_routing(
         fdr_band.FlushCache()
         ds_fdr = None
         print("-" * 90)
+        if serial:
+            how = "1 core (MPI not used)"
+        else:
+            how = f"{worker_count} MPI rank(s)"
         print(
             f"Process complete. Wrote {patches_written} lake patch(es) from "
-            f"{total_lakes} reservoir(s) using {worker_count} MPI rank(s)."
+            f"{total_lakes} reservoir(s) using {how}."
         )
 
 
@@ -1582,9 +1700,10 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help=(
-            "Number of MPI ranks to use for lake processing (default: FLOWPATH_NCORES "
-            "env var or 1). Launch with srun/mpirun; capped by the number of ranks "
-            "started and by the number of lakes being edited."
+            "Worker count (default: FLOWPATH_NCORES env var, or 1). "
+            "--ncores 1 runs as a normal Python script and does not import mpi4py. "
+            "For N>1, launch with: mpirun -np N python3 code/conditionLakes.py --ncores N. "
+            "Capped by the number of ranks started and by the number of lakes being edited."
         ),
     )
     parser.add_argument(
