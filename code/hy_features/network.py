@@ -866,7 +866,9 @@ def merge_pour_points_into_hydro_locations(
                 if float(d) <= snap_distance_m:
                     duplicate.iloc[positions[int(p)]] = True
 
-    kept = extra[~duplicate.to_numpy()]
+    # Copy the filtered rows: columns are added below, and a boolean slice is
+    # only a view of ``extra`` (pandas warns when it is written to).
+    kept = extra[~duplicate.to_numpy()].copy()
     if network_locations.crs is not None and kept.crs != network_locations.crs:
         kept = kept.to_crs(network_locations.crs)
     for col in network_locations.columns:

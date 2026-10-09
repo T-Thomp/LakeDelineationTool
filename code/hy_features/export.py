@@ -228,8 +228,13 @@ def _materialize_frame(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         if isinstance(series, pd.DataFrame):
             series = series.iloc[:, 0]
         data[col] = series.to_numpy(copy=True)
-    geometry = gpd.GeoSeries(list(gdf.geometry), index=gdf.index, crs=gdf.crs, name=geom_name)
-    return gpd.GeoDataFrame(data, geometry=geometry, crs=gdf.crs)
+    # Keep the original index and pass geometry as a bare array. A dict of arrays
+    # gets a fresh 0..n-1 index, and a GeoSeries would then be aligned to it by
+    # label, which nulls or swaps geometries when the input index is not 0..n-1.
+    frame = pd.DataFrame(data, index=gdf.index)
+    geometry = gpd.array.from_shapely(list(gdf.geometry), crs=gdf.crs)
+    frame[geom_name] = geometry
+    return gpd.GeoDataFrame(frame, geometry=geom_name, crs=gdf.crs)
 
 
 def export_shapefile(gdf: gpd.GeoDataFrame, filename: str | Path) -> None:
