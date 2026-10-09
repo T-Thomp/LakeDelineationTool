@@ -160,6 +160,9 @@ Post-processing
 • basinAggregation.py (optional)
     Merge small headwater subbasins
 
+• reproject.py (optional)
+    Reproject aggregated basins and streams
+
        │
        ▼
 Final Products
@@ -170,7 +173,7 @@ Final Products
 
 # Project Directory Structure
 
-Place `Delineation-Workflow.slurm` at your study root. Python scripts live in `code/`; data paths resolve against the slurm script's directory (`LAKE_DELINEATION_ROOT`).
+Place `Delineation-Workflow.slurm` at your study root, or keep it with the repo and set **`LAKE_DELINEATION_ROOT`** to the study folder (see below). Python scripts live in `code/`. Data and output paths — including TauDEM rasters — resolve against that study root.
 
 ```text
 study-root/                          ← where you run sbatch
@@ -198,8 +201,6 @@ study-root/                          ← where you run sbatch
 ```
 
 See `study_settings.py` for inputs and `code/pipeline_paths.py` for output layout constants.
-
-```
 
 ---
 
@@ -397,9 +398,11 @@ Aggregates small upstream subbasins into larger watershed units. The merge thres
 
 | Setting | Default | Role |
 |---------|---------|------|
-| **`UNIT_AREA`** | `None` | Column name for local area; `None` uses polygon geometry |
-| **`UP_AREA`** | `DSContArea` | TauDEM cumulative area at pour point (outlet masking) |
+| **`area_km2`** | from `basins.shp`, else polygon area × 10⁻⁶ | Local subbasin area (km²) used for the merge threshold |
+| **`UP_AREA`** (`DSContArea`) | TauDEM column | Cumulative area at the pour point (m²); recomputed after merges |
 | **`MIN_SUB_AREA`** | 100 km² | Subbasins with local area below this merge downstream |
+
+Lakes are never merged. `frac_lake` and `lake_area` are copied from each surviving basin; they are not recomputed.
 
 Outputs:
 
@@ -411,6 +414,25 @@ outputs/final/
 
 ---
 
+### `reproject.py` *(Optional)*
+
+Standalone post-step. Not run by the slurm job. Reprojects the aggregated basins and streams to a CRS you pass with `--prj`.
+
+Defaults: `outputs/final/basins_aggregated.shp` and `streams_aggregated.shp`. Writes copies next to those files (`basins_aggregated_wgs84.shp`, and so on) unless you set `--out-basins` / `--out-streams`.
+
+```bash
+python3 code/reproject.py --prj WGS84
+python3 code/reproject.py --prj EPSG:3978
+python3 code/reproject.py --prj EPSG4326 \
+  --basins outputs/final/basins.shp \
+  --streams outputs/final/streams.shp \
+  --out-basins remapped/basins_wgs84.shp \
+  --out-streams remapped/streams_wgs84.shp
+```
+
+`--prj` accepts `WGS84`, `EPSG:4326`, `EPSG4326`, or a PROJ string. Area columns (`area_km2`, `lake_area`) are left as written; they were computed in the source CRS.
+
+---
 
 ### `basinTrimming.ipynb`
 
@@ -459,6 +481,54 @@ All pipeline scripts read these via `code/pipeline_paths.py` automatically.
 
 ---
 
+## `LAKE_DELINEATION_ROOT`
+
+This environment variable is the **study root**: the folder that holds `study_settings.py` and `outputs/`. Every Python script in `code/` resolves inputs and writes products from that folder (`outputs/final/`, `outputs/prep/`, and so on).
+
+### Set it
+
+```bash
+export LAKE_DELINEATION_ROOT=/path/to/your/study-root
+python3 /path/to/LakeDelineationTool/code/validate_study.py
+```
+
+The study folder needs `study_settings.py` (copy from `study_settings.example.py`). Relative paths in that file (`dem/your-dem.tif`) are resolved against the study root. Absolute paths are used as written.
+
+The `code/` scripts do **not** have to live in the study folder. Point `LAKE_DELINEATION_ROOT` at the study and run the scripts from the repo (or any clone):
+
+```bash
+export LAKE_DELINEATION_ROOT=/project/6102189/tylerrt/my-bow-study
+python3 ~/github-repos/LakeDelineationTool/code/basinAggregation.py
+python3 ~/github-repos/LakeDelineationTool/code/reproject.py --prj WGS84
+```
+
+`pipeline_paths.py` then reads `/project/.../my-bow-study/study_settings.py` and writes under `/project/.../my-bow-study/outputs/`.
+
+### Omit it
+
+If the variable is unset, `pipeline_paths.py` uses `.` (the current working directory). That is enough when you have already `cd`'d to the study root:
+
+```bash
+cd /path/to/your/study-root
+python3 code/validate_study.py
+```
+
+Do not `cd` into `code/` and run the scripts from there. `.` would then be `code/`, so the scripts would look for `code/study_settings.py` and write under `code/outputs/`.
+
+### Slurm vs a one-off script
+
+`Delineation-Workflow.slurm` uses the same variable. Uncomment this near the top of the slurm file (or export it before `sbatch`) to send **TauDEM and Python** products to that folder:
+
+```bash
+export LAKE_DELINEATION_ROOT="/project/6102189/tylerrt/my-bow-study"
+```
+
+That folder needs `study_settings.py`. `code/` can stay next to the slurm script (the submit directory). Leave the export unset and the job uses the directory where you ran `sbatch`, same as before. The slurm script `cd`s to the study root so `./outlet_overrides.csv` and `./stream_conditioning.csv` resolve there.
+
+Job logs (`delineate_<jobid>.out`) still land in the submit directory, not the study folder.
+
+---
+
 ## `Delineation-Workflow.slurm`
 
 Update:
@@ -467,8 +537,9 @@ Update:
 - `VENV` — path to activated venv (`pip install -r requirements.txt`; see **Software requirements**)
 - `STREAM_THRESHOLD`
 - `FLOWPATH_NCORES`
+- `LAKE_DELINEATION_ROOT` (optional) — study folder for `study_settings.py` and all outputs, including TauDEM. Leave unset to use the `sbatch` directory.
 
-`DATA_DIR` and `CODE_DIR` are set from `SLURM_SUBMIT_DIR` (the folder where you run `sbatch`), not from Slurm’s internal job spool copy. Submit from your study root:
+`CODE_DIR` is `code/` next to where you ran `sbatch` (or under the study root if that is the only copy). Submit from the repo or from a study root that contains `code/`:
 
 ```bash
 cd /path/to/your/study-root
@@ -602,8 +673,8 @@ Update:
 
 Review:
 
-- `UNIT_AREA` — local subbasin area column (`None` = from polygon; see script docstring)
-- `UP_AREA` — cumulative drainage column (default `DSContArea`)
+- `area_km2` — local subbasin area (km²). Used if present; otherwise polygon area in m² × 10⁻⁶
+- `DSContArea` — cumulative drainage at the pour point (m²); recomputed after merges
 - `MIN_SUB_AREA` — merge threshold in km² applied to **local** area
 - `MIN_RIV_SLOPE`
 - `MIN_RIV_LENGTH`
@@ -612,6 +683,19 @@ Also ensure attribute names match your TauDEM outputs.
 
 ---
 
+## `reproject.py`
+
+Optional. Run after `basinAggregation.py` (or pass other shapefiles).
+
+```bash
+python3 code/reproject.py --prj WGS84
+```
+
+- `--prj` — required. `WGS84`, `EPSG:4326`, `EPSG4326`, or a PROJ string
+- `--basins` / `--streams` — inputs (default: `outputs/final/basins_aggregated.shp` and `streams_aggregated.shp`)
+- `--out-basins` / `--out-streams` — outputs (default: `<input_stem>_<crs>.shp` next to the input)
+
+---
 
 # Required External Data
 
@@ -635,6 +719,8 @@ Before running the workflow, stage the following datasets:
 | `streams.shp` | Paired stream network |
 | `basins_aggregated.shp` | Optional aggregated catchments (`basinAggregation.py`) |
 | `streams_aggregated.shp` | Optional aggregated streams |
+| `basins_aggregated_<crs>.shp` | Optional reprojected aggregated catchments (`reproject.py`) |
+| `streams_aggregated_<crs>.shp` | Optional reprojected aggregated streams |
 | `pour_points.shp` | Refined pour points for Pass 3 |
 
 ## `outputs/interim/`

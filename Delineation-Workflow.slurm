@@ -45,15 +45,19 @@
 #   outputs/interim/taudem_d8/   -- Pass 1–2 TauDEM rasters and vectors
 #   outputs/interim/taudem_pass3/ -- Pass 3 TauDEM outputs
 #
-# KEY DIRECTORIES (auto-detected from this script's location)
+# KEY DIRECTORIES
 # ------------------------------------------------------------
-#   DATA_DIR                     -- SLURM_SUBMIT_DIR (where you ran sbatch; dem/, outputs/, …)
-#   CODE_DIR                     -- DATA_DIR/code/ (Python scripts + pipeline_paths.py)
+#   DATA_DIR / LAKE_DELINEATION_ROOT
+#       Study folder: study_settings.py and outputs/ (TauDEM + Python).
+#       Default: the directory where you ran sbatch.
+#       Override: export LAKE_DELINEATION_ROOT=/path/to/study in §0.
+#   CODE_DIR
+#       Python scripts. $SUBMIT_DIR/code if present, else $DATA_DIR/code.
 #
 # SETUP CHECKLIST (paths & knobs to edit when adapting this workflow)
 # --------------------------------------------------------------------
-# Work top-to-bottom. Slurm cd's to DATA_DIR; Python runs from CODE_DIR.
-# Relative paths in pipeline_paths.py resolve against DATA_DIR (LAKE_DELINEATION_ROOT).
+# Work top-to-bottom. Slurm cd's to DATA_DIR so ./ CSVs resolve there.
+# Python and TauDEM both write under DATA_DIR/outputs (LAKE_DELINEATION_ROOT).
 #
 # [ ] study_settings.py  (copy from study_settings.example.py; edit at study root)
 #       INPUT_DEM          -- elevation GeoTIFF
@@ -67,6 +71,7 @@
 #       STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
 #       FLOWPATH_NCORES    -- conditionLakes.py workers (1 = plain python; >1 = mpirun)
 #       HY_FEATURES_ENABLED -- unset/off by default; export =1 to enable HY geofabric
+#       LAKE_DELINEATION_ROOT -- optional; study folder for all outputs (TauDEM + Python)
 #       #SBATCH --account / --ntasks / --mem-per-cpu / --time
 #
 # [ ] filterLakes.py
@@ -179,14 +184,39 @@ module restore scimods
 
 # export PATH="$HOME/taudem-build/taudem:$PATH"   # Set taudem:PATH here or set it in .bashrc file
 
-# Project root = directory where you ran sbatch (not the read-only job spool copy).
-# Slurm sets SLURM_SUBMIT_DIR; fall back to script location for local/interactive runs.
+# Study folder: study_settings.py and all products (TauDEM rasters + Python shapefiles).
+# Uncomment to send the job somewhere other than where you ran sbatch.
+# Leave unset to use SLURM_SUBMIT_DIR (same behaviour as before).
+# export LAKE_DELINEATION_ROOT="/project/6102189/tylerrt/my-bow-study"
+
+# Directory where you ran sbatch (not the read-only job spool copy). Used to find code/.
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
-    DATA_DIR="$SLURM_SUBMIT_DIR"
+    SUBMIT_DIR="$SLURM_SUBMIT_DIR"
 else
-    DATA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    SUBMIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
-CODE_DIR="$DATA_DIR/code"
+
+if [[ -n "${LAKE_DELINEATION_ROOT:-}" ]]; then
+    if [[ ! -d "${LAKE_DELINEATION_ROOT}" ]]; then
+        echo "ERROR: LAKE_DELINEATION_ROOT is not a directory: ${LAKE_DELINEATION_ROOT}"
+        exit 1
+    fi
+    DATA_DIR="$(cd "${LAKE_DELINEATION_ROOT}" && pwd)"
+else
+    DATA_DIR="$SUBMIT_DIR"
+fi
+export LAKE_DELINEATION_ROOT="$DATA_DIR"
+
+if [[ -d "$SUBMIT_DIR/code" ]]; then
+    CODE_DIR="$SUBMIT_DIR/code"
+elif [[ -d "$DATA_DIR/code" ]]; then
+    CODE_DIR="$DATA_DIR/code"
+else
+    echo "ERROR: no code/ directory next to the slurm submit dir or under LAKE_DELINEATION_ROOT"
+    echo "  looked in: $SUBMIT_DIR/code"
+    echo "  and:       $DATA_DIR/code"
+    exit 1
+fi
 
 OUTPUT_ROOT="$DATA_DIR/outputs"
 INT_DIR="$OUTPUT_ROOT/interim/taudem_d8"       # Pass 1 & 2 TauDEM rasters/shapefiles
@@ -218,8 +248,9 @@ FLOWPATH_NCORES=16
 VENV="/home/$USER/virtual-envs/scienv/bin/activate"
 
 mkdir -p "$INT_DIR" "$PASS3_DIR" "$PREP_DIR" "$WORKING_DIR" "$FINAL_DIR"
-export LAKE_DELINEATION_ROOT="$DATA_DIR"
 cd "$DATA_DIR" || exit 1
+echo "Study root (LAKE_DELINEATION_ROOT): $DATA_DIR"
+echo "Python scripts (CODE_DIR):          $CODE_DIR"
 
 if [[ ! -f "${DATA_DIR}/study_settings.py" ]]; then
     echo "ERROR: ${DATA_DIR}/study_settings.py not found"
