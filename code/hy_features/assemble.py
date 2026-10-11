@@ -22,6 +22,7 @@ from hy_features.enrich import (
 from hy_features.export import export_geopackage, export_registry_json
 from hy_features.json_export import clean_json_records, json_default
 from hy_features.models import CatchmentRegistry
+from flowpath_geometry import repair_flowpath_geometries
 from hy_features.network import (
     assign_hydrometric_positions,
     build_dendritic_catchment_table,
@@ -29,7 +30,6 @@ from hy_features.network import (
     build_hydrographic_network_metadata,
     build_nexus_hydro_locations,
     filter_placed_hydrometric,
-    repair_flowpath_geometries,
     link_catchment_nexuses,
     link_flowpath_nexuses,
     link_waterbody_network,
@@ -92,7 +92,9 @@ def assemble_full_geofabric(
     tables), tables (link tables), dendritic_catchment, hydrographic_network,
     registry, hydrometric_skipped.
     """
-    streams = repair_flowpath_geometries(streams, basins=basins, outlet_sentinel=outlet_sentinel)
+    streams, basins = repair_flowpath_geometries(
+        streams, basins=basins, outlet_sentinel=outlet_sentinel, gauges=gauges,
+    )
     basins = enrich_catchment_areas(basins)
     streams = enrich_flowpaths(streams, outlet_sentinel=outlet_sentinel)
 

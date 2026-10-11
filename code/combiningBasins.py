@@ -554,7 +554,7 @@ def process_reservoir_basins():
     lakes = gpd.read_file(PATHS["lakes"])
     streams = gpd.read_file(PATHS["streams"])
     intersection = gpd.read_file(PATHS["intersection"])
-    from hy_features.export import export_shapefile, strip_point_join_artifacts
+    from shapefile_io import export_shapefile, strip_point_join_artifacts
 
     gauges = strip_point_join_artifacts(gpd.read_file(PATHS["gauges"]))
 
@@ -740,9 +740,11 @@ def process_reservoir_basins():
     ensure_output_dirs()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    from hy_features.network import repair_flowpath_geometries
+    from flowpath_geometry import repair_flowpath_geometries
 
-    streams_dissolved = repair_flowpath_geometries(streams_dissolved, basins=final_geofabric)
+    streams_dissolved, final_geofabric = repair_flowpath_geometries(
+        streams_dissolved, basins=final_geofabric, gauges=gauges,
+    )
     export_shapefile(final_geofabric, str(WORKING_BASINS_MERGED))
     export_shapefile(streams_dissolved, str(WORKING_STREAMS_MERGED))
     print("Processing complete.")

@@ -101,9 +101,7 @@ SNAPPED_OUTLETS = TAUDEM_PASS3 / "snapped-outlets.shp"
 
 # Python preprocessing
 PREP_LAKES = PREP / "lakes.shp"
-PREP_LAKES_GPKG = PREP / "lakes.gpkg"
 PREP_GAUGES = PREP / "gauges.shp"
-PREP_GAUGES_GPKG = PREP / "gauges.gpkg"
 PREP_RESERVOIR_IO_NODES = PREP / "reservoir_io_nodes.shp"
 
 # Post-processing working copies
@@ -137,9 +135,7 @@ PATHS: dict[str, str] = {
     "pass3_watersheds_tif": str(PASS3_WATERSHEDS_TIF),
     "snapped_outlets": str(SNAPPED_OUTLETS),
     "lakes": str(PREP_LAKES),
-    "lakes_gpkg": str(PREP_LAKES_GPKG),
     "gauges": str(PREP_GAUGES),
-    "gauges_gpkg": str(PREP_GAUGES_GPKG),
     "reservoir_io_nodes": str(PREP_RESERVOIR_IO_NODES),
     "working_basins_merged": str(WORKING_BASINS_MERGED),
     "working_streams_merged": str(WORKING_STREAMS_MERGED),

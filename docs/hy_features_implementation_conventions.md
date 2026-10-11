@@ -69,7 +69,7 @@ Shapefiles written by the pipeline keep only TauDEM / MESH columns (`DN`, `LINKN
 ### Hydro locations
 
 - Always exported: every nexus has at least one realization, typed `confluence` (two or more contributors meet), `river mouth` (flow entering a lake catchment), or `catchment outlet`.
-- Pour points supplied to `cleanGeofabric.py` that lie within the snap distance of a nexus realization are dropped as duplicates (the count is logged). The rest are added with an empty `realized_nexus_id`, since a hydro location need not realize a nexus.
+- Pour points read by `export_hy_features.py` that lie within the snap distance of a nexus realization are dropped as duplicates (the count is logged). The rest are added with an empty `realized_nexus_id`, since a hydro location need not realize a nexus.
 - `feature_name` carries the pour point `name`; it is empty on network-derived locations.
 
 ## GeoPackage tables ↔ UML mapping

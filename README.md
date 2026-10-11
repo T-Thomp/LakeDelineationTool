@@ -195,7 +195,7 @@ study-root/                          ← where you run sbatch
     │   ├── taudem_d8/       Pass 1–2 TauDEM rasters and vectors
     │   └── taudem_pass3/    Pass 3 TauDEM outputs
     ├── prep/                Lakes, gauges, outlet selection, IO nodes
-    ├── working/             Merged geofabric (+ HY sidecars when enabled)
+    ├── working/             Merged geofabric (+ HY GeoPackage if post-processed)
     └── final/               Deliverables: basins, basins_aggregated, pour_points
 ```
 
@@ -424,6 +424,17 @@ python3 code/reproject.py --prj EPSG4326 \
 ```
 
 `--prj` accepts `WGS84`, `EPSG:4326`, `EPSG4326`, or a PROJ string. Area columns (`area_km2`, `lake_area`) are left as written; they were computed in the source CRS.
+
+---
+
+### `export_hy_features.py` *(Optional post-process)*
+
+Not part of the delineation run. Reads the finished shapefiles and writes the HY_Features GeoPackage. Details are in the OGC HY_Features section below.
+
+```bash
+python3 code/export_hy_features.py
+python3 code/export_hy_features.py --aggregated
+```
 
 ---
 
@@ -724,12 +735,12 @@ TauDEM rasters and pass-specific vectors (single copy — not duplicated elsewhe
 
 ## `outputs/working/`
 
-Merged geofabric before final clean, plus HY sidecars when enabled:
+Merged geofabric before final clean. HY_Features files below are written by `export_hy_features.py`, not by the delineation scripts:
 
 - **`geofabric.gpkg`** — HY_Features profile GeoPackage (spatial layers plus catchment, nexus and link tables)
 - **`catchment_registry.json`** — catchment identity, realization links, and associations
 - **`hydrographic_network.json`** — dendritic catchment table + network metadata
-- **`geofabric_aggregated.gpkg`** (+ `catchment_registry_aggregated.json`, `hydrographic_network_aggregated.json`) — same profile for the `basinAggregation.py` output, linked to `geofabric.gpkg` by containment
+- **`geofabric_aggregated.gpkg`** (+ `catchment_registry_aggregated.json`, `hydrographic_network_aggregated.json`) — same profile for the aggregated basins, linked to `geofabric.gpkg` by containment (`export_hy_features.py --aggregated`)
 
 ## `outputs/prep/`
 
@@ -739,13 +750,17 @@ Intermediate prep layers: lakes, gauges, selected outlets, reservoir IO nodes.
 
 # OGC HY_Features alignment (in development / work in progress)
 
-HY_Features enrichment is **off by default**. Enable it for `geofabric.gpkg` and JSON sidecars (shapefiles always keep TauDEM / MESH column names only):
+HY_Features is a post-process. The delineation scripts write TauDEM / MESH shapefiles only. After `cleanGeofabric.py`:
 
 ```bash
-export HY_FEATURES_ENABLED=1   # or set ENABLE_HY_FEATURES = True in a script
+python3 code/export_hy_features.py
+python3 code/export_hy_features.py --aggregated   # also needs basinAggregation.py
+python3 code/export_hy_features.py --aggregated --skip-fine
 ```
 
-When enabled, outputs implement a scoped subset of the [OGC HY_Features conceptual model (14-111r6)](https://docs.ogc.org/is/14-111r6/14-111r6.html) as an **implementation schema** under profile **`LakeDelineationTool-DendriticGeofabric-1.0`** (self-assessed against conformance class `/conf/hy_features_conceptual_model`).
+`--aggregated` rebuilds catchment containment from `outputs/working/aggregation_merge_log.csv`. Pass `--outlet-sentinel` if aggregation used an outlet value other than `-9999`.
+
+The GeoPackage implements a scoped subset of the [OGC HY_Features conceptual model (14-111r6)](https://docs.ogc.org/is/14-111r6/14-111r6.html) as an **implementation schema** under profile **`LakeDelineationTool-DendriticGeofabric-1.0`** (self-assessed against conformance class `/conf/hy_features_conceptual_model`).
 
 See [`docs/hy_features_conformance_profile.md`](docs/hy_features_conformance_profile.md), [`docs/hy_features_mapping.md`](docs/hy_features_mapping.md), and [`docs/hy_features_implementation_conventions.md`](docs/hy_features_implementation_conventions.md).
 

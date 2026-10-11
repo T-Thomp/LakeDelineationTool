@@ -19,7 +19,7 @@ from pathlib import Path
 import geopandas as gpd
 from pyproj import CRS
 
-from hy_features.export import export_shapefile
+from shapefile_io import export_shapefile
 from pipeline_paths import FINAL_BASINS_AGG, FINAL_STREAMS_AGG, ensure_output_dirs
 
 

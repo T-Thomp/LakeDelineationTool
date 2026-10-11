@@ -70,7 +70,7 @@
 #       VENV               -- Python venv activate (pip install -r requirements.txt)
 #       STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
 #       FLOWPATH_NCORES    -- conditionLakes.py workers (1 = plain python; >1 = mpirun)
-#       HY_FEATURES_ENABLED -- unset/off by default; export =1 to enable HY geofabric
+#       export_hy_features.py -- optional post-process; not run by this job
 #       LAKE_DELINEATION_ROOT -- optional; study folder for all outputs (TauDEM + Python)
 #       #SBATCH --account / --ntasks / --mem-per-cpu / --time
 #
@@ -241,9 +241,6 @@ STREAM_THRESHOLD=5555
 # because this Open MPI build has no Slurm PMI support.
 #
 FLOWPATH_NCORES=16
-
-# HY_Features enrichment + geofabric.gpkg (off by default; uncomment to enable)
-# export HY_FEATURES_ENABLED=1
 
 # Remove TauDEM interim rasters/vectors after cleanGeofabric.py (off by default)
 # export DELETE_INTERIM_FILES=1
@@ -483,6 +480,10 @@ gdal_polygonize.py \
 #                          cleanGeofabric products only.
 #                          -> outputs/final/basins_aggregated.shp
 #                             outputs/final/streams_aggregated.shp
+#   export_hy_features.py -- OPTIONAL post-process, not run here. After the
+#                          shapefiles exist:
+#                            python3 code/export_hy_features.py
+#                            python3 code/export_hy_features.py --aggregated
 # -----------------------------------------------------------------------------
 log_section "Python: basin merging and geofabric cleanup"
 python3 "$CODE_DIR/combiningBasins.py"

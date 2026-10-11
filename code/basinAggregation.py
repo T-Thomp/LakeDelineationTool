@@ -54,35 +54,25 @@ import numpy as np
 import pandas as pd
 import shapely
 
-from hy_features.config import hy_features_enabled
+from flowpath_geometry import coerce_flowpath_geometry, repair_flowpath_geometries
 from pipeline_paths import (
   FINAL_BASINS,
   FINAL_BASINS_AGG,
   FINAL_STREAMS,
   FINAL_STREAMS_AGG,
   WORKING,
-  WORKING_GEOFABRIC_AGG_GPKG,
   ensure_output_dirs,
 )
-
-ENABLE_HY_FEATURES = False  # overridden by HY_FEATURES_ENABLED env var if set
+from shapefile_io import export_shapefile
 
 # ==============================================================================
-# COLUMN NAMES — legacy TauDEM/MESH fields on disk. See docs/hy_features_mapping.md.
+# COLUMN NAMES — TauDEM / MESH fields on the shapefiles.
 # ==============================================================================
-from hy_features.schema import (
-  LEGACY_BASIN_ID,
-  LEGACY_FLOWPATH_ID,
-  LEGACY_GAUGE_IDS,
-  LEGACY_IS_LAKE,
-  LEGACY_LOWER_ID,
-)
-
-BASIN_ID = LEGACY_BASIN_ID        # DN
-RIVER_ID = LEGACY_FLOWPATH_ID     # LINKNO
-NEXT_DOWN_ID = LEGACY_LOWER_ID    # DSLINKNO
-GAUGE_IDS = LEGACY_GAUGE_IDS      # STATION_NU
-LAKE_FLAG = LEGACY_IS_LAKE
+BASIN_ID = "DN"
+RIVER_ID = "LINKNO"
+NEXT_DOWN_ID = "DSLINKNO"
+GAUGE_IDS = "STATION_NU"
+LAKE_FLAG = "is_lake"
 
 AREA_KM2 = "area_km2"             # local subbasin area (km²)
 UP_AREA = "DSContArea"            # cumulative drainage area at the pour point (m²)
@@ -604,8 +594,6 @@ def _slope_from_strm_drop_and_length(
 
 
 def _merge_lines(geom):
-  from hy_features.network import coerce_flowpath_geometry
-
   return coerce_flowpath_geometry(geom)
 
 
@@ -694,9 +682,6 @@ def build_outputs(
   agg_river = agg_river.rename(columns={"agg": RIVER_ID})
   agg_river["geometry"] = agg_river.geometry.map(_merge_lines)
   agg_river[NEXT_DOWN_ID] = agg_river[RIVER_ID].map(g.down).astype("int64")
-  from hy_features.network import repair_flowpath_geometries
-
-  agg_river = repair_flowpath_geometries(agg_river, basins=agg_basin, outlet_sentinel=outlet_value)
   if STRAIGHT_LEN in agg_river.columns:
     agg_river[STRAIGHT_LEN] = agg_river.geometry.map(_straight_length)
   agg_river[SLOPE] = _slope_from_strm_drop_and_length(
@@ -714,6 +699,9 @@ def build_outputs(
   if n_dropped:
     print(f"  Dropped {n_dropped} side-channel / basinless reach(es) from stream output.")
 
+  agg_river, agg_basin = repair_flowpath_geometries(
+    agg_river, basins=agg_basin, outlet_sentinel=outlet_value
+  )
   _validate_topology(agg_basin, agg_river, outlet_value)
   return agg_basin, agg_river
 
@@ -788,15 +776,7 @@ def run_aggregation(
   print(f"Loading rivers: {rivers_path}")
   rivers = gpd.read_file(rivers_path)
 
-  want_membership = hy_features_enabled(default=ENABLE_HY_FEATURES)
-  if want_membership:
-    agg_basins, agg_rivers, log, membership = basin_aggregation(
-      basins, rivers, return_membership=True, **kwargs
-    )
-  else:
-    agg_basins, agg_rivers, log = basin_aggregation(basins, rivers, **kwargs)
-
-  from hy_features.export import export_shapefile
+  agg_basins, agg_rivers, log = basin_aggregation(basins, rivers, **kwargs)
 
   os.makedirs(os.path.dirname(output_basins_path) or ".", exist_ok=True)
   os.makedirs(os.path.dirname(output_rivers_path) or ".", exist_ok=True)
@@ -805,18 +785,6 @@ def run_aggregation(
   print(f"Writing aggregated rivers ({len(agg_rivers)} features): {output_rivers_path}")
   export_shapefile(agg_rivers, output_rivers_path)
   write_merge_log(log, merge_log_path)
-
-  if want_membership:
-    from hy_features.aggregate import export_aggregated_geofabric
-
-    export_aggregated_geofabric(
-      agg_basins,
-      agg_rivers,
-      membership,
-      WORKING_GEOFABRIC_AGG_GPKG,
-      outlet_sentinel=int(kwargs.get("outlet_value", OUTLET_VALUE)),
-    )
-
   return agg_basins, agg_rivers
 
 

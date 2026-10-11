@@ -15,26 +15,14 @@ Mapping and profile scope are documented in
 
 ## Enabling assembly
 
-HY enrichment is **off by default**. Enable with:
+HY_Features is a post-process. The delineation scripts write TauDEM / MESH shapefiles only. After `cleanGeofabric.py` (and `basinAggregation.py`, if you want the aggregated product):
 
 ```bash
-export HY_FEATURES_ENABLED=1
+python code/export_hy_features.py
+python code/export_hy_features.py --aggregated
 ```
 
-or set `ENABLE_HY_FEATURES = True` in a pipeline script.
-
-Assembly entry point:
-
-```python
-from hy_features.assemble import assemble_full_geofabric, export_full_geofabric
-```
-
-| Script | When assembly runs | Optional inputs |
-|--------|-------------------|-----------------|
-| `cleanGeofabric.py` | After phantom-stream cleanup | Gauges, HydroLAKES, pour points (`outputs/final/pour_points.shp`) |
-| `basinAggregation.py` | After aggregation | — (writes `geofabric_aggregated.gpkg`) |
-
-`pourPointsPass2.py`, `filterLakes.py`, and `getGauges.py` only write intermediate GeoPackage layers; they do not run full assembly.
+`export_hy_features.py` reads `outputs/final/basins.shp`, `streams.shp`, and, when the files exist, gauges, HydroLAKES, and pour points. `--aggregated` reads the aggregated shapefiles plus `outputs/working/aggregation_merge_log.csv` and writes `geofabric_aggregated.gpkg`. Pass `--outlet-sentinel` if basin aggregation used an outlet value other than `-9999`.
 
 Shapefile outputs (`basins.shp`, `streams.shp`, gauges, lakes, pour points) never carry HY_Features columns. The 10-character DBF limit would truncate them into colliding names, so HY attributes are published in `geofabric.gpkg` only.
 
@@ -44,10 +32,10 @@ All paths below are relative to `outputs/working/` unless noted.
 
 | File | HY_Features role | Produced by |
 |------|------------------|-------------|
-| `geofabric.gpkg` | Spatial realization layers + holistic catchment and link tables | `combiningBasins.py`, `cleanGeofabric.py` |
+| `geofabric.gpkg` | Spatial realization layers + holistic catchment and link tables | `export_hy_features.py` |
 | `catchment_registry.json` | Catchment identity ↔ realization index (mirrors the GeoPackage tables) | same |
 | `hydrographic_network.json` | `HY_HydrographicNetwork` metadata + `HY_DendriticCatchment` table | same |
-| `geofabric_aggregated.gpkg` (+ `*_aggregated.json`) | Same profile for the aggregated basins, with containment links to `geofabric.gpkg` | `basinAggregation.py` |
+| `geofabric_aggregated.gpkg` (+ `*_aggregated.json`) | Same profile for the aggregated basins, with containment links to `geofabric.gpkg` | `export_hy_features.py --aggregated` |
 
 ### GeoPackage layers (spatial)
 

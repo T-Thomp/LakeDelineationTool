@@ -39,7 +39,7 @@ Shapefiles (`basins.shp`, `streams.shp`, gauges, pour points) are **legacy TauDE
 
 Every 0..* association is also stored one link per row in a non-spatial GeoPackage table: `catchment_realization`, `catchment_association`, `catchment_containment`, `catchment_upper_catchment`, `nexus_contributing_catchment`, `waterbody_upstream_waterbody`, `hydrometric_network_station`.
 
-When `basinAggregation.py` runs with HY_Features enabled, `geofabric_aggregated.gpkg` carries the same profile for the aggregated basins (ids `agg_{LINKNO}`). Its `catchment_containment` links each aggregate (`containingCatchment`) to the `geofabric.gpkg` catchments merged into it (`containedCatchment`).
+When `export_hy_features.py --aggregated` runs, `geofabric_aggregated.gpkg` carries the same profile for the aggregated basins (ids `agg_{LINKNO}`). Its `catchment_containment` links each aggregate (`containingCatchment`) to the `geofabric.gpkg` catchments merged into it (`containedCatchment`). Membership comes from `aggregation_merge_log.csv`.
 
 Property-level mapping: [`hy_features_mapping.md`](hy_features_mapping.md)  
 Implementation status: [`hy_features_traceability.md`](hy_features_traceability.md)  

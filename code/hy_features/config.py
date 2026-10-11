@@ -1,4 +1,7 @@
-"""Runtime toggle for HY_Features enrichment and geofabric exports."""
+"""Legacy toggle. The delineation scripts do not read this.
+
+Build the GeoPackage with ``export_hy_features.py`` after the shapefiles exist.
+"""
 
 from __future__ import annotations
 
@@ -21,16 +24,10 @@ def _parse_flag(value: str) -> bool | None:
 
 def hy_features_enabled(*, default: bool = False) -> bool:
     """
-    Return whether HY_Features enrichment and geofabric assembly should run.
+    Return the legacy ``HY_FEATURES_ENABLED`` flag.
 
-    Priority:
-      1. Environment variable ``HY_FEATURES_ENABLED`` (if set)
-      2. ``default`` (per-script constant when env is unset)
-
-    Examples::
-
-        export HY_FEATURES_ENABLED=1   # enable for whole SLURM job
-        export HY_FEATURES_ENABLED=0   # disable (default when env unset)
+    The delineation scripts no longer call this. ``export_hy_features.py`` runs
+    when you invoke it, and does not consult this flag.
     """
     raw = os.environ.get(ENV_VAR)
     if raw is not None:

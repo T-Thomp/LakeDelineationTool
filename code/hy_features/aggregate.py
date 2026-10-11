@@ -33,6 +33,57 @@ from hy_features.tables import CONTAINMENT_TABLE
 AGGREGATE_PREFIX = "agg_"
 
 
+def membership_from_merge_log(
+    fine_basins: gpd.GeoDataFrame,
+    merge_log_path: str | Path,
+) -> pd.DataFrame:
+    """
+    Rebuild which fine basin was absorbed into which aggregate.
+
+    ``basinAggregation.py`` writes ``aggregation_merge_log.csv`` with ``source``
+    absorbed into ``target`` (``target`` keeps its id). Following that log from
+    each fine ``DN`` yields the surviving aggregate ``LINKNO``.
+    """
+    id_col = "DN" if "DN" in fine_basins.columns else "LINKNO"
+    if id_col not in fine_basins.columns:
+        raise ValueError(
+            "Fine basins need a DN or LINKNO column to rebuild aggregation membership."
+        )
+    path = Path(merge_log_path)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Merge log not found: {path}. Run basinAggregation.py first; "
+            "it writes outputs/working/aggregation_merge_log.csv."
+        )
+    log = pd.read_csv(path)
+    missing = [col for col in ("source", "target") if col not in log.columns]
+    if missing:
+        raise ValueError(f"{path} is missing columns: {missing}")
+
+    parent: dict[int, int] = {}
+    for source, target in zip(log["source"], log["target"]):
+        parent[int(source)] = int(target)
+
+    def find(node: int) -> int:
+        seen: list[int] = []
+        visited: set[int] = set()
+        while node in parent:
+            if node in visited:
+                raise ValueError(f"Cycle in merge log at basin {node}")
+            visited.add(node)
+            seen.append(node)
+            node = parent[node]
+        for item in seen:
+            parent[item] = node
+        return node
+
+    rows = [
+        {"member": member, "agg": find(member)}
+        for member in (int(raw) for raw in pd.unique(fine_basins[id_col].dropna()))
+    ]
+    return pd.DataFrame(rows, columns=["member", "agg"])
+
+
 def aggregate_catchment_id(value: object) -> str:
     return f"{AGGREGATE_PREFIX}{normalize_id(value)}"
 
