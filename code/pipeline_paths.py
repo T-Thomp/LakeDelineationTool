@@ -12,7 +12,7 @@ outputs/
     taudem_d8/          Pass 1–2 TauDEM rasters and vectors
     taudem_pass3/       Pass 3 TauDEM rasters and vectors
   prep/                 Lake/gauge prep and pour-point intermediates
-  working/              Merged geofabric before final clean (+ HY sidecars)
+  working/              Merged geofabric before final clean
   final/                Deliverables: basins, basins_aggregated, pour_points
                           (+ paired stream shapefiles)
 
@@ -107,10 +107,6 @@ PREP_RESERVOIR_IO_NODES = PREP / "reservoir_io_nodes.shp"
 # Post-processing working copies
 WORKING_BASINS_MERGED = WORKING / "basins_merged.shp"
 WORKING_STREAMS_MERGED = WORKING / "streams_merged.shp"
-WORKING_GEOFABRIC_GPKG = WORKING / "geofabric.gpkg"
-WORKING_CATCHMENT_REGISTRY = WORKING / "catchment_registry.json"
-WORKING_HYDRO_NETWORK_JSON = WORKING / "hydrographic_network.json"
-WORKING_GEOFABRIC_AGG_GPKG = WORKING / "geofabric_aggregated.gpkg"
 
 # Final deliverables
 FINAL_BASINS = FINAL / "basins.shp"
@@ -139,10 +135,6 @@ PATHS: dict[str, str] = {
     "reservoir_io_nodes": str(PREP_RESERVOIR_IO_NODES),
     "working_basins_merged": str(WORKING_BASINS_MERGED),
     "working_streams_merged": str(WORKING_STREAMS_MERGED),
-    "geofabric_gpkg": str(WORKING_GEOFABRIC_GPKG),
-    "catchment_registry": str(WORKING_CATCHMENT_REGISTRY),
-    "hydro_network_json": str(WORKING_HYDRO_NETWORK_JSON),
-    "geofabric_aggregated_gpkg": str(WORKING_GEOFABRIC_AGG_GPKG),
     "final_basins": str(FINAL_BASINS),
     "final_streams": str(FINAL_STREAMS),
     "final_basins_aggregated": str(FINAL_BASINS_AGG),
