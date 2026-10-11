@@ -382,39 +382,6 @@ def _adjacent_channel(
     return None
 
 
-def _collapse_duplicate_basins(basins: gpd.GeoDataFrame, basin_col: str) -> gpd.GeoDataFrame:
-    """One polygon per catchment id. Split parts with the same id are unioned."""
-    keys = [normalize_id(value) for value in basins[basin_col]]
-    counts: dict[str, int] = defaultdict(int)
-    for key in keys:
-        if key:
-            counts[key] += 1
-    dupes = {key for key, count in counts.items() if count > 1}
-    if not dupes:
-        return basins
-    extra = sum(counts[key] - 1 for key in dupes)
-    print(f"Joined {extra} extra basin part(s) that shared a catchment id")
-    work = basins.copy()
-    work["_fid"] = keys
-    singles = work[~work["_fid"].isin(dupes)].drop(columns="_fid")
-    pieces = []
-    for _fid, group in work[work["_fid"].isin(dupes)].groupby("_fid", sort=False):
-        row = group.iloc[0].drop(labels=["_fid"]).copy()
-        geoms = [
-            geom for geom in group.geometry
-            if geom is not None and not getattr(geom, "is_empty", True)
-        ]
-        if len(geoms) >= 2:
-            row["geometry"] = unary_union(geoms)
-        for column in _AREA_COLS:
-            if column in group.columns:
-                row[column] = float(pd.to_numeric(group[column], errors="coerce").fillna(0).sum())
-        pieces.append(row)
-    merged = gpd.GeoDataFrame(pieces, geometry="geometry", crs=basins.crs)
-    out = pd.concat([singles, merged], ignore_index=True)
-    return gpd.GeoDataFrame(out, geometry="geometry", crs=basins.crs)
-
-
 def fold_lineless_catchments(
     streams: gpd.GeoDataFrame,
     basins: gpd.GeoDataFrame,
@@ -454,8 +421,6 @@ def fold_lineless_catchments(
     stream_lineless = {link_ids[i] for i, present in enumerate(has_line) if not present and link_ids[i]}
     stream_ids = set(link_ids)
     basin_col = _basin_id_column(basins, stream_ids)
-    if basin_col:
-        basins = _collapse_duplicate_basins(basins, basin_col)
     basin_ids = [
         normalize_id(value) for value in basins[basin_col]
     ] if basin_col else []

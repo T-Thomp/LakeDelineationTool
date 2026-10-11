@@ -55,7 +55,9 @@ def bypass_phantom_streams(streams_path, basins_path, output_path, streams=None,
     # ---------------------------------------------------------------
     # Identify phantom streams
     # ---------------------------------------------------------------
-    valid_basins = set(basins["DN"].dropna().astype(int))
+    valid_basins = set(
+        pd.to_numeric(basins["DN"], errors="coerce").dropna().astype(int)
+    )
     phantom = streams[~streams["LINKNO"].isin(valid_basins)].copy()
 
     # ---------------------------------------------------------------
@@ -240,27 +242,14 @@ def bypass_phantom_streams(streams_path, basins_path, output_path, streams=None,
 
 
 
-def dissolve_split_basins(input_path, output_path):
-    """
-    Loads a basin shapefile, groups rows by 'DN', and aggregates disjoint or 
-    diagonal floating polygons into clean, unified MultiPolygon entries.
-    """
-    # 1. Load the basin shapefile
-    basins = gpd.read_file(input_path)
-    original_crs = basins.crs
+def dissolve_split_basins(basins: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Union polygons that share a DN into one basin."""
     print(f"Loaded basin dataset. Total initial features: {len(basins)}")
-
-    # 2. Execute the dissolve operation
     print("Dissolving split polygons with matching DN values into MultiPolygons...")
-    # as_index=False keeps 'DN' as a normal data column
-    dissolved_basins = basins.dissolve(by='DN', as_index=False)
-    
-    print(f"Dissolve complete. Total consolidated basin entries: {len(dissolved_basins)}")
-
-    # 3. Restore coordinate metadata and save standard export
-    dissolved_basins.set_crs(original_crs, allow_override=True, inplace=True)
-    print(f"Dissolved {len(dissolved_basins)} basin feature(s) for {output_path}")
-    return dissolved_basins
+    dissolved = basins.dissolve(by="DN", as_index=False)
+    dissolved.set_crs(basins.crs, allow_override=True, inplace=True)
+    print(f"Dissolve complete. Total consolidated basin entries: {len(dissolved)}")
+    return dissolved
 
 
 def _gauge_station_column(gauges: gpd.GeoDataFrame) -> str:
@@ -300,7 +289,7 @@ def add_gauge_info_to_basins(input_path, gauge_path, output_path):
 
 
 def run_clean_geofabric(*, delete_interim: bool | None = None) -> None:
-    """Dissolve basins, fold catchments that have no channel, then clean streams."""
+    """Merge same-id basin polygons, fold catchments that have no channel, then clean streams."""
     ensure_output_dirs()
 
     input_streams = str(WORKING_STREAMS_MERGED)
@@ -309,7 +298,7 @@ def run_clean_geofabric(*, delete_interim: bool | None = None) -> None:
     output_streams = str(FINAL_STREAMS)
     output_basins = str(FINAL_BASINS)
 
-    basins = dissolve_split_basins(input_basins, output_basins)
+    basins = dissolve_split_basins(gpd.read_file(input_basins))
     gauges = strip_point_join_artifacts(gpd.read_file(input_gauges))
     basins = attach_gauge_ids(basins, gauges)
     streams = gpd.read_file(input_streams)

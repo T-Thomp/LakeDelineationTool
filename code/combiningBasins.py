@@ -742,9 +742,9 @@ def process_reservoir_basins():
 
     from flowpath_geometry import repair_flowpath_geometries
 
-    streams_dissolved, final_geofabric = repair_flowpath_geometries(
-        streams_dissolved, basins=final_geofabric, gauges=gauges,
-    )
+    # Coerce dissolved lines only. Polygons that share a DN are merged once,
+    # in cleanGeofabric.
+    streams_dissolved = repair_flowpath_geometries(streams_dissolved)
     export_shapefile(final_geofabric, str(WORKING_BASINS_MERGED))
     export_shapefile(streams_dissolved, str(WORKING_STREAMS_MERGED))
     print("Processing complete.")
