@@ -20,7 +20,7 @@ from shapefile_io import export_shapefile, strip_point_join_artifacts
 DELETE_INTERIM_FILES = False  # overridden by DELETE_INTERIM_FILES env var if set
 
 
-def bypass_phantom_streams(streams_path, basins_path, output_path):
+def bypass_phantom_streams(streams_path, basins_path, output_path, streams=None, basins=None):
     """
     Removes TauDEM phantom streams by merging them into upstream reaches.
 
@@ -39,8 +39,12 @@ def bypass_phantom_streams(streams_path, basins_path, output_path):
     # ---------------------------------------------------------------
     # Load data
     # ---------------------------------------------------------------
-    streams = gpd.read_file(streams_path)
-    basins = gpd.read_file(basins_path)
+    if streams is None:
+        streams = gpd.read_file(streams_path)
+    else:
+        streams = streams.copy()
+    if basins is None:
+        basins = gpd.read_file(basins_path)
     original_crs = streams.crs
 
     print(f"Initial stream segments: {len(streams)}")
@@ -296,7 +300,7 @@ def add_gauge_info_to_basins(input_path, gauge_path, output_path):
 
 
 def run_clean_geofabric(*, delete_interim: bool | None = None) -> None:
-    """Dissolve basins, clean streams, attach gauges, and optionally remove interim TauDEM files."""
+    """Dissolve basins, fold catchments that have no channel, then clean streams."""
     ensure_output_dirs()
 
     input_streams = str(WORKING_STREAMS_MERGED)
@@ -306,13 +310,24 @@ def run_clean_geofabric(*, delete_interim: bool | None = None) -> None:
     output_basins = str(FINAL_BASINS)
 
     basins = dissolve_split_basins(input_basins, output_basins)
-    streams = bypass_phantom_streams(input_streams, input_basins, output_streams)
     gauges = strip_point_join_artifacts(gpd.read_file(input_gauges))
     basins = attach_gauge_ids(basins, gauges)
+    streams = gpd.read_file(input_streams)
+    # Fold catchments that have no channel before phantom streams are removed,
+    # then again so a basin left without a stream is merged into one that has one.
+    streams, basins = fold_lineless_catchments(streams, basins, gauges=gauges)
+    streams = bypass_phantom_streams(
+        input_streams,
+        input_basins,
+        output_streams,
+        streams=streams,
+        basins=basins,
+    )
     streams, basins = fold_lineless_catchments(streams, basins, gauges=gauges)
     export_shapefile(basins, output_basins)
     export_shapefile(streams, output_streams)
     print(f"Cleaned network saved to: {output_streams}")
+    print(f"Final basins written: {len(basins)}")
     print(f"Final stream segments written: {len(streams)}")
 
     delete_interim_outputs(enabled=delete_interim, default=DELETE_INTERIM_FILES)

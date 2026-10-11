@@ -7,8 +7,9 @@ MultiLineString.
 
 A reach that still has no line is not given a stand-in geometry. Its basin is
 unioned into the next downstream basin that has a channel, and the empty reach
-is dropped. A gauge basin is the exception: its area and station id join the
-upstream main channel, whose pour point stays where it is.
+is dropped. A basin with no stream row is folded the same way. A gauge basin
+is the exception: its area and station id join the upstream main channel, whose
+pour point stays where it is.
 """
 
 from __future__ import annotations
@@ -314,6 +315,39 @@ def _merge_station_ids(
     basins.at[basins.index[target_at], column] = ", ".join(parts)
 
 
+def _adjacent_channel(
+    basins: gpd.GeoDataFrame,
+    positions: dict[str, int],
+    basin_id: str,
+    receivers: set[str],
+) -> str | None:
+    """Channelled basin sharing the longest boundary with ``basin_id``."""
+    index = positions.get(basin_id)
+    if index is None or not receivers:
+        return None
+    geom = basins.geometry.iloc[index]
+    if geom is None or getattr(geom, "is_empty", True):
+        return None
+    border = geom.boundary
+    best: str | None = None
+    best_len = 0.0
+    for channel_id in receivers:
+        if channel_id == basin_id:
+            continue
+        other_at = positions.get(channel_id)
+        if other_at is None:
+            continue
+        other = basins.geometry.iloc[other_at]
+        if other is None or getattr(other, "is_empty", True):
+            continue
+        shared = border.intersection(other.boundary)
+        length = float(getattr(shared, "length", 0.0) or 0.0)
+        if length > best_len:
+            best_len = length
+            best = channel_id
+    return best
+
+
 def fold_lineless_catchments(
     streams: gpd.GeoDataFrame,
     basins: gpd.GeoDataFrame,
@@ -323,10 +357,15 @@ def fold_lineless_catchments(
     """
     Union each basin that has no channel into a basin that does.
 
-    The empty reach is removed and no replacement line is drawn. A gauge basin
-    joins the upstream main channel, so that channel's pour point stays put and
-    only area and station ids move. Any other lineless basin joins the next
-    downstream channel. Inflows of a removed reach are pointed past it.
+    Candidates are reaches with no line and basins whose id is not a channel
+    with a line, including basins that have no stream row. The empty reach is
+    removed and no replacement line is drawn. A gauge basin joins the upstream
+    main channel, so that channel's pour point stays put and only area and
+    station ids move. Any other catchment joins the next downstream channel
+    that has both a line and a basin. A basin that has no stream row and no
+    downstream link joins the channelled basin it shares the longest boundary
+    with. A reach that is present but has nowhere to drain is left in place.
+    Inflows of a removed reach are pointed past it.
     """
     streams = _apply_coerce(streams)
     basins = basins.copy().reset_index(drop=True)
@@ -343,20 +382,45 @@ def fold_lineless_catchments(
         _parse_downstream_id(value, outlet_sentinel) for value in streams[down_col]
     ]
     has_line = [coerce_flowpath_geometry(geom) is not None for geom in streams.geometry]
-    lineless = {link_ids[i] for i, present in enumerate(has_line) if not present and link_ids[i]}
+    known_channels = {link_ids[i] for i, present in enumerate(has_line) if present and link_ids[i]}
+    stream_lineless = {link_ids[i] for i, present in enumerate(has_line) if not present and link_ids[i]}
+    stream_ids = set(link_ids)
+    basin_col = _basin_id_column(basins, stream_ids)
+    basin_ids = [
+        normalize_id(value) for value in basins[basin_col]
+    ] if basin_col else []
+    # Basins with no channel are folded first, including ones that have no stream
+    # row at all. Those are the catchments that would otherwise outnumber streams.
+    orphan_basins = {basin_id for basin_id in basin_ids if basin_id and basin_id not in known_channels}
+    lineless = stream_lineless | orphan_basins
     if not lineless:
         return streams, basins
 
+    basin_id_set = {basin_id for basin_id in basin_ids if basin_id}
+    # Area only moves onto a reach that still has a line and a basin polygon.
+    receivers = (known_channels & basin_id_set) if basin_id_set else set(known_channels)
+
     downstream = dict(zip(link_ids, down_ids))
-    known_channels = {link_ids[i] for i, present in enumerate(has_line) if present}
+    basin_down = _down_col(basins)
+    if basin_col and basin_down:
+        for basin_id, down in zip(basins[basin_col], basins[basin_down]):
+            key = normalize_id(basin_id)
+            if key and key not in downstream:
+                downstream[key] = _parse_downstream_id(down, outlet_sentinel)
+    for column in _US_LINK_COLS:
+        if column not in streams.columns:
+            continue
+        for link, upstream in zip(link_ids, streams[column]):
+            upstream_id = normalize_id(upstream)
+            link_id = normalize_id(link)
+            if upstream_id and upstream_id not in downstream and link_id in known_channels:
+                downstream[upstream_id] = link_id
     link_pos = {link_ids[i]: i for i in range(len(link_ids)) if link_ids[i]}
     inflows: dict[str, list[str]] = defaultdict(list)
     for source, target in downstream.items():
         if source and target:
             inflows[target].append(source)
 
-    stream_ids = set(link_ids)
-    basin_col = _basin_id_column(basins, stream_ids)
     gauge_hits = _gauge_hits(basins, basin_col, gauges) if basin_col else {}
     gauge_ids = set(gauge_hits)
     area_pos = {}
@@ -381,7 +445,7 @@ def fold_lineless_catchments(
     def channel_below(fid: str) -> str | None:
         seen = set()
         current = fid
-        while current in lineless:
+        while current and current not in receivers:
             if current in seen:
                 return None
             seen.add(current)
@@ -389,7 +453,7 @@ def fold_lineless_catchments(
             if not nxt:
                 return None
             current = nxt
-        return current if current in known_channels else None
+        return current or None
 
     def channel_above(fid: str) -> str | None:
         """Upstream main channel: the inflow with the largest drainage area."""
@@ -401,7 +465,7 @@ def fold_lineless_catchments(
             if not upstreams:
                 return None
             main = max(upstreams, key=lambda up: (_weight(up), up))
-            if main in known_channels:
+            if main in receivers:
                 return main
             if main not in lineless:
                 return None
@@ -430,6 +494,27 @@ def fold_lineless_catchments(
                 continue
             fold_to[fid] = target
             skip_to[fid] = target
+
+    if unresolved_down and basin_col is not None:
+        positions_now = {
+            normalize_id(value): index
+            for index, value in enumerate(basins[basin_col])
+            if normalize_id(value)
+        }
+        still_down: list[str] = []
+        for fid in unresolved_down:
+            # A reach that is present but has no downstream channel stays put.
+            # Only a basin with no stream row is placed by shared boundary.
+            if fid in stream_lineless:
+                still_down.append(fid)
+                continue
+            target = _adjacent_channel(basins, positions_now, fid, receivers)
+            if target is None:
+                still_down.append(fid)
+                continue
+            fold_to[fid] = target
+            skip_to[fid] = target
+        unresolved_down = still_down
 
     if unresolved_down:
         print(
