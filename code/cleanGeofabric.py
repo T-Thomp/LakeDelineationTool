@@ -5,26 +5,26 @@ import pandas as pd
 from shapely.ops import linemerge, snap
 from shapely.geometry import MultiLineString
 
-from hy_features.config import hy_features_enabled
+from utilities import (
+    export_shapefile,
+    fold_lineless_catchments,
+    repair_flowpath_geometries,
+    strip_point_join_artifacts,
+)
 from pipeline_paths import (
     FINAL_BASINS,
-    FINAL_POUR_POINTS,
     FINAL_STREAMS,
     PREP_GAUGES,
-    PREP_LAKES,
     WORKING_BASINS_MERGED,
-    WORKING_GEOFABRIC_GPKG,
-    WORKING_CATCHMENT_REGISTRY,
     WORKING_STREAMS_MERGED,
     delete_interim_outputs,
     ensure_output_dirs,
 )
 
-ENABLE_HY_FEATURES = False  # overridden by HY_FEATURES_ENABLED env var if set
 DELETE_INTERIM_FILES = False  # overridden by DELETE_INTERIM_FILES env var if set
 
 
-def bypass_phantom_streams(streams_path, basins_path, output_path):
+def bypass_phantom_streams(streams_path, basins_path, output_path, streams=None, basins=None):
     """
     Removes TauDEM phantom streams by merging them into upstream reaches.
 
@@ -43,8 +43,12 @@ def bypass_phantom_streams(streams_path, basins_path, output_path):
     # ---------------------------------------------------------------
     # Load data
     # ---------------------------------------------------------------
-    streams = gpd.read_file(streams_path)
-    basins = gpd.read_file(basins_path)
+    if streams is None:
+        streams = gpd.read_file(streams_path)
+    else:
+        streams = streams.copy()
+    if basins is None:
+        basins = gpd.read_file(basins_path)
     original_crs = streams.crs
 
     print(f"Initial stream segments: {len(streams)}")
@@ -55,7 +59,9 @@ def bypass_phantom_streams(streams_path, basins_path, output_path):
     # ---------------------------------------------------------------
     # Identify phantom streams
     # ---------------------------------------------------------------
-    valid_basins = set(basins["DN"].dropna().astype(int))
+    valid_basins = set(
+        pd.to_numeric(basins["DN"], errors="coerce").dropna().astype(int)
+    )
     phantom = streams[~streams["LINKNO"].isin(valid_basins)].copy()
 
     # ---------------------------------------------------------------
@@ -77,10 +83,8 @@ def bypass_phantom_streams(streams_path, basins_path, output_path):
     print(f"Phantom segments remaining: {len(phantom_map)}")
 
     if len(phantom_map) == 0:
-        from hy_features.export import export_shapefile_legacy
-
-        export_shapefile_legacy(streams, output_path)
-        return
+        streams = repair_flowpath_geometries(streams)
+        return streams.reset_index(drop=True)
 
     # Use a dictionary of lookups for faster access during the merge loop
     lookup_dict = streams.to_dict(orient="index")
@@ -186,6 +190,7 @@ def bypass_phantom_streams(streams_path, basins_path, output_path):
     # Remove remaining phantom rows
     # ---------------------------------------------------------------
     cleaned = streams[~streams["LINKNO"].isin(phantom_map.keys())].copy()
+    cleaned = repair_flowpath_geometries(cleaned)
 
     # ---------------------------------------------------------------
     # Recalculate geometry-derived fields
@@ -236,108 +241,20 @@ def bypass_phantom_streams(streams_path, basins_path, output_path):
     # Reset index back to normal before saving
     cleaned = cleaned.reset_index(drop=True)
     cleaned.set_crs(original_crs, allow_override=True, inplace=True)
-
-    # ---------------------------------------------------------------
-    # Write shapefile
-    # ---------------------------------------------------------------
-    from hy_features.export import export_shapefile_legacy
-
-    export_shapefile_legacy(cleaned, output_path)
-    print(f"Cleaned network successfully saved to: {output_path}")
-    print(f"Final stream segments written: {len(cleaned)}")
     print(f"Removed phantom segments: {len(phantom_map)}")
+    return cleaned
 
 
 
-def dissolve_split_basins(input_path, output_path):
-    """
-    Loads a basin shapefile, groups rows by 'DN', and aggregates disjoint or 
-    diagonal floating polygons into clean, unified MultiPolygon entries.
-    """
-    # 1. Load the basin shapefile
-    basins = gpd.read_file(input_path)
-    original_crs = basins.crs
+def dissolve_split_basins(basins: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Union polygons that share a DN into one basin."""
     print(f"Loaded basin dataset. Total initial features: {len(basins)}")
-
-    # 2. Execute the dissolve operation
     print("Dissolving split polygons with matching DN values into MultiPolygons...")
-    # as_index=False keeps 'DN' as a normal data column
-    dissolved_basins = basins.dissolve(by='DN', as_index=False)
-    
-    print(f"Dissolve complete. Total consolidated basin entries: {len(dissolved_basins)}")
+    dissolved = basins.dissolve(by="DN", as_index=False)
+    dissolved.set_crs(basins.crs, allow_override=True, inplace=True)
+    print(f"Dissolve complete. Total consolidated basin entries: {len(dissolved)}")
+    return dissolved
 
-    # 3. Restore coordinate metadata and save standard export
-    dissolved_basins.set_crs(original_crs, allow_override=True, inplace=True)
-    from hy_features.export import export_shapefile_legacy
-
-    export_shapefile_legacy(dissolved_basins, output_path)
-    print(f"Successfully saved dissolved basins to {output_path}")
-
-
-def export_hy_features_geofabric(
-    basins_path: str,
-    streams_path: str,
-    gauges_path: str,
-    gpkg_path: str | None = None,
-    registry_path: str | None = None,
-    waterbodies_path: str | None = None,
-    hydro_locations_path: str | None = None,
-) -> None:
-    """Assemble and export fully HY_Features-conformant geofabric products."""
-    if not hy_features_enabled(default=ENABLE_HY_FEATURES):
-        print("HY_Features disabled; skipping geofabric.gpkg assembly.")
-        return
-
-    gpkg_path = gpkg_path or str(WORKING_GEOFABRIC_GPKG)
-    registry_path = registry_path or str(WORKING_CATCHMENT_REGISTRY)
-    waterbodies_path = waterbodies_path if waterbodies_path is not None else str(PREP_LAKES)
-    hydro_locations_path = hydro_locations_path if hydro_locations_path is not None else str(FINAL_POUR_POINTS)
-
-    from hy_features.assemble import assemble_full_geofabric, export_full_geofabric
-
-    basins = gpd.read_file(basins_path)
-    streams = gpd.read_file(streams_path)
-
-    gauges = None
-    try:
-        from hy_features.export import strip_point_join_artifacts
-
-        gauges = strip_point_join_artifacts(gpd.read_file(gauges_path))
-    except Exception as exc:
-        print(f"No gauge layer: {exc}")
-
-    waterbodies = None
-    if waterbodies_path:
-        try:
-            waterbodies = gpd.read_file(waterbodies_path)
-            if waterbodies.crs != basins.crs:
-                waterbodies = waterbodies.to_crs(basins.crs)
-        except Exception as exc:
-            print(f"No waterbody layer: {exc}")
-
-    hydro_locations = None
-    if hydro_locations_path:
-        try:
-            hydro_locations = gpd.read_file(hydro_locations_path)
-            if hydro_locations.crs != basins.crs:
-                hydro_locations = hydro_locations.to_crs(basins.crs)
-        except Exception as exc:
-            print(f"No hydro_location layer: {exc}")
-
-    assembled = assemble_full_geofabric(
-        basins,
-        streams,
-        gauges=gauges,
-        waterbodies=waterbodies,
-        hydro_locations=hydro_locations,
-    )
-
-    export_full_geofabric(
-        assembled,
-        gpkg_path=gpkg_path,
-        registry_path=registry_path,
-        metadata_path=registry_path.replace("catchment_registry.json", "hydrographic_network.json"),
-    )
 
 def _gauge_station_column(gauges: gpd.GeoDataFrame) -> str:
     for col in ("STATION_NO", "STATION_NU", "STATION_NUMBER", "STATION_NM", "STATION_NA", "STATION_NAME"):
@@ -349,45 +266,34 @@ def _gauge_station_column(gauges: gpd.GeoDataFrame) -> str:
     )
 
 
-def add_gauge_info_to_basins(input_path, gauge_path, output_path):
-    from hy_features.export import strip_point_join_artifacts
-
-    # 1. Load your data
-    basins = gpd.read_file(input_path)
-    gauges = strip_point_join_artifacts(gpd.read_file(gauge_path))
-
-    # 2. Align coordinate systems
+def attach_gauge_ids(basins: gpd.GeoDataFrame, gauges: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Add STATION_NU from gauge points that fall in each basin."""
     if basins.crs != gauges.crs:
         gauges = gauges.to_crs(basins.crs)
 
-    # 3. FIX: Strip out all extra columns except geometry and the specific IDs
     station_col = _gauge_station_column(gauges)
+    basins = basins.drop(columns=["STATION_NU"], errors="ignore")
     basins_subset = basins[["DN", "geometry"]]
     gauges_subset = gauges[[station_col, "geometry"]].rename(
         columns={station_col: "STATION_NU"}
     )
-
-    # 4. Spatial join (only joins 'DN' and 'STATION_NU')
     joined = gpd.sjoin(gauges_subset, basins_subset, how="inner", predicate="within")
-
-    # 5. Group by subbasin ID and concatenate station numbers
     gauge_list_by_basin = (
         joined.groupby("DN")["STATION_NU"].apply(", ".join).reset_index()
     )
-
-    # 6. Merge the text string directly back into your original basin file
     basins = basins.merge(gauge_list_by_basin, on="DN", how="left")
-
-    # 7. Fill basins without stations with an empty string
     basins["STATION_NU"] = basins["STATION_NU"].fillna("")
+    return basins
 
-    from hy_features.export import export_shapefile_legacy
 
-    export_shapefile_legacy(basins, output_path)
+def add_gauge_info_to_basins(input_path, gauge_path, output_path):
+    basins = gpd.read_file(input_path)
+    gauges = strip_point_join_artifacts(gpd.read_file(gauge_path))
+    export_shapefile(attach_gauge_ids(basins, gauges), output_path)
 
 
 def run_clean_geofabric(*, delete_interim: bool | None = None) -> None:
-    """Dissolve basins, clean streams, attach gauges, and optionally remove interim TauDEM files."""
+    """Merge same-id basin polygons, fold catchments that have no channel, then clean streams."""
     ensure_output_dirs()
 
     input_streams = str(WORKING_STREAMS_MERGED)
@@ -396,25 +302,26 @@ def run_clean_geofabric(*, delete_interim: bool | None = None) -> None:
     output_streams = str(FINAL_STREAMS)
     output_basins = str(FINAL_BASINS)
 
-    dissolve_split_basins(input_basins, output_basins)
-    bypass_phantom_streams(input_streams, input_basins, output_streams)
-    add_gauge_info_to_basins(output_basins, input_gauges, output_basins)
-
-    export_hy_features_geofabric(
-        output_basins,
+    basins = dissolve_split_basins(gpd.read_file(input_basins))
+    gauges = strip_point_join_artifacts(gpd.read_file(input_gauges))
+    basins = attach_gauge_ids(basins, gauges)
+    streams = gpd.read_file(input_streams)
+    # Fold catchments that have no channel before phantom streams are removed,
+    # then again so a basin left without a stream is merged into one that has one.
+    streams, basins = fold_lineless_catchments(streams, basins, gauges=gauges)
+    streams = bypass_phantom_streams(
+        input_streams,
+        input_basins,
         output_streams,
-        input_gauges,
+        streams=streams,
+        basins=basins,
     )
-
-    if hy_features_enabled(default=ENABLE_HY_FEATURES):
-        from hy_features.export import export_shapefile_legacy
-
-        assembled_layers = gpd.read_file(str(WORKING_GEOFABRIC_GPKG), layer="catchment_area")
-        assembled_streams = gpd.read_file(str(WORKING_GEOFABRIC_GPKG), layer="flowpath")
-        export_shapefile_legacy(assembled_layers, output_basins)
-        export_shapefile_legacy(assembled_streams, output_streams)
-    else:
-        print("HY_Features disabled; using TauDEM-only basins.shp / streams.shp shapefiles.")
+    streams, basins = fold_lineless_catchments(streams, basins, gauges=gauges)
+    export_shapefile(basins, output_basins)
+    export_shapefile(streams, output_streams)
+    print(f"Cleaned network saved to: {output_streams}")
+    print(f"Final basins written: {len(basins)}")
+    print(f"Final stream segments written: {len(streams)}")
 
     delete_interim_outputs(enabled=delete_interim, default=DELETE_INTERIM_FILES)
 

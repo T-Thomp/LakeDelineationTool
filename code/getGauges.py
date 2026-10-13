@@ -2,7 +2,7 @@
 Find active HYDAT stream-gauge stations inside the study basin.
 
 Called by Delineation-Workflow.slurm after TauDEM Pass 1 and before
-rasterFlowpathEdit.py (gauges inform lake outlet ranking).
+conditionLakes.py (gauges inform lake outlet ranking).
 
 Queries HYDAT for active stations with discharge (Q) data, spatially filters
 to the dissolved Pass 1 basin boundary, and exports a point shapefile for
@@ -16,7 +16,6 @@ Inputs
 Outputs
 -------
   outputs/prep/gauges.shp
-  outputs/prep/gauges.gpkg  (optional, when HY_Features enabled)
 """
 
 from __future__ import annotations
@@ -27,8 +26,8 @@ from pathlib import Path
 import geopandas as gpd
 import pandas as pd
 
-from hy_features.config import hy_features_enabled
-from pipeline_paths import INPUT_HYDAT_DB, PASS1_BASINS, PREP_GAUGES, PREP_GAUGES_GPKG, ensure_output_dirs
+from pipeline_paths import INPUT_HYDAT_DB, PASS1_BASINS, PREP_GAUGES, ensure_output_dirs
+from utilities import export_shapefile, strip_point_join_artifacts
 
 # ==============================================================================
 # CONFIGURATION
@@ -37,10 +36,7 @@ PATHS = {
     "basins": str(PASS1_BASINS),
     "hydat_db": str(INPUT_HYDAT_DB),
     "output_shp": str(PREP_GAUGES),
-    "output_gpkg": str(PREP_GAUGES_GPKG),
 }
-
-ENABLE_HY_FEATURES = False  # overridden by HY_FEATURES_ENABLED env var if set
 
 HYDAT_ACTIVE_FLOW_QUERY = """
 SELECT DISTINCT
@@ -97,21 +93,10 @@ def clip_gauges_to_basin(
 
 
 def export_gauges(gauges: gpd.GeoDataFrame, paths: dict[str, str]) -> None:
-    """Write shapefile and optional HY_Features GeoPackage sidecar."""
-    from hy_features.export import export_geopackage, export_shapefile_legacy, strip_point_join_artifacts
-
+    """Write the gauge point shapefile."""
     output_shp = paths["output_shp"]
     Path(output_shp).parent.mkdir(parents=True, exist_ok=True)
-
-    gauges = strip_point_join_artifacts(gauges)
-
-    if hy_features_enabled(default=ENABLE_HY_FEATURES):
-        from hy_features.enrich import enrich_hydrometric_features
-
-        gauges = enrich_hydrometric_features(gauges)
-        export_geopackage({"hydrometric_feature": gauges}, paths["output_gpkg"])
-
-    export_shapefile_legacy(gauges, output_shp)
+    export_shapefile(strip_point_join_artifacts(gauges), output_shp)
     print(f"Saved {len(gauges)} gauges to {output_shp}")
 
 
