@@ -66,7 +66,7 @@ from shapely import wkt as shapely_wkt
 from shapely.geometry import Point, box
 from scipy.ndimage import distance_transform_edt, binary_erosion, binary_dilation
 
-from outlet_overrides import load_overrides
+from utilities import load_overrides
 from pipeline_paths import (
     FDR_CENTERLINE,
     PASS1_STREAMS,
@@ -875,7 +875,7 @@ def load_gauges(gauges_vector_path, raster_proj):
     """Load stream gauges for outlet ranking, or an empty frame if the file is missing."""
     if not os.path.exists(gauges_vector_path):
         return gpd.GeoDataFrame(geometry=[], crs=raster_proj)
-    from shapefile_io import strip_point_join_artifacts
+    from utilities import strip_point_join_artifacts
 
     return strip_point_join_artifacts(gpd.read_file(gauges_vector_path)).to_crs(raster_proj)
 

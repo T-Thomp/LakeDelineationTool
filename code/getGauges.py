@@ -27,7 +27,7 @@ import geopandas as gpd
 import pandas as pd
 
 from pipeline_paths import INPUT_HYDAT_DB, PASS1_BASINS, PREP_GAUGES, ensure_output_dirs
-from shapefile_io import export_shapefile, strip_point_join_artifacts
+from utilities import export_shapefile, strip_point_join_artifacts
 
 # ==============================================================================
 # CONFIGURATION

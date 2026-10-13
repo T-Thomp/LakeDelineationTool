@@ -5,7 +5,12 @@ import pandas as pd
 from shapely.ops import linemerge, snap
 from shapely.geometry import MultiLineString
 
-from flowpath_geometry import fold_lineless_catchments, repair_flowpath_geometries
+from utilities import (
+    export_shapefile,
+    fold_lineless_catchments,
+    repair_flowpath_geometries,
+    strip_point_join_artifacts,
+)
 from pipeline_paths import (
     FINAL_BASINS,
     FINAL_STREAMS,
@@ -15,7 +20,6 @@ from pipeline_paths import (
     delete_interim_outputs,
     ensure_output_dirs,
 )
-from shapefile_io import export_shapefile, strip_point_join_artifacts
 
 DELETE_INTERIM_FILES = False  # overridden by DELETE_INTERIM_FILES env var if set
 

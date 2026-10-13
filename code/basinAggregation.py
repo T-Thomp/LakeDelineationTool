@@ -54,7 +54,7 @@ import numpy as np
 import pandas as pd
 import shapely
 
-from flowpath_geometry import coerce_flowpath_geometry, repair_flowpath_geometries
+from utilities import coerce_flowpath_geometry, export_shapefile, repair_flowpath_geometries
 from pipeline_paths import (
   FINAL_BASINS,
   FINAL_BASINS_AGG,
@@ -63,8 +63,6 @@ from pipeline_paths import (
   WORKING,
   ensure_output_dirs,
 )
-from shapefile_io import export_shapefile
-
 # ==============================================================================
 # COLUMN NAMES — TauDEM / MESH fields on the shapefiles.
 # ==============================================================================

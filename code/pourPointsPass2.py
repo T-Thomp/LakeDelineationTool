@@ -17,7 +17,7 @@ from pipeline_paths import (
     TAUDEM_D8,
     ensure_output_dirs,
 )
-from shapefile_io import export_shapefile, strip_point_join_artifacts
+from utilities import export_shapefile, strip_point_join_artifacts
 
 # Enable GDAL exceptions to catch raster I/O issues cleanly
 gdal.UseExceptions()

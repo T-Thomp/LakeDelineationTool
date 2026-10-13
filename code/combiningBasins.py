@@ -72,7 +72,7 @@ import pandas as pd
 import shapely
 from shapely.geometry import Point
 
-from outlet_overrides import load_overrides
+from utilities import load_overrides
 from pipeline_paths import (
     PATHS as PIPELINE_PATHS,
     PREP_GAUGES,
@@ -554,7 +554,7 @@ def process_reservoir_basins():
     lakes = gpd.read_file(PATHS["lakes"])
     streams = gpd.read_file(PATHS["streams"])
     intersection = gpd.read_file(PATHS["intersection"])
-    from shapefile_io import export_shapefile, strip_point_join_artifacts
+    from utilities import export_shapefile, strip_point_join_artifacts
 
     gauges = strip_point_join_artifacts(gpd.read_file(PATHS["gauges"]))
 
@@ -740,7 +740,7 @@ def process_reservoir_basins():
     ensure_output_dirs()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    from flowpath_geometry import repair_flowpath_geometries
+    from utilities import repair_flowpath_geometries
 
     # Coerce dissolved lines only. Polygons that share a DN are merged once,
     # in cleanGeofabric.
