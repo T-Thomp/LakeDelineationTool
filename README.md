@@ -480,7 +480,7 @@ LAKE_DELINEATION_ROOT = None                              # folder that contains
 LAKE_DELINEATION_ROOT = Path("/path/to/your/study-root")  # write the study somewhere else
 ```
 
-`None` is the default. Submit `sbatch` from the folder that contains `study_settings.py` and the job uses that folder. A path keeps the settings file with the code and sends TauDEM and Python products to the other folder. Relative input paths (`dem/your-dem.tif`) are resolved against that root. Absolute paths are used as written.
+`None` is the default. The job uses the folder that contains the `study_settings.py` it loaded. Relative input paths (`dem/your-dem.tif`) are resolved against that root. Absolute paths are used as written. A path set here sends TauDEM and Python products to that other folder.
 
 An exported environment variable overrides the file:
 
@@ -528,7 +528,7 @@ A flag path is used as written. An absolute path is that file. A relative flag, 
 
 ### Slurm vs a one-off script
 
-`Delineation-Workflow.slurm` reads `LAKE_DELINEATION_ROOT` from `study_settings.py` in the directory where you run `sbatch`. Leave it as `None` to use that directory. Set a path to send TauDEM and Python products elsewhere; `code/` can stay next to the slurm script. Exporting `LAKE_DELINEATION_ROOT` before `sbatch` overrides the file.
+`Delineation-Workflow.slurm` loads `study_settings.py` from the directory where you run `sbatch`. If that directory has no settings file, it uses the one next to the slurm script. `code/` is the folder next to the slurm script, so the script and the Python code can stay in the repo while the study folder only has `study_settings.py`. Leave `LAKE_DELINEATION_ROOT` as `None` to write outputs in the folder that contains the settings file that was loaded. Exporting `LAKE_DELINEATION_ROOT` before `sbatch` overrides the file.
 
 Job logs (`delineate_<jobid>.out`) still land in the submit directory, not the study folder.
 
@@ -542,11 +542,14 @@ Update:
 - `VENV` — path to activated venv (`pip install -r requirements.txt`; see **Software requirements**)
 - `FLOWPATH_NCORES`
 
-`CODE_DIR` is `code/` next to where you ran `sbatch` (or under the study root if that is the only copy). Submit from the repo or from a study root that contains `code/`:
+`code/` is the folder next to `Delineation-Workflow.slurm`. Submit from the repo when `study_settings.py` is there too, or from a study folder that has its own `study_settings.py`:
 
 ```bash
-cd /path/to/your/study-root
+cd /path/to/LakeDelineationTool
 sbatch Delineation-Workflow.slurm
+
+cd /project/my-basin
+sbatch /path/to/LakeDelineationTool/Delineation-Workflow.slurm
 ```
 
 Ensure `module restore scimods` matches your cluster setup (FIR: **GDAL 3.9.1** + **mpi4py 4.0.0** modules) and that compiled TauDEM is on `PATH`.
