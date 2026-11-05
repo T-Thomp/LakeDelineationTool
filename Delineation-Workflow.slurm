@@ -40,7 +40,7 @@
 #            basinAggregation.py -- (optional) merge small headwater subbasins
 #        v
 #   outputs/final/               -- deliverables: basins, basins_aggregated, pour_points
-#   outputs/working/             -- merged geofabric before final clean (+ HY sidecars)
+#   outputs/working/             -- merged geofabric before final clean
 #   outputs/prep/                -- lakes, gauges, pour-point prep
 #   outputs/interim/taudem_d8/   -- Pass 1–2 TauDEM rasters and vectors
 #   outputs/interim/taudem_pass3/ -- Pass 3 TauDEM outputs
@@ -48,34 +48,41 @@
 # KEY DIRECTORIES
 # ------------------------------------------------------------
 #   DATA_DIR / LAKE_DELINEATION_ROOT
-#       Study folder: study_settings.py and outputs/ (TauDEM + Python).
-#       Default: the directory where you ran sbatch.
-#       Override: export LAKE_DELINEATION_ROOT=/path/to/study in §0.
+#       Study folder: outputs/ (TauDEM + Python) and relative input paths.
+#       Default: the folder that contains the study_settings.py that was loaded
+#       (LAKE_DELINEATION_ROOT = None). Set a path in that file to use another
+#       folder. An exported LAKE_DELINEATION_ROOT still overrides the file.
+#   study_settings.py
+#       The directory where you ran sbatch, if that file is there.
+#       Otherwise the copy next to this slurm script.
 #   CODE_DIR
-#       Python scripts. $SUBMIT_DIR/code if present, else $DATA_DIR/code.
+#       Python scripts next to this slurm script. If this script was started
+#       from the repo, $SUBMIT_DIR/code is the same folder.
 #
 # SETUP CHECKLIST (paths & knobs to edit when adapting this workflow)
 # --------------------------------------------------------------------
 # Work top-to-bottom. Slurm cd's to DATA_DIR so ./ CSVs resolve there.
 # Python and TauDEM both write under DATA_DIR/outputs (LAKE_DELINEATION_ROOT).
 #
-# [ ] study_settings.py  (copy from study_settings.example.py; edit at study root)
+# [ ] study_settings.py
+#       LAKE_DELINEATION_ROOT -- None, or the folder for outputs and relative paths
 #       INPUT_DEM          -- elevation GeoTIFF
-#       INPUT_HYDAT_DB     -- HYDAT SQLite database
-#       INPUT_HYDROLAKES   -- HydroLAKES polygon shapefile
+#       INPUT_LAKES        -- lake polygons (HydroLAKES by default; column map in the file)
+#       GAUGE_SOURCE       -- hydat (WSC HYDAT) or file (CSV / point shapefile)
+#       STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
+#       MIN_SUB_AREA       -- km² aggregation threshold (default 100)
+#       LAKE_MIN_AREA_SQKM / LAKE_KEEP_TYPES -- which lakes to keep
 #
 # [ ] Delineation-Workflow.slurm  (this file)
 #       module restore scimods  -- GDAL + mpi4py (see SOFTWARE REQUIREMENTS)
 #       PATH to TauDEM     -- export PATH="$HOME/taudem-build/taudem:$PATH" (§0)
 #       VENV               -- Python venv activate (pip install -r requirements.txt)
-#       STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
 #       FLOWPATH_NCORES    -- conditionLakes.py workers (1 = plain python; >1 = mpirun)
-#       LAKE_DELINEATION_ROOT -- optional; study folder for all outputs (TauDEM + Python)
 #       #SBATCH --account / --ntasks / --mem-per-cpu / --time
 #
 # [ ] filterLakes.py
 #       Pass-1 watersheds/streams under outputs/interim/taudem_d8/
-#       MIN_AREA           -- km² lake-size filter
+#       lake file, size, and type values -- study_settings.py
 #       output             -- outputs/prep/lakes.shp
 #
 # [ ] getGauges.py
@@ -119,14 +126,14 @@
 #
 # [ ] basinAggregation.py  (optional; paths from pipeline_paths.py)
 #       INPUT_BASINS / INPUT_RIVERS / OUTPUT_BASINS / OUTPUT_RIVERS
-#       MIN_SUB_AREA       -- km² aggregation threshold (default 100)
+#       MIN_SUB_AREA       -- km² aggregation threshold, set in study_settings.py
 #       MIN_RIV_SLOPE, MIN_RIV_LENGTH
 #       column-name globals if your attribute table differs from TauDEM
 #
 # [ ] External / one-time inputs to stage before running
 #       INPUT_DEM path     -- in study_settings.py
-#       INPUT_HYDROLAKES   -- in study_settings.py
-#       INPUT_HYDAT_DB     -- in study_settings.py
+#       INPUT_LAKES        -- in study_settings.py (HydroLAKES, or your own polygons)
+#       gauges             -- INPUT_HYDAT_DB, or INPUT_GAUGES when GAUGE_SOURCE=file
 #       outlet_overrides.csv -- optional manual lake-outlet overrides
 #
 # SOFTWARE REQUIREMENTS (modules + Python venv)
@@ -178,58 +185,64 @@ echo "$(basename "$0"): Delineation started at $(date)"
 # TauDEM:  self-built MPI binaries; add compiled install dir to PATH below.
 # Python:  source VENV before §2–§6 (geopandas, scipy, mpi4py, osgeo/gdal).
 # -----------------------------------------------------------------------------
+# Resolve directories before "module purge" so scontrol is still on PATH.
+
+# Directory where you ran sbatch. Slurm starts the job here.
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    SUBMIT_DIR="$SLURM_SUBMIT_DIR"
+else
+    SUBMIT_DIR="$(pwd)"
+fi
+
+# Folder that holds this slurm script and code/. Under sbatch the running
+# copy is in Slurm's spool, so recover the path that was passed to sbatch.
+# Do this before "module purge" so scontrol is still on PATH.
+SCRIPT_DIR=""
+if [[ -n "${SLURM_JOB_ID:-}" ]] && command -v scontrol >/dev/null 2>&1; then
+    SCRIPT_SRC="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null | sed -n 's/^[[:space:]]*Command=//p' | head -n 1)"
+    SCRIPT_SRC="${SCRIPT_SRC%% *}"
+    if [[ -n "$SCRIPT_SRC" && "$SCRIPT_SRC" != /* ]]; then
+        SCRIPT_SRC="$SUBMIT_DIR/$SCRIPT_SRC"
+    fi
+    if [[ -n "$SCRIPT_SRC" && -f "$SCRIPT_SRC" ]]; then
+        SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SRC")" && pwd)"
+    fi
+fi
+if [[ -z "$SCRIPT_DIR" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+# study_settings.py in the working directory wins. Otherwise use the copy
+# next to this script. An already-exported LAKE_DELINEATION_SETTINGS wins.
+if [[ -z "${LAKE_DELINEATION_SETTINGS:-}" ]]; then
+    if [[ -f "$SUBMIT_DIR/study_settings.py" ]]; then
+        export LAKE_DELINEATION_SETTINGS="$SUBMIT_DIR/study_settings.py"
+    elif [[ -f "$SCRIPT_DIR/study_settings.py" ]]; then
+        export LAKE_DELINEATION_SETTINGS="$SCRIPT_DIR/study_settings.py"
+    else
+        echo "ERROR: study_settings.py not found"
+        echo "  looked in: $SUBMIT_DIR/study_settings.py"
+        echo "  and:       $SCRIPT_DIR/study_settings.py"
+        exit 1
+    fi
+fi
+SETTINGS="$LAKE_DELINEATION_SETTINGS"
+
+if [[ -d "$SCRIPT_DIR/code" ]]; then
+    CODE_DIR="$SCRIPT_DIR/code"
+elif [[ -d "$SUBMIT_DIR/code" ]]; then
+    CODE_DIR="$SUBMIT_DIR/code"
+else
+    CODE_DIR=""
+fi
+
 module purge
 module restore scimods
 
 # export PATH="$HOME/taudem-build/taudem:$PATH"   # Set taudem:PATH here or set it in .bashrc file
 
-# Study folder: study_settings.py and all products (TauDEM rasters + Python shapefiles).
-# Uncomment to send the job somewhere other than where you ran sbatch.
-# Leave unset to use SLURM_SUBMIT_DIR.
-
-
-# export LAKE_DELINEATION_ROOT="~/directory/to/study"
-
-
-# Directory where you ran sbatch (not the read-only job spool copy). Used to find code/.
-if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
-    SUBMIT_DIR="$SLURM_SUBMIT_DIR"
-else
-    SUBMIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-fi
-
-if [[ -n "${LAKE_DELINEATION_ROOT:-}" ]]; then
-    if [[ ! -d "${LAKE_DELINEATION_ROOT}" ]]; then
-        echo "ERROR: LAKE_DELINEATION_ROOT is not a directory: ${LAKE_DELINEATION_ROOT}"
-        exit 1
-    fi
-    DATA_DIR="$(cd "${LAKE_DELINEATION_ROOT}" && pwd)"
-else
-    DATA_DIR="$SUBMIT_DIR"
-fi
-export LAKE_DELINEATION_ROOT="$DATA_DIR"
-
-if [[ -d "$SUBMIT_DIR/code" ]]; then
-    CODE_DIR="$SUBMIT_DIR/code"
-elif [[ -d "$DATA_DIR/code" ]]; then
-    CODE_DIR="$DATA_DIR/code"
-else
-    echo "ERROR: no code/ directory next to the slurm submit dir or under LAKE_DELINEATION_ROOT"
-    echo "  looked in: $SUBMIT_DIR/code"
-    echo "  and:       $DATA_DIR/code"
-    exit 1
-fi
-
-OUTPUT_ROOT="$DATA_DIR/outputs"
-INT_DIR="$OUTPUT_ROOT/interim/taudem_d8"       # Pass 1 & 2 TauDEM rasters/shapefiles
-PASS3_DIR="$OUTPUT_ROOT/interim/taudem_pass3"  # Pass 3 TauDEM outputs
-PREP_DIR="$OUTPUT_ROOT/prep"
-WORKING_DIR="$OUTPUT_ROOT/working"
-FINAL_DIR="$OUTPUT_ROOT/final"                 # Deliverables (basins, pour points)
-
-# Contributing-area threshold for TauDEM stream definition (cell count).
-# Applied identically in all three TauDEM passes.
-STREAM_THRESHOLD=5555
+# STREAM_THRESHOLD is read from study_settings.py after the study check below.
+# It is the TauDEM stream-source area in cells, applied in all three passes.
 
 # Workers for conditionLakes.py (lake flow-path edits).
 #
@@ -246,21 +259,62 @@ FLOWPATH_NCORES=16
 
 VENV="/home/$USER/virtual-envs/scienv/bin/activate"
 
-mkdir -p "$INT_DIR" "$PASS3_DIR" "$PREP_DIR" "$WORKING_DIR" "$FINAL_DIR"
-cd "$DATA_DIR" || exit 1
-echo "Study root (LAKE_DELINEATION_ROOT): $DATA_DIR"
-echo "Python scripts (CODE_DIR):          $CODE_DIR"
-
-if [[ ! -f "${DATA_DIR}/study_settings.py" ]]; then
-    echo "ERROR: ${DATA_DIR}/study_settings.py not found"
-    echo "  cp study_settings.example.py study_settings.py"
-    echo "  Edit INPUT_DEM, INPUT_HYDAT_DB, and INPUT_HYDROLAKES, then re-submit."
+if [[ -z "$CODE_DIR" ]]; then
+    echo "ERROR: no code/ directory next to the slurm script or the submit directory"
+    echo "  looked in: $SCRIPT_DIR/code"
+    echo "  and:       $SUBMIT_DIR/code"
     exit 1
 fi
 
-python3 "$CODE_DIR/validate_study.py" || exit 1
-DEM="$(python3 "$CODE_DIR/validate_study.py" --query dem)"
-FDR_RASTER="$(python3 "$CODE_DIR/validate_study.py" --query fdr)"
+# Study folder comes from the chosen study_settings.py. None there means the
+# folder that contains that file. A path already exported in the shell wins.
+if [[ -z "${LAKE_DELINEATION_ROOT:-}" ]]; then
+    if ! ROOT_FROM_SETTINGS="$(
+        python3 "$CODE_DIR/validate_study.py" --settings "$SETTINGS" --query root
+    )"; then
+        echo "ERROR: could not read LAKE_DELINEATION_ROOT from $SETTINGS"
+        exit 1
+    fi
+    if [[ -n "$ROOT_FROM_SETTINGS" ]]; then
+        export LAKE_DELINEATION_ROOT="$ROOT_FROM_SETTINGS"
+    fi
+fi
+
+if [[ -n "${LAKE_DELINEATION_ROOT:-}" ]]; then
+    if [[ ! -d "${LAKE_DELINEATION_ROOT}" ]]; then
+        echo "ERROR: LAKE_DELINEATION_ROOT is not a directory: ${LAKE_DELINEATION_ROOT}"
+        exit 1
+    fi
+    DATA_DIR="$(cd "${LAKE_DELINEATION_ROOT}" && pwd)"
+else
+    DATA_DIR="$(cd "$(dirname "$SETTINGS")" && pwd)"
+fi
+export LAKE_DELINEATION_ROOT="$DATA_DIR"
+
+OUTPUT_ROOT="$DATA_DIR/outputs"
+INT_DIR="$OUTPUT_ROOT/interim/taudem_d8"       # Pass 1 & 2 TauDEM rasters/shapefiles
+PASS3_DIR="$OUTPUT_ROOT/interim/taudem_pass3"  # Pass 3 TauDEM outputs
+PREP_DIR="$OUTPUT_ROOT/prep"
+WORKING_DIR="$OUTPUT_ROOT/working"
+FINAL_DIR="$OUTPUT_ROOT/final"                 # Deliverables (basins, pour points)
+
+mkdir -p "$INT_DIR" "$PASS3_DIR" "$PREP_DIR" "$WORKING_DIR" "$FINAL_DIR"
+cd "$DATA_DIR" || exit 1
+echo "Study settings:                    $SETTINGS"
+echo "Study root (LAKE_DELINEATION_ROOT): $DATA_DIR"
+echo "Python scripts (CODE_DIR):          $CODE_DIR"
+
+if [[ ! -f "$SETTINGS" ]]; then
+    echo "ERROR: study_settings.py not found: $SETTINGS"
+    echo "  Edit INPUT_DEM, INPUT_LAKES, and the gauge source, then re-submit."
+    exit 1
+fi
+
+python3 "$CODE_DIR/validate_study.py" --settings "$SETTINGS" || exit 1
+DEM="$(python3 "$CODE_DIR/validate_study.py" --settings "$SETTINGS" --query dem)"
+FDR_RASTER="$(python3 "$CODE_DIR/validate_study.py" --settings "$SETTINGS" --query fdr)"
+STREAM_THRESHOLD="$(python3 "$CODE_DIR/validate_study.py" --settings "$SETTINGS" --query stream-threshold)"
+echo "Stream threshold (cells): $STREAM_THRESHOLD"
 
 # Modules first, then venv (mpi4py module must be loaded before activate on FIR).
 # numpy/scipy/geopandas come from the venv only — not from module load.
@@ -369,20 +423,21 @@ gdal_polygonize.py \
 # -----------------------------------------------------------------------------
 log_section "Python: lake filtering, gauges, and lake/stream conditioning"
 
-python3 "$CODE_DIR/filterLakes.py"
-python3 "$CODE_DIR/getGauges.py"
+python3 "$CODE_DIR/filterLakes.py" --settings "$SETTINGS"
+python3 "$CODE_DIR/getGauges.py" --settings "$SETTINGS"
 
 echo " before conditionLakes.py $(date)"
 export FLOWPATH_NCORES
 if [[ "${FLOWPATH_NCORES}" -le 1 ]]; then
-    python3 "$CODE_DIR/conditionLakes.py" --ncores 1
+    python3 "$CODE_DIR/conditionLakes.py" --settings "$SETTINGS" --ncores 1
 else
     mpirun -np "${FLOWPATH_NCORES}" \
-        python3 "$CODE_DIR/conditionLakes.py" --ncores "${FLOWPATH_NCORES}"
+        python3 "$CODE_DIR/conditionLakes.py" --settings "$SETTINGS" \
+        --ncores "${FLOWPATH_NCORES}"
 fi
 echo " after conditionLakes.py $(date)"
 
-python3 "$CODE_DIR/conditionStreams.py" --csv "./stream_conditioning.csv"
+python3 "$CODE_DIR/conditionStreams.py" --settings "$SETTINGS"
 
 # -----------------------------------------------------------------------------
 # 3. TauDEM Pass 2 -- network using corrected lake flow directions
@@ -425,7 +480,7 @@ gdal_polygonize.py \
 # lake inflows/outflows and other key network nodes. Writes outputs/final/pour_points.shp.
 # -----------------------------------------------------------------------------
 log_section "Python: pour point extraction (pourPointsPass2.py)"
-python3 "$CODE_DIR/pourPointsPass2.py"
+python3 "$CODE_DIR/pourPointsPass2.py" --settings "$SETTINGS"
 
 # -----------------------------------------------------------------------------
 # 5. TauDEM Pass 3 -- final watershed delineation at pour points
@@ -474,18 +529,18 @@ gdal_polygonize.py \
 #                             outputs/final/streams.shp
 #                          optional: DELETE_INTERIM_FILES=1 removes outputs/interim/
 #   basinAggregation.py  -- OPTIONAL: aggregate small headwater subbasins below
-#                          MIN_SUB_AREA (default 100 km²), preserving gauges and
+#                          MIN_SUB_AREA from study_settings.py (default 100 km²), preserving gauges and
 #                          lake units. Comment out if you want the unaggregated
 #                          cleanGeofabric products only.
 #                          -> outputs/final/basins_aggregated.shp
 #                             outputs/final/streams_aggregated.shp
 # -----------------------------------------------------------------------------
 log_section "Python: basin merging and geofabric cleanup"
-python3 "$CODE_DIR/combiningBasins.py"
-python3 "$CODE_DIR/cleanGeofabric.py"
+python3 "$CODE_DIR/combiningBasins.py" --settings "$SETTINGS"
+python3 "$CODE_DIR/cleanGeofabric.py" --settings "$SETTINGS"
 
 log_section "Python: optional basin aggregation (basinAggregation.py)"
-python3 "$CODE_DIR/basinAggregation.py"
+python3 "$CODE_DIR/basinAggregation.py" --settings "$SETTINGS"
 
 echo ""
 echo "$(basename "$0"): Delineation ended at $(date)"

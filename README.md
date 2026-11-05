@@ -176,8 +176,7 @@ Place `Delineation-Workflow.slurm` at your study root, or keep it with the repo 
 study-root/                          ← where you run sbatch
 │
 ├── Delineation-Workflow.slurm
-├── study_settings.py                ← your paths (copy from study_settings.example.py)
-├── study_settings.example.py
+├── study_settings.py                ← DEM, lakes, gauges, and run settings
 ├── outlet_overrides.csv             optional
 ├── stream_conditioning.csv          optional
 │
@@ -223,7 +222,7 @@ Outputs define the preliminary watershed network used by subsequent scripts.
 
 ### `filterLakes.py`
 
-Filters HydroLAKES polygons to include only reservoirs intersecting the study basin.
+Filters the lake polygons from `study_settings.py` to those intersecting the study basin. HydroLAKES is the default file.
 
 Produces:
 
@@ -236,7 +235,7 @@ outputs/prep/
 
 ### `getGauges.py`
 
-Queries the HYDAT database to identify stream gauges located inside the basin.
+Finds stream gauges inside the basin. The default source is the WSC HYDAT database. Set `GAUGE_SOURCE = "file"` in `study_settings.py` to use a CSV or point file instead.
 
 Produces:
 
@@ -441,15 +440,15 @@ Before adapting the workflow to another watershed, verify the following settings
 
 ## `study_settings.py` (one file to edit per study)
 
-```bash
-cp study_settings.example.py study_settings.py
-```
-
-Set these three paths (relative to study root or absolute):
+Paths may be relative to the study root or absolute. Leave a setting out and the pipeline keeps the default shown in `study_settings.py`. `INPUT_HYDROLAKES` is still accepted as another name for `INPUT_LAKES`.
 
 - `INPUT_DEM` — elevation GeoTIFF
-- `INPUT_HYDAT_DB` — HYDAT SQLite database
-- `INPUT_HYDROLAKES` — HydroLAKES polygon shapefile
+- `INPUT_LAKES` — lake polygons. HydroLAKES by default. Map columns with `LAKE_COLUMNS` (`id`, `area` in km², optional `type`)
+- `LAKE_MIN_AREA_SQKM` — size limit (default 5 km²)
+- `LAKE_KEEP_TYPES` — type values to keep. Default `(2, 3)` keeps HydroLAKES reservoirs and regulated lakes at any size; other types must exceed the size limit. Set `LAKE_TYPES_MUST_MATCH = True` to keep only the listed types, and only when they also exceed the size limit
+- `GAUGE_SOURCE` — `hydat` (default, WSC HYDAT via `INPUT_HYDAT_DB`) or `file` (a CSV or point shapefile at `INPUT_GAUGES`, columns in `GAUGE_COLUMNS`)
+- `STREAM_THRESHOLD` — TauDEM stream-source area in cells (default 5555), used in all three passes
+- `MIN_SUB_AREA` — basin aggregation threshold in km² (default 100)
 
 Example for data in another project folder:
 
@@ -458,7 +457,7 @@ from pathlib import Path
 
 INPUT_DEM = Path("/project/6102189/m58song/ABLakeDelineation/dem/AB2_mrdem-30-dtm.tif")
 INPUT_HYDAT_DB = Path("/project/6102189/m58song/ABLakeDelineation/Hydat.sqlite3")
-INPUT_HYDROLAKES = Path("/project/6102189/m58song/ABLakeDelineation/hydrolake/HydroLAKES_polys_v10.shp")
+INPUT_LAKES = Path("/project/6102189/m58song/ABLakeDelineation/hydrolake/HydroLAKES_polys_v10.shp")
 ```
 
 Test before submitting:
@@ -474,49 +473,62 @@ All pipeline scripts read these via `code/pipeline_paths.py` automatically.
 
 ## `LAKE_DELINEATION_ROOT`
 
-This environment variable is the **study root**: the folder that holds `study_settings.py` and `outputs/`. Every Python script in `code/` resolves inputs and writes products from that folder (`outputs/final/`, `outputs/prep/`, and so on).
+This is the **study root**: the folder that receives `outputs/` and the base for relative paths in `study_settings.py`. Set it in that file:
 
-### Set it
+```python
+LAKE_DELINEATION_ROOT = None                              # folder that contains study_settings.py
+LAKE_DELINEATION_ROOT = Path("/path/to/your/study-root")  # write the study somewhere else
+```
+
+`None` is the default. The job uses the folder that contains the `study_settings.py` it loaded. Relative input paths (`dem/your-dem.tif`) are resolved against that root. Absolute paths are used as written. A path set here sends TauDEM and Python products to that other folder.
+
+An exported environment variable overrides the file:
 
 ```bash
 export LAKE_DELINEATION_ROOT=/path/to/your/study-root
 python3 /path/to/LakeDelineationTool/code/validate_study.py
 ```
 
-The study folder needs `study_settings.py` (copy from `study_settings.example.py`). Relative paths in that file (`dem/your-dem.tif`) are resolved against the study root. Absolute paths are used as written.
+To include outlet or stream overrides in a full run, put `outlet_overrides.csv` and `stream_conditioning.csv` in the study root. The slurm job changes to that folder before it reads them.
 
-To include outlet or stream overrides in the result, put `outlet_overrides.csv` and `stream_conditioning.csv` in that same folder. The pipeline reads them from the study root (`./outlet_overrides.csv`, `./stream_conditioning.csv`).
-
-The `code/` scripts do **not** have to live in the study folder. Point `LAKE_DELINEATION_ROOT` at the study and run the scripts from the repo (or any clone):
+The `code/` scripts do **not** have to live in the study folder. With the path set in `study_settings.py`, run the scripts from the folder that contains that file:
 
 ```bash
-export LAKE_DELINEATION_ROOT=/project/6102189/tylerrt/my-bow-study
-python3 ~/github-repos/LakeDelineationTool/code/basinAggregation.py
-python3 ~/github-repos/LakeDelineationTool/code/reproject.py --prj WGS84
+cd ~/github-repos/LakeDelineationTool
+python3 code/basinAggregation.py
+python3 code/reproject.py --prj WGS84
 ```
 
-`pipeline_paths.py` then reads `/project/.../my-bow-study/study_settings.py` and writes under `/project/.../my-bow-study/outputs/`.
+Products are written under the folder you set. Relative inputs are resolved there too.
 
-### Omit it
+### Leave it as None
 
-If the variable is unset, `pipeline_paths.py` uses `.` (the current working directory). That is enough when you have already `cd`'d to the study root:
+With `LAKE_DELINEATION_ROOT = None` and no exported variable, the root is the folder that contains the `study_settings.py` that was loaded. Pass that file with `--settings` and the command can start from any directory:
 
 ```bash
-cd /path/to/your/study-root
-python3 code/validate_study.py
+python3 code/getGauges.py --settings path/to/study_settings.py
 ```
 
-Do not `cd` into `code/` and run the scripts from there. `.` would then be `code/`, so the scripts would look for `code/study_settings.py` and write under `code/outputs/`.
+Relative paths in that file, and the default products under `outputs/`, use `path/to/`. You can also `cd` to that folder and run a script with no `--settings`. The script then loads `./study_settings.py`.
+
+### One step, or the whole workflow
+
+`sbatch Delineation-Workflow.slurm` runs the TauDEM passes and every Python step. Each Python step is called with `--settings` only, so it uses the defaults in `pipeline_paths.py` (Pass 1 streams, `fdr_lakes.tif`, prep lakes and gauges, final basins).
+
+To run one Python step yourself, pass the same `--settings`. Add a file flag only when that one file should come from somewhere else:
+
+```bash
+python3 code/filterLakes.py --settings study_settings.py
+python3 code/conditionLakes.py --settings study_settings.py --fdr /other/fdr.tif
+```
+
+A flag path is used as written. An absolute path is that file. A relative flag, such as `--fdr other/fdr.tif`, is read from the directory where you ran the command. The flag applies to that command only. It does not change `study_settings.py` or the defaults used the next time.
+
+`outlet_overrides.csv` and `stream_conditioning.csv` are read from the current directory (`./outlet_overrides.csv`, `./stream_conditioning.csv`). The slurm job `cd`s to the study root first, so those files belong there for a full run. Pass `--csv` when you start a script from another directory.
 
 ### Slurm vs a one-off script
 
-`Delineation-Workflow.slurm` uses the same variable. Uncomment this near the top of the slurm file (or export it before `sbatch`) to send **TauDEM and Python** products to that folder:
-
-```bash
-export LAKE_DELINEATION_ROOT="/project/6102189/tylerrt/my-bow-study"
-```
-
-That folder needs `study_settings.py`. Put `outlet_overrides.csv` and `stream_conditioning.csv` there as well when those overrides should be part of the result. `code/` can stay next to the slurm script (the submit directory). Leave the export unset and the job uses the directory where you ran `sbatch`, same as before. The slurm script `cd`s to the study root so those CSVs resolve there.
+`Delineation-Workflow.slurm` loads `study_settings.py` from the directory where you run `sbatch`. If that directory has no settings file, it uses the one next to the slurm script. `code/` is the folder next to the slurm script, so the script and the Python code can stay in the repo while the study folder only has `study_settings.py`. Leave `LAKE_DELINEATION_ROOT` as `None` to write outputs in the folder that contains the settings file that was loaded. Exporting `LAKE_DELINEATION_ROOT` before `sbatch` overrides the file.
 
 Job logs (`delineate_<jobid>.out`) still land in the submit directory, not the study folder.
 
@@ -528,15 +540,16 @@ Update:
 
 - `export PATH=...` — directory containing compiled TauDEM MPI binaries (see **Software requirements**)
 - `VENV` — path to activated venv (`pip install -r requirements.txt`; see **Software requirements**)
-- `STREAM_THRESHOLD`
 - `FLOWPATH_NCORES`
-- `LAKE_DELINEATION_ROOT` (optional) — study folder for `study_settings.py` and all outputs, including TauDEM. Leave unset to use the `sbatch` directory.
 
-`CODE_DIR` is `code/` next to where you ran `sbatch` (or under the study root if that is the only copy). Submit from the repo or from a study root that contains `code/`:
+`code/` is the folder next to `Delineation-Workflow.slurm`. Submit from the repo when `study_settings.py` is there too, or from a study folder that has its own `study_settings.py`:
 
 ```bash
-cd /path/to/your/study-root
+cd /path/to/LakeDelineationTool
 sbatch Delineation-Workflow.slurm
+
+cd /project/my-basin
+sbatch /path/to/LakeDelineationTool/Delineation-Workflow.slurm
 ```
 
 Ensure `module restore scimods` matches your cluster setup (FIR: **GDAL 3.9.1** + **mpi4py 4.0.0** modules) and that compiled TauDEM is on `PATH`.
@@ -554,7 +567,7 @@ Also verify:
 
 Update:
 
-- `MIN_AREA` (in script; lake-size filter in km²)
+- lake file, `LAKE_MIN_AREA_SQKM`, and `LAKE_KEEP_TYPES` (in `study_settings.py`)
 
 Input/output paths come from `pipeline_paths.py`.
 
@@ -628,23 +641,15 @@ outputs/prep/reservoir_io_nodes.shp
 
 ## `combiningBasins.py`
 
-Verify:
+Inputs default to the Pass 3 products, `outputs/prep/lakes.shp`, `outputs/prep/gauges.shp`, and `outputs/interim/taudem_pass3/snapped-outlets.shp` in `pipeline_paths.py`. Pass `--basins`, `--streams`, `--lakes`, `--outlets`, or `--gauges` to use a different file.
 
-- `PATHS`
-- `OVERRIDES_CSV`
-- `OUTPUT_DIR`
-- `GAUGE_SEARCH_RADIUS`
-- `MIN_INTERNAL_STREAM_LEN`
+`outlet_overrides.csv` in the study root is optional. `GAUGE_SEARCH_RADIUS` and `MIN_INTERNAL_STREAM_LEN` are set in the script.
 
 ---
 
 ## `cleanGeofabric.py`
 
-Update:
-
-- Input merged basins
-- Input streams
-- Gauge layer
+Inputs default to `outputs/working/basins_merged.shp`, `outputs/working/streams_merged.shp`, and `outputs/prep/gauges.shp`. Pass `--basins`, `--streams`, or `--gauges` to use a different file.
 
 Outputs:
 
@@ -658,17 +663,13 @@ outputs/final/
 
 ## `basinAggregation.py`
 
-Update:
-
-- Input basin layer
-- Input river layer
-- Output filenames
+Inputs default to `outputs/final/basins.shp` and `streams.shp`. Pass `--basins`, `--streams`, `--out-basins`, or `--out-streams` to use a different file.
 
 Review:
 
 - `area_km2` — local subbasin area (km²). Used if present; otherwise polygon area in m² × 10⁻⁶
 - `DSContArea` / `USContArea` — linear merges keep the upstream `USContArea` and downstream `DSContArea`; sideways merges sum `DSContArea`
-- `MIN_SUB_AREA` — merge threshold in km² applied to **local** area
+- `MIN_SUB_AREA` — merge threshold in km² applied to **local** area (`study_settings.py`, default 100)
 - `MIN_RIV_SLOPE`
 - `MIN_RIV_LENGTH`
 
@@ -697,8 +698,8 @@ Before running the workflow, stage the following datasets:
 | Dataset | Purpose |
 |----------|---------|
 | DEM (`.tif`) | Elevation model |
-| HydroLAKES polygons | Reservoir delineation |
-| HYDAT (`Hydat.sqlite3`) | Stream gauge database |
+| Lake polygons (`INPUT_LAKES`) | Reservoir delineation. HydroLAKES by default; another shapefile needs `LAKE_COLUMNS` |
+| Gauges | WSC HYDAT (`Hydat.sqlite3`) by default, or a CSV / point file when `GAUGE_SOURCE = "file"` |
 
 ---
 
@@ -722,7 +723,7 @@ TauDEM rasters and pass-specific vectors (single copy — not duplicated elsewhe
 
 ## `outputs/working/`
 
-Merged geofabric before final clean: `basins_merged.shp` and `streams_merged.shp`.
+Merged geofabric before the final clean: `basins_merged.shp` and `streams_merged.shp`.
 
 ## `outputs/prep/`
 

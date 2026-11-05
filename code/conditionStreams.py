@@ -46,6 +46,13 @@ import heapq
 import os
 import sys
 
+import study_cli
+
+if __name__ == "__main__":
+    study_cli.apply_settings_arg()
+
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -685,6 +692,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Condition flow directions along valley paths between CSV start/end points.",
     )
+    study_cli.add_settings_argument(parser)
     parser.add_argument(
         "--csv",
         default=DEFAULT_CSV,
@@ -695,12 +703,25 @@ if __name__ == "__main__":
             f"Default: {DEFAULT_CSV}"
         ),
     )
+    parser.add_argument("--dem", type=Path, help="Raw DEM. Default: INPUT_DEM in --settings.")
+    parser.add_argument("--fdr", type=Path, help="Flow-direction raster to edit.")
+    parser.add_argument("--lakes", type=Path, help="Filtered lake polygons. Cells inside lakes are left unchanged.")
+    parser.add_argument("--streams", type=Path, help="Pass 1 streams, used to snap the path start.")
     args = parser.parse_args()
 
+    dem_path = str(args.dem or INPUT_DEM)
+    fdr_path = str(args.fdr or FDR_CENTERLINE)
+    lakes_path = str(args.lakes or PREP_LAKES)
+    streams_path = str(args.streams or PASS1_STREAMS)
+    print(f"csv:     {args.csv}")
+    print(f"dem:     {dem_path}")
+    print(f"fdr:     {fdr_path}")
+    print(f"lakes:   {lakes_path}")
+    print(f"streams: {streams_path}")
     sys.exit(condition_streams(
         csv_path=args.csv,
-        dem_path=str(INPUT_DEM),
-        fdr_path=str(FDR_CENTERLINE),
-        lakes_path=str(PREP_LAKES),
-        streams_path=str(PASS1_STREAMS),
+        dem_path=dem_path,
+        fdr_path=fdr_path,
+        lakes_path=lakes_path,
+        streams_path=streams_path,
     ))

@@ -16,6 +16,11 @@ import re
 import sys
 from pathlib import Path
 
+import study_cli
+
+if __name__ == "__main__":
+    study_cli.apply_settings_arg()
+
 import geopandas as gpd
 from pyproj import CRS
 
@@ -65,6 +70,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Reproject aggregated basins and streams.",
     )
+    study_cli.add_settings_argument(parser)
     parser.add_argument(
         "--prj",
         type=parse_crs,
