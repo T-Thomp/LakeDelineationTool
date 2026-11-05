@@ -49,11 +49,15 @@
 # ------------------------------------------------------------
 #   DATA_DIR / LAKE_DELINEATION_ROOT
 #       Study folder: outputs/ (TauDEM + Python) and relative input paths.
-#       Default: the directory where you ran sbatch (LAKE_DELINEATION_ROOT = None).
-#       Set LAKE_DELINEATION_ROOT in study_settings.py to use another folder.
-#       An exported LAKE_DELINEATION_ROOT still overrides the file.
+#       Default: the folder that contains the study_settings.py that was loaded
+#       (LAKE_DELINEATION_ROOT = None). Set a path in that file to use another
+#       folder. An exported LAKE_DELINEATION_ROOT still overrides the file.
+#   study_settings.py
+#       The directory where you ran sbatch, if that file is there.
+#       Otherwise the copy next to this slurm script.
 #   CODE_DIR
-#       Python scripts. $SUBMIT_DIR/code if present, else $DATA_DIR/code.
+#       Python scripts next to this slurm script. If this script was started
+#       from the repo, $SUBMIT_DIR/code is the same folder.
 #
 # SETUP CHECKLIST (paths & knobs to edit when adapting this workflow)
 # --------------------------------------------------------------------
@@ -181,64 +185,61 @@ echo "$(basename "$0"): Delineation started at $(date)"
 # TauDEM:  self-built MPI binaries; add compiled install dir to PATH below.
 # Python:  source VENV before §2–§6 (geopandas, scipy, mpi4py, osgeo/gdal).
 # -----------------------------------------------------------------------------
+# Resolve directories before "module purge" so scontrol is still on PATH.
+
+# Directory where you ran sbatch. Slurm starts the job here.
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    SUBMIT_DIR="$SLURM_SUBMIT_DIR"
+else
+    SUBMIT_DIR="$(pwd)"
+fi
+
+# Folder that holds this slurm script and code/. Under sbatch the running
+# copy is in Slurm's spool, so recover the path that was passed to sbatch.
+# Do this before "module purge" so scontrol is still on PATH.
+SCRIPT_DIR=""
+if [[ -n "${SLURM_JOB_ID:-}" ]] && command -v scontrol >/dev/null 2>&1; then
+    SCRIPT_SRC="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null | sed -n 's/^[[:space:]]*Command=//p' | head -n 1)"
+    SCRIPT_SRC="${SCRIPT_SRC%% *}"
+    if [[ -n "$SCRIPT_SRC" && "$SCRIPT_SRC" != /* ]]; then
+        SCRIPT_SRC="$SUBMIT_DIR/$SCRIPT_SRC"
+    fi
+    if [[ -n "$SCRIPT_SRC" && -f "$SCRIPT_SRC" ]]; then
+        SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SRC")" && pwd)"
+    fi
+fi
+if [[ -z "$SCRIPT_DIR" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+# study_settings.py in the working directory wins. Otherwise use the copy
+# next to this script. An already-exported LAKE_DELINEATION_SETTINGS wins.
+if [[ -z "${LAKE_DELINEATION_SETTINGS:-}" ]]; then
+    if [[ -f "$SUBMIT_DIR/study_settings.py" ]]; then
+        export LAKE_DELINEATION_SETTINGS="$SUBMIT_DIR/study_settings.py"
+    elif [[ -f "$SCRIPT_DIR/study_settings.py" ]]; then
+        export LAKE_DELINEATION_SETTINGS="$SCRIPT_DIR/study_settings.py"
+    else
+        echo "ERROR: study_settings.py not found"
+        echo "  looked in: $SUBMIT_DIR/study_settings.py"
+        echo "  and:       $SCRIPT_DIR/study_settings.py"
+        exit 1
+    fi
+fi
+SETTINGS="$LAKE_DELINEATION_SETTINGS"
+
+if [[ -d "$SCRIPT_DIR/code" ]]; then
+    CODE_DIR="$SCRIPT_DIR/code"
+elif [[ -d "$SUBMIT_DIR/code" ]]; then
+    CODE_DIR="$SUBMIT_DIR/code"
+else
+    CODE_DIR=""
+fi
+
 module purge
 module restore scimods
 
 # export PATH="$HOME/taudem-build/taudem:$PATH"   # Set taudem:PATH here or set it in .bashrc file
-
-# Study folder comes from study_settings.py (LAKE_DELINEATION_ROOT).
-# None there means this submit directory. A path already exported in the
-# shell wins over the file.
-
-# Directory where you ran sbatch (not the read-only job spool copy). Used to find code/.
-if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
-    SUBMIT_DIR="$SLURM_SUBMIT_DIR"
-else
-    SUBMIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-fi
-
-if [[ -z "${LAKE_DELINEATION_ROOT:-}" && -f "$SUBMIT_DIR/study_settings.py" && -d "$SUBMIT_DIR/code" ]]; then
-    if ! ROOT_FROM_SETTINGS="$(
-        python3 "$SUBMIT_DIR/code/validate_study.py" \
-            --settings "$SUBMIT_DIR/study_settings.py" --query root
-    )"; then
-        echo "ERROR: could not read LAKE_DELINEATION_ROOT from $SUBMIT_DIR/study_settings.py"
-        exit 1
-    fi
-    if [[ -n "$ROOT_FROM_SETTINGS" ]]; then
-        export LAKE_DELINEATION_ROOT="$ROOT_FROM_SETTINGS"
-        export LAKE_DELINEATION_SETTINGS="$SUBMIT_DIR/study_settings.py"
-    fi
-fi
-
-if [[ -n "${LAKE_DELINEATION_ROOT:-}" ]]; then
-    if [[ ! -d "${LAKE_DELINEATION_ROOT}" ]]; then
-        echo "ERROR: LAKE_DELINEATION_ROOT is not a directory: ${LAKE_DELINEATION_ROOT}"
-        exit 1
-    fi
-    DATA_DIR="$(cd "${LAKE_DELINEATION_ROOT}" && pwd)"
-else
-    DATA_DIR="$SUBMIT_DIR"
-fi
-export LAKE_DELINEATION_ROOT="$DATA_DIR"
-
-if [[ -d "$SUBMIT_DIR/code" ]]; then
-    CODE_DIR="$SUBMIT_DIR/code"
-elif [[ -d "$DATA_DIR/code" ]]; then
-    CODE_DIR="$DATA_DIR/code"
-else
-    echo "ERROR: no code/ directory next to the slurm submit dir or under LAKE_DELINEATION_ROOT"
-    echo "  looked in: $SUBMIT_DIR/code"
-    echo "  and:       $DATA_DIR/code"
-    exit 1
-fi
-
-OUTPUT_ROOT="$DATA_DIR/outputs"
-INT_DIR="$OUTPUT_ROOT/interim/taudem_d8"       # Pass 1 & 2 TauDEM rasters/shapefiles
-PASS3_DIR="$OUTPUT_ROOT/interim/taudem_pass3"  # Pass 3 TauDEM outputs
-PREP_DIR="$OUTPUT_ROOT/prep"
-WORKING_DIR="$OUTPUT_ROOT/working"
-FINAL_DIR="$OUTPUT_ROOT/final"                 # Deliverables (basins, pour points)
 
 # STREAM_THRESHOLD is read from study_settings.py after the study check below.
 # It is the TauDEM stream-source area in cells, applied in all three passes.
@@ -258,24 +259,55 @@ FLOWPATH_NCORES=16
 
 VENV="/home/$USER/virtual-envs/scienv/bin/activate"
 
-mkdir -p "$INT_DIR" "$PASS3_DIR" "$PREP_DIR" "$WORKING_DIR" "$FINAL_DIR"
-cd "$DATA_DIR" || exit 1
-echo "Study root (LAKE_DELINEATION_ROOT): $DATA_DIR"
-echo "Python scripts (CODE_DIR):          $CODE_DIR"
-
-if [[ ! -f "${DATA_DIR}/study_settings.py" ]]; then
-    echo "ERROR: ${DATA_DIR}/study_settings.py not found"
-    echo "  Add study_settings.py in the study root."
-    echo "  Edit INPUT_DEM, INPUT_LAKES, and the gauge source, then re-submit."
+if [[ -z "$CODE_DIR" ]]; then
+    echo "ERROR: no code/ directory next to the slurm script or the submit directory"
+    echo "  looked in: $SCRIPT_DIR/code"
+    echo "  and:       $SUBMIT_DIR/code"
     exit 1
 fi
 
-if [[ -n "${LAKE_DELINEATION_SETTINGS:-}" ]]; then
-    SETTINGS="$LAKE_DELINEATION_SETTINGS"
-elif [[ -f "$DATA_DIR/study_settings.py" ]]; then
-    SETTINGS="$DATA_DIR/study_settings.py"
+# Study folder comes from the chosen study_settings.py. None there means the
+# folder that contains that file. A path already exported in the shell wins.
+if [[ -z "${LAKE_DELINEATION_ROOT:-}" ]]; then
+    if ! ROOT_FROM_SETTINGS="$(
+        python3 "$CODE_DIR/validate_study.py" --settings "$SETTINGS" --query root
+    )"; then
+        echo "ERROR: could not read LAKE_DELINEATION_ROOT from $SETTINGS"
+        exit 1
+    fi
+    if [[ -n "$ROOT_FROM_SETTINGS" ]]; then
+        export LAKE_DELINEATION_ROOT="$ROOT_FROM_SETTINGS"
+    fi
+fi
+
+if [[ -n "${LAKE_DELINEATION_ROOT:-}" ]]; then
+    if [[ ! -d "${LAKE_DELINEATION_ROOT}" ]]; then
+        echo "ERROR: LAKE_DELINEATION_ROOT is not a directory: ${LAKE_DELINEATION_ROOT}"
+        exit 1
+    fi
+    DATA_DIR="$(cd "${LAKE_DELINEATION_ROOT}" && pwd)"
 else
-    SETTINGS="$SUBMIT_DIR/study_settings.py"
+    DATA_DIR="$(cd "$(dirname "$SETTINGS")" && pwd)"
+fi
+export LAKE_DELINEATION_ROOT="$DATA_DIR"
+
+OUTPUT_ROOT="$DATA_DIR/outputs"
+INT_DIR="$OUTPUT_ROOT/interim/taudem_d8"       # Pass 1 & 2 TauDEM rasters/shapefiles
+PASS3_DIR="$OUTPUT_ROOT/interim/taudem_pass3"  # Pass 3 TauDEM outputs
+PREP_DIR="$OUTPUT_ROOT/prep"
+WORKING_DIR="$OUTPUT_ROOT/working"
+FINAL_DIR="$OUTPUT_ROOT/final"                 # Deliverables (basins, pour points)
+
+mkdir -p "$INT_DIR" "$PASS3_DIR" "$PREP_DIR" "$WORKING_DIR" "$FINAL_DIR"
+cd "$DATA_DIR" || exit 1
+echo "Study settings:                    $SETTINGS"
+echo "Study root (LAKE_DELINEATION_ROOT): $DATA_DIR"
+echo "Python scripts (CODE_DIR):          $CODE_DIR"
+
+if [[ ! -f "$SETTINGS" ]]; then
+    echo "ERROR: study_settings.py not found: $SETTINGS"
+    echo "  Edit INPUT_DEM, INPUT_LAKES, and the gauge source, then re-submit."
+    exit 1
 fi
 
 python3 "$CODE_DIR/validate_study.py" --settings "$SETTINGS" || exit 1

@@ -14,15 +14,16 @@ come from somewhere else:
   python3 code/filterLakes.py --settings study_settings.py
   python3 code/conditionLakes.py --settings study_settings.py --fdr /other/fdr.tif
 
-Place study_settings.py next to Delineation-Workflow.slurm. Paths below may be
-absolute, or relative to LAKE_DELINEATION_ROOT. Leave a setting out and the
-pipeline keeps the default shown here. INPUT_HYDROLAKES is still accepted as
-another name for INPUT_LAKES.
+Put this file in the directory where you run sbatch, or next to
+Delineation-Workflow.slurm. The job uses the one in the sbatch directory when
+both exist. Paths below may be absolute, or relative to LAKE_DELINEATION_ROOT.
+Leave a setting out and the pipeline keeps the default shown here.
+INPUT_HYDROLAKES is still accepted as another name for INPUT_LAKES.
 
 LAKE_DELINEATION_ROOT
     Folder that receives outputs/ and that relative paths below are based on.
-    None uses the folder that contains this file. Submit the slurm job from
-    that folder and this is also the sbatch directory.
+    None uses the folder that contains this file. That is the study folder
+    when you sbatch from the directory that holds this file.
     Set a path to keep this file with the code and write the study elsewhere:
         LAKE_DELINEATION_ROOT = Path("/project/your-study")
     A relative path is resolved from this file's folder.
