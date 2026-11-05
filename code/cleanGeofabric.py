@@ -1,4 +1,10 @@
 import argparse
+from pathlib import Path
+
+import study_cli
+
+if __name__ == "__main__":
+    study_cli.apply_settings_arg()
 
 import geopandas as gpd
 import pandas as pd
@@ -292,15 +298,23 @@ def add_gauge_info_to_basins(input_path, gauge_path, output_path):
     export_shapefile(attach_gauge_ids(basins, gauges), output_path)
 
 
-def run_clean_geofabric(*, delete_interim: bool | None = None) -> None:
+def run_clean_geofabric(
+    *,
+    delete_interim: bool | None = None,
+    basins_path: str | None = None,
+    streams_path: str | None = None,
+    gauges_path: str | None = None,
+    output_basins_path: str | None = None,
+    output_streams_path: str | None = None,
+) -> None:
     """Merge same-id basin polygons, fold catchments that have no channel, then clean streams."""
     ensure_output_dirs()
 
-    input_streams = str(WORKING_STREAMS_MERGED)
-    input_basins = str(WORKING_BASINS_MERGED)
-    input_gauges = str(PREP_GAUGES)
-    output_streams = str(FINAL_STREAMS)
-    output_basins = str(FINAL_BASINS)
+    input_streams = streams_path or str(WORKING_STREAMS_MERGED)
+    input_basins = basins_path or str(WORKING_BASINS_MERGED)
+    input_gauges = gauges_path or str(PREP_GAUGES)
+    output_streams = output_streams_path or str(FINAL_STREAMS)
+    output_basins = output_basins_path or str(FINAL_BASINS)
 
     basins = dissolve_split_basins(gpd.read_file(input_basins))
     gauges = strip_point_join_artifacts(gpd.read_file(input_gauges))
@@ -328,6 +342,12 @@ def run_clean_geofabric(*, delete_interim: bool | None = None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Clean geofabric and optionally remove TauDEM interim files.")
+    study_cli.add_settings_argument(parser)
+    parser.add_argument("--basins", type=Path, help="Merged basin polygons.")
+    parser.add_argument("--streams", type=Path, help="Merged stream network.")
+    parser.add_argument("--gauges", type=Path, help="Gauge points.")
+    parser.add_argument("--out-basins", type=Path, help="Clean basin shapefile.")
+    parser.add_argument("--out-streams", type=Path, help="Clean stream shapefile.")
     parser.add_argument(
         "--delete-interim",
         action="store_true",
@@ -346,7 +366,19 @@ def main() -> None:
     elif args.keep_interim:
         delete_interim = False
 
-    run_clean_geofabric(delete_interim=delete_interim)
+    print(f"basins:      {args.basins or WORKING_BASINS_MERGED}")
+    print(f"streams:     {args.streams or WORKING_STREAMS_MERGED}")
+    print(f"gauges:      {args.gauges or PREP_GAUGES}")
+    print(f"out-basins:  {args.out_basins or FINAL_BASINS}")
+    print(f"out-streams: {args.out_streams or FINAL_STREAMS}")
+    run_clean_geofabric(
+        delete_interim=delete_interim,
+        basins_path=str(args.basins) if args.basins else None,
+        streams_path=str(args.streams) if args.streams else None,
+        gauges_path=str(args.gauges) if args.gauges else None,
+        output_basins_path=str(args.out_basins) if args.out_basins else None,
+        output_streams_path=str(args.out_streams) if args.out_streams else None,
+    )
 
 
 if __name__ == "__main__":

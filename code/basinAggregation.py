@@ -44,8 +44,15 @@ two DSContArea values.
 
 from __future__ import annotations
 
+import argparse
 import csv
 import os
+from pathlib import Path
+
+import study_cli
+
+if __name__ == "__main__":
+  study_cli.apply_settings_arg()
 from collections import defaultdict
 from typing import Optional
 
@@ -60,6 +67,7 @@ from pipeline_paths import (
   FINAL_BASINS_AGG,
   FINAL_STREAMS,
   FINAL_STREAMS_AGG,
+  MIN_SUB_AREA,
   WORKING,
   ensure_output_dirs,
 )
@@ -94,7 +102,7 @@ OUTPUT_BASINS = str(FINAL_BASINS_AGG)
 OUTPUT_RIVERS = str(FINAL_STREAMS_AGG)
 MERGE_LOG_CSV = str(WORKING / "aggregation_merge_log.csv")
 
-MIN_SUB_AREA = 100.0              # km² — headwaters below this merge sideways
+# MIN_SUB_AREA (km²) comes from study_settings.py. Headwaters below it merge sideways.
 MIN_RIV_SLOPE = 0.0000001         # minimum accepted river slope (WATFLOOD manual)
 MIN_RIV_LENGTH = 1.0              # km — floor applied to output reach length
 
@@ -787,5 +795,23 @@ def run_aggregation(
 
 
 if __name__ == "__main__":
+  parser = argparse.ArgumentParser(
+    description="Aggregate small headwater subbasins.",
+  )
+  study_cli.add_settings_argument(parser)
+  parser.add_argument("--basins", type=Path, help="Clean basin polygons.")
+  parser.add_argument("--streams", type=Path, help="Clean stream network.")
+  parser.add_argument("--out-basins", type=Path, help="Aggregated basin shapefile.")
+  parser.add_argument("--out-streams", type=Path, help="Aggregated stream shapefile.")
+  args = parser.parse_args()
+  print(f"basins:      {args.basins or INPUT_BASINS}")
+  print(f"streams:     {args.streams or INPUT_RIVERS}")
+  print(f"out-basins:  {args.out_basins or OUTPUT_BASINS}")
+  print(f"out-streams: {args.out_streams or OUTPUT_RIVERS}")
   ensure_output_dirs()
-  run_aggregation()
+  run_aggregation(
+    basins_path=str(args.basins or INPUT_BASINS),
+    rivers_path=str(args.streams or INPUT_RIVERS),
+    output_basins_path=str(args.out_basins or OUTPUT_BASINS),
+    output_rivers_path=str(args.out_streams or OUTPUT_RIVERS),
+  )

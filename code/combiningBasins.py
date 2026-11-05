@@ -64,7 +64,14 @@ Outputs
   outputs/working/streams_merged.shp  -> streams with internal lake links dissolved
 """
 
+import argparse
 import os
+from pathlib import Path
+
+import study_cli
+
+if __name__ == "__main__":
+    study_cli.apply_settings_arg()
 
 import geopandas as gpd
 import numpy as np
@@ -75,6 +82,9 @@ from shapely.geometry import Point
 from utilities import load_overrides
 from pipeline_paths import (
     PATHS as PIPELINE_PATHS,
+    LAKE_AREA_COLUMN,
+    LAKE_ID_COLUMN,
+    LAKE_TYPE_COLUMN,
     PREP_GAUGES,
     PREP_LAKES,
     SNAPPED_OUTLETS,
@@ -164,6 +174,16 @@ def estimate_search_buffer(basins):
     diffs = diffs[diffs > 0]
     dem_res = np.min(diffs) if len(diffs) else 1.0
     return dem_res * 0.75
+
+
+def _lake_type_value(lake_row) -> int:
+    """Lake class from the study_settings type column. -1 when that column is absent."""
+    if not LAKE_TYPE_COLUMN or LAKE_TYPE_COLUMN not in lake_row.index:
+        return -1
+    value = pd.to_numeric(lake_row[LAKE_TYPE_COLUMN], errors="coerce")
+    if pd.isna(value):
+        return 1
+    return int(value)
 
 
 # ==============================================================================
@@ -535,7 +555,7 @@ def apply_lake_metrics(streams_dissolved, lake_metrics):
 # ==============================================================================
 # MAIN PIPELINE
 # ==============================================================================
-def process_reservoir_basins():
+def process_reservoir_basins(paths: dict[str, str] | None = None):
     """
     Orchestrate the full lake-merge workflow.
 
@@ -549,14 +569,15 @@ def process_reservoir_basins():
       5. Dissolve swallowed stream links; rewire DSLINKNO topology
       6. Export merged basins and streams
     """
+    paths = paths or PATHS
     print("Loading files...")
-    basins = gpd.read_file(PATHS["basins"])
-    lakes = gpd.read_file(PATHS["lakes"])
-    streams = gpd.read_file(PATHS["streams"])
-    intersection = gpd.read_file(PATHS["intersection"])
+    basins = gpd.read_file(paths["basins"])
+    lakes = gpd.read_file(paths["lakes"])
+    streams = gpd.read_file(paths["streams"])
+    intersection = gpd.read_file(paths["intersection"])
     from utilities import export_shapefile, strip_point_join_artifacts
 
-    gauges = strip_point_join_artifacts(gpd.read_file(PATHS["gauges"]))
+    gauges = strip_point_join_artifacts(gpd.read_file(paths["gauges"]))
 
     intersection["lake_id"] = parse_lake_id_column(intersection)
 
@@ -573,7 +594,12 @@ def process_reservoir_basins():
     buffer_dist = estimate_search_buffer(basins)
     cell_size = buffer_dist / 0.75  # reverse the 0.75 factor to get DEM resolution
 
-    lakes["Hylak_id"] = pd.to_numeric(lakes["Hylak_id"], errors="coerce").fillna(-2).astype(int)
+    if LAKE_ID_COLUMN not in lakes.columns:
+        raise KeyError(
+            f"Lake id column {LAKE_ID_COLUMN!r} is not on the lake file. "
+            "Set LAKE_COLUMNS['id'] in study_settings.py."
+        )
+    lakes[LAKE_ID_COLUMN] = pd.to_numeric(lakes[LAKE_ID_COLUMN], errors="coerce").fillna(-2).astype(int)
     basins["DN"] = basins["DN"].astype(int)
     streams["LINKNO"] = streams["LINKNO"].astype(int)
 
@@ -600,7 +626,7 @@ def process_reservoir_basins():
 
         out_pts = intersection[(intersection["lake_id"] == l_id) & (intersection["point_type"] == "outflow")]
         in_pts = intersection[(intersection["lake_id"] == l_id) & (intersection["point_type"] == "inflow")]
-        lake_polys = lakes[lakes["Hylak_id"] == l_id]
+        lake_polys = lakes[lakes[LAKE_ID_COLUMN] == l_id]
         if lake_polys.empty or out_pts.empty:
             continue
 
@@ -644,8 +670,13 @@ def process_reservoir_basins():
 
         merged_geom = swallowed_basins.geometry.union_all()
 
-        # HydroLAKES Lake_area is km²; convert to m² for the routing model
-        lake_area_km2 = float(pd.to_numeric(lake_polys.iloc[0]["Lake_area"], errors="coerce") or 0.0)
+        # Lake area column is km² (HydroLAKES Lake_area); convert to m².
+        if LAKE_AREA_COLUMN not in lake_polys.columns:
+            raise KeyError(
+                f"Lake area column {LAKE_AREA_COLUMN!r} is not on the lake file. "
+                "Set LAKE_COLUMNS['area'] in study_settings.py."
+            )
+        lake_area_km2 = float(pd.to_numeric(lake_polys.iloc[0][LAKE_AREA_COLUMN], errors="coerce") or 0.0)
         lake_area_m2 = lake_area_km2 * 1e6
         basin_area_m2 = float(merged_geom.area)
         lake_to_links[l_id] = list(internal_links)
@@ -664,7 +695,7 @@ def process_reservoir_basins():
         catchment_results.append({
             "DN": int(winner_id),
             "lake_id": l_id,
-            "lake_type": int(pd.to_numeric(lake_polys.iloc[0]["Lake_type"], errors="coerce") or 1),
+            "lake_type": _lake_type_value(lake_polys.iloc[0]),
             "geometry": merged_geom,
             "is_lake": 1,
             # Shapefile DBF fields are limited to 10 characters
@@ -751,4 +782,31 @@ def process_reservoir_basins():
 
 
 if __name__ == "__main__":
-    process_reservoir_basins()
+    parser = argparse.ArgumentParser(
+        description="Merge subbasins and stream links that a lake splits.",
+    )
+    study_cli.add_settings_argument(parser)
+    parser.add_argument("--basins", type=Path, help="Pass 3 watershed polygons.")
+    parser.add_argument("--streams", type=Path, help="Pass 3 stream network.")
+    parser.add_argument("--lakes", type=Path, help="Filtered lake polygons.")
+    parser.add_argument("--outlets", type=Path, help="Snapped pour points.")
+    parser.add_argument("--gauges", type=Path, help="Gauge points.")
+    args = parser.parse_args()
+
+    paths = dict(PATHS)
+    if args.basins is not None:
+        paths["basins"] = str(args.basins)
+    if args.streams is not None:
+        paths["streams"] = str(args.streams)
+    if args.lakes is not None:
+        paths["lakes"] = str(args.lakes)
+    if args.outlets is not None:
+        paths["intersection"] = str(args.outlets)
+    if args.gauges is not None:
+        paths["gauges"] = str(args.gauges)
+    print(f"basins:  {paths['basins']}")
+    print(f"streams: {paths['streams']}")
+    print(f"lakes:   {paths['lakes']}")
+    print(f"outlets: {paths['intersection']}")
+    print(f"gauges:  {paths['gauges']}")
+    process_reservoir_basins(paths)
