@@ -235,7 +235,7 @@ outputs/prep/
 
 ### `getGauges.py`
 
-Finds stream gauges inside the basin. The default source is the WSC HYDAT database. Set `GAUGE_SOURCE = "file"` in `study_settings.py` to use a CSV or point file instead.
+Finds stream gauges inside the basin from every file in `INPUT_GAUGES`. Each item has a name, a path, and columns. A SQLite file is read as WSC HYDAT, a CSV uses latitude and longitude, and a shapefile or other point file uses its geometry. Several files are written together to one gauge shapefile.
 
 Produces:
 
@@ -446,7 +446,7 @@ Paths may be relative to the study root or absolute. Leave a setting out and the
 - `INPUT_LAKES` — lake polygons. HydroLAKES by default. Map columns with `LAKE_COLUMNS` (`id`, `area` in km², optional `type`)
 - `LAKE_MIN_AREA_SQKM` — size limit (default 5 km²)
 - `LAKE_KEEP_TYPES` — type values to keep. Default `(2, 3)` keeps HydroLAKES reservoirs and regulated lakes at any size; other types must exceed the size limit. Set `LAKE_TYPES_MUST_MATCH = True` to keep only the listed types, and only when they also exceed the size limit
-- `GAUGE_SOURCE` — `hydat` (default, WSC HYDAT via `INPUT_HYDAT_DB`) or `file` (a CSV or point shapefile at `INPUT_GAUGES`, columns in `GAUGE_COLUMNS`)
+- `INPUT_GAUGES` — list of gauge files. Each item is `{"name", "path", "columns"}`. The suffix picks the reader: SQLite is HYDAT, `.csv` is a lat/lon table, and other files are points. `columns` maps `id`, `name`, `latitude`, and `longitude` for CSV and point files.
 - `STREAM_THRESHOLD` — TauDEM stream-source area in cells (default 5555), used in all three passes
 - `MIN_SUB_AREA` — basin aggregation threshold in km² (default 100)
 
@@ -456,7 +456,9 @@ Example for data in another project folder:
 from pathlib import Path
 
 INPUT_DEM = Path("/project/6102189/m58song/ABLakeDelineation/dem/AB2_mrdem-30-dtm.tif")
-INPUT_HYDAT_DB = Path("/project/6102189/m58song/ABLakeDelineation/Hydat.sqlite3")
+INPUT_GAUGES = [
+    {"name": "HYDAT", "path": Path("/project/6102189/m58song/ABLakeDelineation/Hydat.sqlite3")},
+]
 INPUT_LAKES = Path("/project/6102189/m58song/ABLakeDelineation/hydrolake/HydroLAKES_polys_v10.shp")
 ```
 
@@ -699,7 +701,7 @@ Before running the workflow, stage the following datasets:
 |----------|---------|
 | DEM (`.tif`) | Elevation model |
 | Lake polygons (`INPUT_LAKES`) | Reservoir delineation. HydroLAKES by default; another shapefile needs `LAKE_COLUMNS` |
-| Gauges | WSC HYDAT (`Hydat.sqlite3`) by default, or a CSV / point file when `GAUGE_SOURCE = "file"` |
+| Gauges | `INPUT_GAUGES`. SQLite is WSC HYDAT. CSV and point files can be listed beside it, each with its own columns |
 
 ---
 

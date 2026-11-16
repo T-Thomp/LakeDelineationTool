@@ -4,7 +4,7 @@ Study inputs and run settings.
 Edit the values below.
 
 The workflow has three inputs: the DEM, the lake polygons, and the gauges
-(HYDAT, or a CSV / point file). Everything else — Pass 1 streams, the flow
+(one or more SQLite, CSV, and point files). Everything else — Pass 1 streams, the flow
 direction raster, prep lakes, final basins — has a default path in
 pipeline_paths.py under the study root.
 
@@ -63,23 +63,21 @@ LAKE_TYPES_MUST_MATCH
     exceed the size limit.
     True: keep only the listed types, and only when they also exceed the size limit.
 
-GAUGE_SOURCE
-    "hydat" reads the WSC HYDAT SQLite database (active stations with discharge).
-    "file" reads a CSV or a point shapefile/geopackage and uses GAUGE_COLUMNS.
-
-INPUT_HYDAT_DB
-    HYDAT database. Required when GAUGE_SOURCE is "hydat".
-
 INPUT_GAUGES
-    CSV or point file. Used only when GAUGE_SOURCE is "file".
-    Example: Path("gauges.csv")
-
-GAUGE_COLUMNS
-    Column names in that CSV or point file.
+    Every gauge file for this study. Each item has a name, a path, and columns.
+    The suffix chooses the reader, so a study can list several of each:
+      .sqlite / .sqlite3 / .db   WSC HYDAT (active stations with discharge).
+                                 columns are not used; HYDAT's own names are.
+      .csv                       table of stations. latitude and longitude are
+                                 WGS84.
+      anything else              point file (.shp, .gpkg, ...). latitude and
+                                 longitude are used only when the file has no points.
+    columns:
       id         station id, written onward as STATION_NUMBER
       name       station name, written onward as STATION_NAME
-      latitude   required for a CSV (WGS84). Ignored when the file already has points.
-      longitude  required for a CSV (WGS84).
+      latitude   required for a CSV
+      longitude  required for a CSV
+    Leave columns out and those four HYDAT names are used.
 """
 
 from pathlib import Path
@@ -100,12 +98,13 @@ LAKE_MIN_AREA_SQKM = 5.0
 LAKE_KEEP_TYPES = (2, 3)
 LAKE_TYPES_MUST_MATCH = False
 
-GAUGE_SOURCE = "hydat"
-INPUT_HYDAT_DB = Path("Hydat.sqlite3")
-INPUT_GAUGES = None
-GAUGE_COLUMNS = {
-    "id": "STATION_NUMBER",
-    "name": "STATION_NAME",
-    "latitude": "LATITUDE",
-    "longitude": "LONGITUDE",
-}
+INPUT_GAUGES = [
+    {
+        "name": "HYDAT",
+        "path": Path("Hydat.sqlite3"),
+    },
+    # {"name": "provincial", "path": Path("provincial_gauges.shp"),
+    #  "columns": {"id": "STN_ID", "name": "STN_NAME"}},
+    # {"name": "extra", "path": Path("extra_gauges.csv"),
+    #  "columns": {"id": "id", "name": "station", "latitude": "lat", "longitude": "lon"}},
+]

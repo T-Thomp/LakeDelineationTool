@@ -17,9 +17,9 @@ outputs/
                           (+ paired stream shapefiles)
 
 The three study inputs live in study_settings.py: INPUT_DEM, INPUT_LAKES,
-and the gauge source (INPUT_HYDAT_DB or INPUT_GAUGES). This module turns
-those into absolute paths and defines the default product paths under the
-study root. A script flag such as --fdr or --lakes replaces one of those
+and the gauges listed in INPUT_GAUGES. This module
+turns those into absolute paths and defines the default product paths under
+the study root. A script flag such as --fdr or --lakes replaces one of those
 defaults for that run.
 """
 
@@ -170,41 +170,78 @@ if LAKE_KEEP_TYPES and LAKE_TYPE_COLUMN is None:
 STREAM_THRESHOLD = _positive_int(getattr(_settings, "STREAM_THRESHOLD", 5555), "STREAM_THRESHOLD")
 MIN_SUB_AREA = _positive_float(getattr(_settings, "MIN_SUB_AREA", 100.0), "MIN_SUB_AREA")
 
-GAUGE_SOURCE = str(getattr(_settings, "GAUGE_SOURCE", "hydat")).strip().lower()
-if GAUGE_SOURCE not in {"hydat", "file"}:
-    raise ValueError(
-        f"GAUGE_SOURCE must be 'hydat' or 'file', got {GAUGE_SOURCE!r}"
-    )
-
 _DEFAULT_GAUGE_COLUMNS = {
     "id": "STATION_NUMBER",
     "name": "STATION_NAME",
     "latitude": "LATITUDE",
     "longitude": "LONGITUDE",
 }
-GAUGE_COLUMNS = dict(_DEFAULT_GAUGE_COLUMNS)
-GAUGE_COLUMNS.update(getattr(_settings, "GAUGE_COLUMNS", None) or {})
+_SQLITE_SUFFIXES = {".sqlite", ".sqlite3", ".db"}
 
-_hydat_raw = getattr(_settings, "INPUT_HYDAT_DB", None)
-_gauge_file_raw = getattr(_settings, "INPUT_GAUGES", None)
-if GAUGE_SOURCE == "hydat":
-    if not _hydat_raw:
-        raise AttributeError(
-            f"{SETTINGS_FILE} must define INPUT_HYDAT_DB "
-            "when GAUGE_SOURCE is 'hydat'"
-        )
-    INPUT_HYDAT_DB = _study_path(_hydat_raw)
-    INPUT_GAUGES = _study_path(_gauge_file_raw) if _gauge_file_raw else None
+
+def gauge_kind(path: str | Path) -> str:
+    """SQLite is a HYDAT database. CSV is a table. Anything else is a point file."""
+    suffix = Path(path).suffix.lower()
+    if suffix in _SQLITE_SUFFIXES:
+        return "hydat"
+    if suffix == ".csv":
+        return "csv"
+    return "points"
+
+
+def gauge_entry(
+    path: str | Path,
+    name: str | None = None,
+    columns: dict | None = None,
+) -> dict:
+    """One INPUT_GAUGES item, with the file type taken from its suffix."""
+    resolved = Path(path).expanduser()
+    if not resolved.is_absolute():
+        resolved = _study_path(resolved)
+    else:
+        resolved = resolved.resolve()
+    kind = gauge_kind(resolved)
+    mapped = dict(_DEFAULT_GAUGE_COLUMNS)
+    if columns:
+        mapped.update(columns)
+    label = str(name).strip() if name else resolved.stem
+    if kind != "hydat" and not mapped.get("id"):
+        raise ValueError(f"{label} needs columns['id']")
+    return {"name": label, "path": resolved, "kind": kind, "columns": mapped}
+
+
+def _parse_gauge_entries(raw) -> list[dict]:
+    if raw is None or raw == "":
+        return []
+    items = raw if isinstance(raw, (list, tuple)) else [raw]
+    entries: list[dict] = []
+    for index, item in enumerate(items, start=1):
+        if isinstance(item, dict):
+            path = item.get("path")
+            if not path:
+                raise ValueError(f"INPUT_GAUGES entry {index} is missing its path")
+            entries.append(gauge_entry(path, item.get("name"), item.get("columns")))
+        else:
+            entries.append(gauge_entry(item))
+    return entries
+
+
+_gauge_raw = getattr(_settings, "INPUT_GAUGES", None)
+if _gauge_raw:
+    INPUT_GAUGES = _parse_gauge_entries(_gauge_raw)
 else:
-    if not _gauge_file_raw:
-        raise AttributeError(
-            f"{SETTINGS_FILE} must define INPUT_GAUGES "
-            "when GAUGE_SOURCE is 'file'"
-        )
-    INPUT_GAUGES = _study_path(_gauge_file_raw)
-    INPUT_HYDAT_DB = _study_path(_hydat_raw) if _hydat_raw else None
-    if not GAUGE_COLUMNS.get("id"):
-        raise ValueError("GAUGE_COLUMNS['id'] is required when GAUGE_SOURCE is 'file'")
+    # Older settings named the database separately. One HYDAT file is the same list.
+    _legacy_columns = dict(_DEFAULT_GAUGE_COLUMNS)
+    _legacy_columns.update(getattr(_settings, "GAUGE_COLUMNS", None) or {})
+    _hydat_raw = getattr(_settings, "INPUT_HYDAT_DB", None)
+    if not _hydat_raw:
+        raise AttributeError(f"{SETTINGS_FILE} must define INPUT_GAUGES")
+    INPUT_GAUGES = [gauge_entry(_hydat_raw, "HYDAT", _legacy_columns)]
+
+INPUT_HYDAT_DB = next(
+    (item["path"] for item in INPUT_GAUGES if item["kind"] == "hydat"),
+    None,
+)
 
 OUTPUT_ROOT = PROJECT_ROOT / "outputs"
 INTERIM = OUTPUT_ROOT / "interim"
@@ -251,7 +288,7 @@ FINAL_POUR_POINTS = FINAL / "pour_points.shp"
 PATHS: dict[str, str] = {
     "dem": str(INPUT_DEM),
     "hydat_db": str(INPUT_HYDAT_DB) if INPUT_HYDAT_DB else "",
-    "gauges_source": str(INPUT_GAUGES) if INPUT_GAUGES else "",
+    "gauges_source": ";".join(str(item["path"]) for item in INPUT_GAUGES),
     "hydrolakes": str(INPUT_LAKES),
     "pass1_basins": str(PASS1_BASINS),
     "pass1_streams": str(PASS1_STREAMS),

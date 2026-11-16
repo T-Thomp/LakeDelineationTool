@@ -13,10 +13,8 @@ if __name__ == "__main__":
 
 from pipeline_paths import (
     FDR_CENTERLINE,
-    GAUGE_SOURCE,
     INPUT_DEM,
     INPUT_GAUGES,
-    INPUT_HYDAT_DB,
     INPUT_LAKES,
     MIN_SUB_AREA,
     PROJECT_ROOT,
@@ -34,10 +32,8 @@ def _validate() -> int:
         ("DEM", INPUT_DEM),
         ("lakes", INPUT_LAKES),
     ]
-    if GAUGE_SOURCE == "hydat":
-        checks.append(("HYDAT", INPUT_HYDAT_DB))
-    else:
-        checks.append(("gauges", INPUT_GAUGES))
+    for entry in INPUT_GAUGES:
+        checks.append((entry["name"], entry["path"]))
 
     for label, path in checks:
         if path is None or not path.is_file():
@@ -53,10 +49,8 @@ def _validate() -> int:
     print(f"Study root: {PROJECT_ROOT}")
     print(f"DEM found: {INPUT_DEM}")
     print(f"Lakes found: {INPUT_LAKES}")
-    if GAUGE_SOURCE == "hydat":
-        print(f"HYDAT found: {INPUT_HYDAT_DB}")
-    else:
-        print(f"Gauges found: {INPUT_GAUGES}")
+    for entry in INPUT_GAUGES:
+        print(f"Gauges found ({entry['name']}, {entry['kind']}): {entry['path']}")
     print(f"Stream threshold (cells): {STREAM_THRESHOLD}")
     print(f"Aggregation threshold (km²): {MIN_SUB_AREA:g}")
     return 0
@@ -91,13 +85,13 @@ def main() -> int:
         print(INPUT_LAKES)
         return 0
     if args.query == "hydat":
-        print(INPUT_HYDAT_DB or "")
+        print("\n".join(str(item["path"]) for item in INPUT_GAUGES if item["kind"] == "hydat"))
         return 0
     if args.query == "gauges":
-        print(INPUT_GAUGES or "")
+        print("\n".join(str(item["path"]) for item in INPUT_GAUGES))
         return 0
     if args.query == "gauge-source":
-        print(GAUGE_SOURCE)
+        print("\n".join(f"{item['name']}: {item['kind']}" for item in INPUT_GAUGES))
         return 0
     if args.query == "fdr":
         print(FDR_CENTERLINE)

@@ -68,7 +68,7 @@
 #       LAKE_DELINEATION_ROOT -- None, or the folder for outputs and relative paths
 #       INPUT_DEM          -- elevation GeoTIFF
 #       INPUT_LAKES        -- lake polygons (HydroLAKES by default; column map in the file)
-#       GAUGE_SOURCE       -- hydat (WSC HYDAT) or file (CSV / point shapefile)
+#       INPUT_GAUGES       -- list of sqlite, CSV, and point files; type comes from the suffix
 #       STREAM_THRESHOLD   -- TauDEM stream source area (cell count)
 #       MIN_SUB_AREA       -- km² aggregation threshold (default 100)
 #       LAKE_MIN_AREA_SQKM / LAKE_KEEP_TYPES -- which lakes to keep
@@ -133,7 +133,7 @@
 # [ ] External / one-time inputs to stage before running
 #       INPUT_DEM path     -- in study_settings.py
 #       INPUT_LAKES        -- in study_settings.py (HydroLAKES, or your own polygons)
-#       gauges             -- INPUT_HYDAT_DB, or INPUT_GAUGES when GAUGE_SOURCE=file
+#       gauges             -- INPUT_GAUGES in study_settings.py
 #       outlet_overrides.csv -- optional manual lake-outlet overrides
 #
 # SOFTWARE REQUIREMENTS (modules + Python venv)
