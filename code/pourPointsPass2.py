@@ -119,6 +119,7 @@ def extract_reservoir_io_points(paths):
     raster_to_stream_transform = osr.CoordinateTransformation(src_srs, tgt_srs)
 
     final_lake_records = []
+    printed_trace_step = False
 
     # [2/5] Processing Boundary Intersections & Localized Graph Logic
     print("\n[2/5] Identifying and filtering candidate points...")
@@ -211,6 +212,9 @@ def extract_reservoir_io_points(paths):
         # =====================================================================
         # [3/5] Upstream/Downstream Network Tracing & Resolution
         # =====================================================================
+        if not printed_trace_step:
+            print("\n[3/5] Tracing inflow and outflow links...")
+            printed_trace_step = True
         
         # --- 3.1 INFLOW RESOLUTION (Most Upstream Only) ---
         final_inflows = []

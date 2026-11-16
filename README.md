@@ -24,12 +24,24 @@ The pipeline uses a **self-compiled TauDEM MPI build**, a **Python virtual envir
 
 ## TauDEM (self-built MPI)
 
-Download and compile [TauDEM](https://github.com/dtarb/taudem) with MPI enabled (not a cluster module).
+Download and compile [TauDEM](https://github.com/dtarb/TauDEM) with MPI enabled (not a cluster module). On FIR the bundled `config.cmake` hard-codes ARM Linux MPI compilers, so move it aside and let CMake use the Open MPI module:
+
+```bash
+module load StdEnv/2023 gcc openmpi cmake gdal/3.9.1
+git clone https://github.com/dtarb/TauDEM.git "$HOME/src/TauDEM"
+cd "$HOME/src/TauDEM"
+mv config.cmake config.cmake.arm
+mkdir build && cd build
+cmake ..
+cmake --build . -j
+```
+
+The programs (`pitremove`, `aread8`, and the rest) are written into that build directory. Point `PATH` at the folder that contains them.
 
 In `Delineation-Workflow.slurm`, point `PATH` at your build:
 
 ```bash
-export PATH="$HOME/taudem-build/taudem:$PATH"   # edit: your compiled TauDEM install
+export PATH="$HOME/src/TauDEM/build:$PATH"   # folder from the build above that contains pitremove
 ```
 
 ## Alliance FIR (tested setup)
@@ -90,6 +102,7 @@ Adapt `module restore scimods` in `Delineation-Workflow.slurm` to your site’s 
 | **fiona** | 1.10.1 | Shapefile driver (geopandas) |
 | **pyogrio** | 0.10.0 | GeoPackage / fast vector I/O (geopandas) |
 | **pyproj** | 3.7.1 | CRS transforms (geopandas) |
+| **pytest** | 8.3.4 | `tests/test_condition_streams.py`, `tests/test_condition_lakes_serial.py` |
 
 **mpi4py 4.0.0** — required only for parallel `conditionLakes.py` (`--ncores` > 1). On **FIR**: `module load mpi4py/4.0.0` (not pip). Elsewhere: `pip install mpi4py` or your site’s equivalent. A one-core run does not import it.
 
@@ -112,7 +125,7 @@ Standard hydrologic conditioning and watershed delineation
 Python preprocessing
 
 • filterLakes.py
-    Filter HydroLAKES reservoirs to the study basin
+    Keep lakes above the size limit, and the listed lake types at any size
 
 • getGauges.py
     Find stream gauges inside the basin
@@ -176,7 +189,7 @@ Place `Delineation-Workflow.slurm` at your study root, or keep it with the repo 
 study-root/                          ← where you run sbatch
 │
 ├── Delineation-Workflow.slurm
-├── study_settings.py                ← DEM, lakes, gauges, and run settings
+├── study_settings.example.py        ← copy to study_settings.py (not committed)
 ├── outlet_overrides.csv             optional
 ├── stream_conditioning.csv          optional
 │
@@ -196,7 +209,7 @@ study-root/                          ← where you run sbatch
     └── final/               Deliverables: basins, basins_aggregated, pour_points
 ```
 
-See `study_settings.py` for inputs and `code/pipeline_paths.py` for output layout constants.
+See `study_settings.example.py` for inputs and `code/pipeline_paths.py` for output layout constants. Copy the example to `study_settings.py` before a run.
 
 ---
 
@@ -313,7 +326,7 @@ For each row the script:
 A warning is printed if flow leaving that final end point runs back onto the path (move the end point further downstream). If the CSV does not exist, the step is skipped.
 
 ```bash
-python3 conditionStreams.py --csv stream_conditioning.csv
+python3 code/conditionStreams.py --csv stream_conditioning.csv
 ```
 
 Re-run it after any full `conditionLakes.py` run, which rebuilds `fdr_lakes.tif`.
@@ -440,7 +453,7 @@ Before adapting the workflow to another watershed, verify the following settings
 
 ## `study_settings.py` (one file to edit per study)
 
-Paths may be relative to the study root or absolute. Leave a setting out and the pipeline keeps the default shown in `study_settings.py`. `INPUT_HYDROLAKES` is still accepted as another name for `INPUT_LAKES`.
+Copy `study_settings.example.py` to `study_settings.py`. The copy is gitignored, so each study keeps its own paths. Paths may be relative to the study root or absolute. Leave a setting out and the pipeline keeps the default shown in the example. `INPUT_HYDROLAKES` is still accepted as another name for `INPUT_LAKES`.
 
 - `INPUT_DEM` — elevation GeoTIFF
 - `INPUT_LAKES` — lake polygons. HydroLAKES by default. Map columns with `LAKE_COLUMNS` (`id`, `area` in km², optional `type`)

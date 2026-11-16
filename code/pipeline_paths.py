@@ -314,7 +314,6 @@ PATHS: dict[str, str] = {
 }
 
 DELETE_INTERIM_ENV = "DELETE_INTERIM_FILES"
-_INTERIM_DELETE_DIRS = (TAUDEM_D8, TAUDEM_PASS3)
 
 _TRUTHY = frozenset({"1", "true", "yes", "on", "enabled"})
 _FALSY = frozenset({"0", "false", "no", "off", "disabled"})
@@ -349,29 +348,23 @@ def delete_interim_enabled(*, default: bool = False) -> bool:
 
 def delete_interim_outputs(*, enabled: bool | None = None, default: bool = False) -> list[Path]:
     """
-    Remove TauDEM Pass 1–3 rasters and vectors under ``outputs/interim/``.
+    Remove ``outputs/interim/``, including the folder itself.
 
-    Safe to call after ``cleanGeofabric.py`` — final and working products are kept.
-    Returns the list of removed directory paths (empty when disabled or already absent).
+    Safe to call after ``cleanGeofabric.py``. Final products and ``outputs/working/``
+    are kept. Returns the removed path, or an empty list when cleanup is off or
+    the folder is already gone.
     """
     if enabled is None:
         enabled = delete_interim_enabled(default=default)
     if not enabled:
         return []
+    if not INTERIM.exists():
+        print("Interim cleanup enabled but outputs/interim/ was not present.")
+        return []
 
-    removed: list[Path] = []
-    for path in _INTERIM_DELETE_DIRS:
-        if not path.exists():
-            continue
-        shutil.rmtree(path)
-        removed.append(path)
-        print(f"Removed interim directory: {path}")
-
-    if removed:
-        print(f"Interim cleanup complete ({len(removed)} director{'y' if len(removed) == 1 else 'ies'} removed).")
-    else:
-        print("Interim cleanup enabled but no interim directories were present.")
-    return removed
+    shutil.rmtree(INTERIM)
+    print(f"Removed interim directory: {INTERIM}")
+    return [INTERIM]
 
 
 def ensure_output_dirs() -> None:
