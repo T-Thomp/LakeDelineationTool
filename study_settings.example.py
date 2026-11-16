@@ -1,7 +1,8 @@
 """
 Study inputs and run settings.
 
-Edit the values below.
+Copy this file to study_settings.py and edit that copy. study_settings.py
+is not committed.
 
 The workflow has three inputs: the DEM, the lake polygons, and the gauges
 (one or more SQLite, CSV, and point files). Everything else — Pass 1 streams, the flow
@@ -26,6 +27,8 @@ LAKE_DELINEATION_ROOT
     when you sbatch from the directory that holds this file.
     Set a path to keep this file with the code and write the study elsewhere:
         LAKE_DELINEATION_ROOT = Path("/project/your-study")
+    For a home directory, use Path.home() / "project" / "your-study".
+    A quoted "~/..." string is not expanded.
     A relative path is resolved from this file's folder.
     Exporting LAKE_DELINEATION_ROOT in the shell overrides this value.
 
