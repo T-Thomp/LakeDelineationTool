@@ -12,30 +12,68 @@ outputs/
     taudem_d8/          Pass 1–2 TauDEM rasters and vectors
     taudem_pass3/       Pass 3 TauDEM rasters and vectors
   prep/                 Lake/gauge prep and pour-point intermediates
-  working/              Merged geofabric before final clean (+ HY sidecars)
+  working/              Merged geofabric before final clean
   final/                Deliverables: basins, basins_aggregated, pour_points
                           (+ paired stream shapefiles)
 
-Edit USER INPUTS at the top of this file when changing study area:
+Edit study_settings.py at your study root when changing study area:
   INPUT_DEM, INPUT_HYDAT_DB, INPUT_HYDROLAKES
+  (copy from study_settings.example.py)
 """
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 from pathlib import Path
 
-# =============================================================================
-# USER INPUTS — edit these when adapting to a new study area
-# =============================================================================
-INPUT_DEM = Path("dem/Sask-mrdem-30-dtm.tif")
-INPUT_HYDAT_DB = Path("Hydat.sqlite3")
-INPUT_HYDROLAKES = Path(
-    "~/bow-bassano/delineation-product/hydrolakes/HydroLAKES_polys_v10.shp"
-)
+# Study root: folder where you run sbatch (set by Delineation-Workflow.slurm).
+PROJECT_ROOT = Path(
+    os.environ.get("LAKE_DELINEATION_ROOT", ".")
+).expanduser().resolve()
 
-OUTPUT_ROOT = Path("outputs")
+
+def _study_path(relative_or_absolute: str | Path) -> Path:
+    """Resolve user inputs to absolute paths (follows symlinks)."""
+    path = Path(relative_or_absolute).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
+
+
+def _load_study_settings():
+    settings_path = PROJECT_ROOT / "study_settings.py"
+    if not settings_path.is_file():
+        example = PROJECT_ROOT / "study_settings.example.py"
+        raise FileNotFoundError(
+            f"Missing {settings_path}. "
+            f"Copy {example} to study_settings.py and set INPUT_DEM, "
+            "INPUT_HYDAT_DB, and INPUT_HYDROLAKES."
+        )
+
+    spec = importlib.util.spec_from_file_location("study_settings", settings_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load {settings_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    missing = [name for name in ("INPUT_DEM", "INPUT_HYDAT_DB", "INPUT_HYDROLAKES") if not hasattr(module, name)]
+    if missing:
+        raise AttributeError(
+            f"{settings_path} must define: {', '.join(missing)}"
+        )
+    return module
+
+
+_settings = _load_study_settings()
+
+INPUT_DEM = _study_path(_settings.INPUT_DEM)
+INPUT_HYDAT_DB = _study_path(_settings.INPUT_HYDAT_DB)
+INPUT_HYDROLAKES = _study_path(_settings.INPUT_HYDROLAKES)
+
+OUTPUT_ROOT = PROJECT_ROOT / "outputs"
 INTERIM = OUTPUT_ROOT / "interim"
 PREP = OUTPUT_ROOT / "prep"
 WORKING = OUTPUT_ROOT / "working"
@@ -63,18 +101,12 @@ SNAPPED_OUTLETS = TAUDEM_PASS3 / "snapped-outlets.shp"
 
 # Python preprocessing
 PREP_LAKES = PREP / "lakes.shp"
-PREP_LAKES_GPKG = PREP / "lakes.gpkg"
 PREP_GAUGES = PREP / "gauges.shp"
-PREP_GAUGES_GPKG = PREP / "gauges.gpkg"
-PREP_SELECTED_OUTLETS = PREP / "selected_outlets.shp"
 PREP_RESERVOIR_IO_NODES = PREP / "reservoir_io_nodes.shp"
 
 # Post-processing working copies
 WORKING_BASINS_MERGED = WORKING / "basins_merged.shp"
 WORKING_STREAMS_MERGED = WORKING / "streams_merged.shp"
-WORKING_GEOFABRIC_GPKG = WORKING / "geofabric.gpkg"
-WORKING_CATCHMENT_REGISTRY = WORKING / "catchment_registry.json"
-WORKING_HYDRO_NETWORK_JSON = WORKING / "hydrographic_network.json"
 
 # Final deliverables
 FINAL_BASINS = FINAL / "basins.shp"
@@ -99,16 +131,10 @@ PATHS: dict[str, str] = {
     "pass3_watersheds_tif": str(PASS3_WATERSHEDS_TIF),
     "snapped_outlets": str(SNAPPED_OUTLETS),
     "lakes": str(PREP_LAKES),
-    "lakes_gpkg": str(PREP_LAKES_GPKG),
     "gauges": str(PREP_GAUGES),
-    "gauges_gpkg": str(PREP_GAUGES_GPKG),
-    "selected_outlets": str(PREP_SELECTED_OUTLETS),
     "reservoir_io_nodes": str(PREP_RESERVOIR_IO_NODES),
     "working_basins_merged": str(WORKING_BASINS_MERGED),
     "working_streams_merged": str(WORKING_STREAMS_MERGED),
-    "geofabric_gpkg": str(WORKING_GEOFABRIC_GPKG),
-    "catchment_registry": str(WORKING_CATCHMENT_REGISTRY),
-    "hydro_network_json": str(WORKING_HYDRO_NETWORK_JSON),
     "final_basins": str(FINAL_BASINS),
     "final_streams": str(FINAL_STREAMS),
     "final_basins_aggregated": str(FINAL_BASINS_AGG),

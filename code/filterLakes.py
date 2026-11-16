@@ -2,7 +2,7 @@
 Filter HydroLAKES reservoirs to those intersecting the study basin.
 
 Called by Delineation-Workflow.slurm after TauDEM Pass 1 and before
-rasterFlowpathEdit.py.
+conditionLakes.py.
 
 Uses Pass 1 watershed polygons to define the basin mask, streams HydroLAKES
 via a WGS84 bounding box (memory-efficient), then applies area/reservoir
@@ -17,7 +17,6 @@ Inputs
 Outputs
 -------
   outputs/prep/lakes.shp
-  outputs/prep/lakes.gpkg  (optional, when HY_Features enabled)
 """
 
 from __future__ import annotations
@@ -26,13 +25,11 @@ from pathlib import Path
 
 import geopandas as gpd
 
-from hy_features.config import hy_features_enabled
 from pipeline_paths import (
     INPUT_HYDROLAKES,
     PASS1_BASINS,
     PASS1_STREAMS,
     PREP_LAKES,
-    PREP_LAKES_GPKG,
     ensure_output_dirs,
 )
 
@@ -44,11 +41,9 @@ PATHS = {
     "streams": str(PASS1_STREAMS),
     "hydrolakes": str(INPUT_HYDROLAKES),
     "output_shp": str(PREP_LAKES),
-    "output_gpkg": str(PREP_LAKES_GPKG),
 }
 
 MIN_AREA_SQKM = 5.0  # keep lakes larger than this (sq km), or any managed reservoir
-ENABLE_HY_FEATURES = False  # overridden by HY_FEATURES_ENABLED env var if set
 
 
 # ==============================================================================
@@ -96,17 +91,9 @@ def clip_lakes_to_basin(lakes: gpd.GeoDataFrame, basin_geom, target_crs) -> gpd.
 
 
 def export_filtered_lakes(lakes: gpd.GeoDataFrame, paths: dict[str, str]) -> None:
-    """Write shapefile and optional HY_Features GeoPackage sidecar."""
+    """Write the filtered lake shapefile."""
     output_shp = paths["output_shp"]
     Path(output_shp).parent.mkdir(parents=True, exist_ok=True)
-
-    if hy_features_enabled(default=ENABLE_HY_FEATURES):
-        from hy_features.enrich import enrich_waterbodies
-        from hy_features.export import export_geopackage
-
-        lakes = enrich_waterbodies(lakes)
-        export_geopackage({"waterbody": lakes}, paths["output_gpkg"])
-
     print(f"Saving {len(lakes)} filtered lakes to {output_shp}...")
     lakes.to_file(output_shp)
 
