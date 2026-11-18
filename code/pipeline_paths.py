@@ -32,11 +32,19 @@ from pathlib import Path
 
 
 def _study_path(relative_or_absolute: str | Path) -> Path:
-    """Resolve user inputs to absolute paths (follows symlinks)."""
+    """Resolve a study input against the study root.
+
+    A drive path, or a POSIX absolute path, is kept as written. Any other path
+    is under PROJECT_ROOT. A leading slash on Windows is not a drive path, and
+    joining it directly would discard the study root, so that slash is removed
+    first.
+    """
     path = Path(relative_or_absolute).expanduser()
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    return path.resolve()
+    if path.is_absolute():
+        return path.resolve()
+    if path.anchor:
+        path = Path(*path.parts[1:])
+    return (PROJECT_ROOT / path).resolve()
 
 
 def _settings_candidates() -> list[Path]:

@@ -44,6 +44,7 @@ MIN_SUB_AREA
 
 INPUT_LAKES
     Lake polygons GeoPandas can read (.shp, .gpkg, ...). HydroLAKES by default.
+    A relative path is under LAKE_DELINEATION_ROOT, same as INPUT_DEM.
 
 LAKE_COLUMNS
     Your column name for each value the workflow needs.
@@ -91,7 +92,7 @@ INPUT_DEM = Path("dem/your-dem.tif")
 STREAM_THRESHOLD = 5555
 MIN_SUB_AREA = 100.0
 
-INPUT_LAKES = Path("/path/to/HydroLAKES_polys_v10.shp")
+INPUT_LAKES = Path("hydrolake/HydroLAKES_polys_v10.shp")
 LAKE_COLUMNS = {
     "id": "Hylak_id",
     "area": "Lake_area",
