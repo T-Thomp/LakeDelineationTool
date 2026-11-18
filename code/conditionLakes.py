@@ -71,12 +71,14 @@ import geopandas as gpd
 from osgeo import gdal, ogr, osr
 from shapely import wkt as shapely_wkt
 from shapely.geometry import Point, box
+from shapely.ops import unary_union
 from scipy.ndimage import distance_transform_edt, binary_erosion, binary_dilation
 
 from utilities import load_overrides, off_domain_boundary_outlet
 from pipeline_paths import (
     FDR_CENTERLINE,
     LAKE_ID_COLUMN,
+    PASS1_BASINS,
     PASS1_STREAMS,
     PASS1_WATERSHEDS_TIF,
     PREP_GAUGES,
@@ -1120,9 +1122,9 @@ def lake_id_for_row(idx, lake_row):
     return str(lake_row.get(LAKE_ID_COLUMN, idx)).strip()
 
 
-def serialize_lake_row(idx, lake_row, neighbor_wkts=None, domain_outlet_wkt=None):
+def serialize_lake_row(idx, lake_row, neighbor_wkts=None, domain_outlet_wkt=None, geometry=None):
     """Convert a GeoDataFrame row into a picklable dict for worker processes."""
-    geometry = lake_row.geometry
+    geometry = lake_row.geometry if geometry is None else geometry
     return {
         "lake_id": lake_id_for_row(idx, lake_row),
         "geometry_wkt": geometry.wkt,
@@ -1152,21 +1154,19 @@ def _cell_for_map_point(point, gt, xoff, yoff, lake_mask):
     return int(row), int(col)
 
 
-def _outward_fdr(win_rc, xoff, yoff, raster_size, lake_mask):
-    """D8 code at the outlet cell that steps off the raster, or out of the lake."""
+def _fdr_out_of_domain(win_rc, lake_mask, on_domain):
+    """D8 code that steps out of the geofabric, or out of the on-domain lake."""
     r, c = win_rc
-    global_r = yoff + r
-    global_c = xoff + c
-    raster_w, raster_h = raster_size
     height, width = lake_mask.shape
-    for code, (dr, dc) in D8_OFFSETS.items():
-        if not (0 <= global_r + dr < raster_h and 0 <= global_c + dc < raster_w):
-            return code
+    leave_lake = None
     for code, (dr, dc) in D8_OFFSETS.items():
         nr, nc = r + dr, c + dc
-        if not (0 <= nr < height and 0 <= nc < width) or not lake_mask[nr, nc]:
+        inside = 0 <= nr < height and 0 <= nc < width
+        if inside and not on_domain[nr, nc]:
             return code
-    return 1
+        if leave_lake is None and not (inside and lake_mask[nr, nc]):
+            leave_lake = code
+    return leave_lake if leave_lake is not None else 1
 
 
 def process_single_lake(
@@ -1220,8 +1220,20 @@ def process_single_lake(
     surviving_candidates = filter_upstream_duplicates(preliminary_outlets, link_to_downstream)
 
     domain_outlet = None
+    routed_mask = lake_mask
+    inside_dem = np.ones(lake_mask.shape, dtype=bool)
     if domain_outlet_wkt and (overrides_gdf.empty or overrides_gdf[overrides_gdf["lake_id"] == lake_id].empty):
-        domain_outlet = _cell_for_map_point(shapely_wkt.loads(domain_outlet_wkt), gt, xoff, yoff, lake_mask)
+        fdr_nodata = fdr_band.GetNoDataValue()
+        if fdr_nodata is not None:
+            inside_dem &= fdr_win != fdr_nodata
+        watershed_nodata = w_band.GetNoDataValue()
+        if watershed_nodata is not None:
+            inside_dem &= w_win != watershed_nodata
+        # Only lake cells on the DEM are edited. The part past the edge is left alone.
+        routed_mask = lake_mask & inside_dem
+        domain_outlet = _cell_for_map_point(
+            shapely_wkt.loads(domain_outlet_wkt), gt, xoff, yoff, routed_mask,
+        )
 
     if domain_outlet is not None:
         chosen_outlet = {"win_rc": domain_outlet, "point": None, "link_no": -1, "local_accum": -1}
@@ -1251,15 +1263,18 @@ def process_single_lake(
         return None
 
     lock_target_value = selection_type in ("override_snapped", "algorithmic_stream")
+    route_mask = routed_mask if selection_type == "domain_boundary" else lake_mask
     updated_fdr_win = route_centerline_to_target(
         fdr_win,
-        lake_mask,
+        route_mask,
         chosen_outlet["win_rc"],
         lock_target_value=lock_target_value,
     )
-    if selection_type == "domain_boundary" and raster_size is not None:
+    if selection_type == "domain_boundary":
         rr, cc = chosen_outlet["win_rc"]
-        updated_fdr_win[rr, cc] = _outward_fdr((rr, cc), xoff, yoff, raster_size, lake_mask)
+        if inside_dem[rr, cc]:
+            updated_fdr_win[rr, cc] = _fdr_out_of_domain((rr, cc), route_mask, inside_dem)
+        updated_fdr_win = np.where(inside_dem, updated_fdr_win, fdr_win)
 
     if is_carved_override and breakout_path:
         for current_node, parent_node in breakout_path:
@@ -1578,9 +1593,8 @@ def process_raster_reservoir_routing(
 
         lakes = lakes.to_crs(raster_proj)
         streams_on_raster = streams_gdf.to_crs(raster_proj)
-        raster_xs = (gt[0], gt[0] + raster_size[0] * gt[1])
-        raster_ys = (gt[3], gt[3] + raster_size[1] * gt[5])
-        raster_domain = box(min(raster_xs), min(raster_ys), max(raster_xs), max(raster_ys))
+        geofabric = gpd.read_file(PASS1_BASINS).to_crs(raster_proj)
+        geofabric_domain = geofabric.geometry.union_all()
         lake_through_linknos = build_lake_through_stream_linknos(lakes, streams_gdf)
 
         if not os.path.exists(gauges_vector_path):
@@ -1620,24 +1634,36 @@ def process_raster_reservoir_routing(
         manual_outlet_ids = set()
         if os.path.exists(overrides_csv_path):
             manual_outlet_ids = set(load_overrides(overrides_csv_path, raster_proj)["lake_id"])
+        positions_by_id = {}
+        for position in selected_positions:
+            row = lakes.iloc[position]
+            positions_by_id.setdefault(lake_id_for_row(lakes.index[position], row), []).append(position)
+        seen_lake_ids = set()
         for position in selected_positions:
             idx = lakes.index[position]
             row = lakes.iloc[position]
-            neighbor_wkts = (
-                neighbor_lake_wkts(lakes, position, row.geometry) if mode == "override" else None
-            )
             lake_id = lake_id_for_row(idx, row)
+            if lake_id in seen_lake_ids:
+                continue
+            seen_lake_ids.add(lake_id)
+            part_geoms = [lakes.iloc[part].geometry for part in positions_by_id[lake_id]]
+            lake_geometry = part_geoms[0] if len(part_geoms) == 1 else unary_union(part_geoms)
+            neighbor_wkts = (
+                neighbor_lake_wkts(lakes, position, lake_geometry) if mode == "override" else None
+            )
             domain_outlet_wkt = None
             if lake_id not in manual_outlet_ids:
-                found = off_domain_boundary_outlet(row.geometry, raster_domain, streams_on_raster)
+                found = off_domain_boundary_outlet(lake_geometry, geofabric_domain, streams_on_raster)
                 if found is not None:
                     print(
                         f"Warning: lake {lake_id} is off the geofabric domain. "
                         "Outlet set to the center of the lake on the domain boundary."
                     )
                     domain_outlet_wkt = found[0].wkt
-            lake_cell_counts.append(estimate_lake_grid_cells(row.geometry, cell_size))
-            lake_rows.append(serialize_lake_row(idx, row, neighbor_wkts, domain_outlet_wkt))
+            lake_cell_counts.append(estimate_lake_grid_cells(lake_geometry, cell_size))
+            lake_rows.append(serialize_lake_row(
+                idx, row, neighbor_wkts, domain_outlet_wkt, geometry=lake_geometry,
+            ))
 
         paths = {
             "fdr_raster_path": fdr_raster_path,

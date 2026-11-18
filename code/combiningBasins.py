@@ -87,6 +87,7 @@ from pipeline_paths import (
     LAKE_TYPE_COLUMN,
     PREP_GAUGES,
     PREP_LAKES,
+    PASS1_BASINS,
     PASS3_WATERSHEDS_TIF,
     SNAPPED_OUTLETS,
     WORKING,
@@ -607,7 +608,8 @@ def process_reservoir_basins(paths: dict[str, str] | None = None):
     intersection = intersection.to_crs(target_crs)
     basins = basins.to_crs(target_crs)
     gauges = gauges.to_crs(target_crs)
-    domain = basins.geometry.union_all()
+    geofabric = gpd.read_file(PASS1_BASINS).to_crs(target_crs)
+    domain = geofabric.geometry.union_all()
 
     overrides_gdf = load_overrides(OVERRIDES_CSV, target_crs.to_wkt())
     link_to_dout, link_to_accum, link_to_downstream, link_to_strmorder = build_stream_lookup_tables(streams)
@@ -651,7 +653,7 @@ def process_reservoir_basins(paths: dict[str, str] | None = None):
         if lake_polys.empty:
             continue
 
-        lake_geom = lake_polys.geometry.iloc[0]
+        lake_geom = lake_polys.geometry.union_all()
         has_override = not overrides_gdf[overrides_gdf["lake_id"] == str(l_id)].empty
         boundary_outlet = None if has_override else off_domain_boundary_outlet(lake_geom, domain, streams)
 
@@ -694,6 +696,12 @@ def process_reservoir_basins(paths: dict[str, str] | None = None):
         # Always swallow the winning outlet link so the merged unit keeps that DN
         # and the original winner polygon is not left behind.
         internal_links.add(winner_id)
+        if boundary_outlet is not None:
+            # Every on-domain piece of this lake joins the same merged basin.
+            on_domain_lake = lake_geom.intersection(domain)
+            if not on_domain_lake.is_empty:
+                touched = basins[basins.geometry.intersects(on_domain_lake)]
+                internal_links.update(int(value) for value in touched["DN"])
 
         # Union subbasins whose DN matches swallowed internal links
         swallowed_basins = basins[basins["DN"].isin(internal_links)]

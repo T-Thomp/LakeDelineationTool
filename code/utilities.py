@@ -56,66 +56,99 @@ def _line_parts(geom):
     return []
 
 
-def _boundary_center(lake_geom, domain_geom):
-    """Mid-point of where the lake meets the domain edge, kept on that edge."""
-    crossing = lake_geom.intersection(domain_geom.boundary)
-    if crossing.is_empty:
-        return None
-    center = crossing.centroid
-    if crossing.geom_type == "Point":
-        return crossing
-    return nearest_points(center, crossing)[1]
+def _geom_parts(geom):
+    if geom is None or geom.is_empty:
+        return []
+    if geom.geom_type == "GeometryCollection":
+        parts = []
+        for piece in geom.geoms:
+            parts.extend(_geom_parts(piece))
+        return parts
+    if geom.geom_type.startswith("Multi"):
+        return [piece for piece in geom.geoms if not piece.is_empty]
+    return [geom]
+
+
+def _on_domain_boundary(point, domain_geom, tolerance):
+    return point is not None and domain_geom.boundary.distance(point) <= tolerance
 
 
 def off_domain_boundary_outlet(lake_geom, domain_geom, streams):
-    """Outlet for a lake that runs off the geofabric and dies there.
+    """Outlet where a lake runs off the geofabric.
 
-    Returns ``(point, link_id)`` when the lake is not fully inside ``domain_geom``
-    and the most downstream stream end inside the lake is a terminal link
-    (``DSLINKNO`` <= 0). The point is the center of the lake on the domain
-    boundary. Returns None otherwise.
+    ``domain_geom`` is the basin coverage, not the raster rectangle. Returns
+    ``(point, link_id)`` when part of the lake lies outside that coverage and a
+    stream in the lake is terminal or meets the domain edge. The point is the
+    midpoint of that exit, on the domain boundary. Several exits use the most
+    downstream one. Returns None when the lake is inside the domain or the
+    stream keeps going to a real downstream link.
     """
     if lake_geom is None or lake_geom.is_empty or domain_geom is None or domain_geom.is_empty:
         return None
     if not lake_geom.is_valid:
         lake_geom = lake_geom.buffer(0)
-    if domain_geom.covers(lake_geom):
+    if not domain_geom.is_valid:
+        domain_geom = domain_geom.buffer(0)
+
+    outside = lake_geom.difference(domain_geom)
+    if outside.is_empty or outside.area <= 0:
         return None
 
-    hits = streams.iloc[streams.sindex.query(lake_geom, predicate="intersects")]
+    crossings = [
+        part for part in _geom_parts(lake_geom.intersection(domain_geom.boundary))
+        if part.geom_type in ("LineString", "LinearRing", "Point") and part.length >= 0
+    ]
+    crossings = [part for part in crossings if part.geom_type == "Point" or part.length > 0]
+    if not crossings:
+        return None
+
+    edge_tolerance = max(domain_geom.length, 1.0) * 1e-9
+    hits = streams.iloc[list(streams.sindex.query(lake_geom, predicate="intersects"))]
     if hits.empty:
         return None
 
-    best = None
-    best_dout = float("inf")
+    qualified = []
     for _, row in hits.iterrows():
-        ends_inside = False
+        dout = pd.to_numeric(row.get("DOUTEND"), errors="coerce")
+        dout = float(dout) if pd.notna(dout) else float("inf")
+        try:
+            downstream = int(row["DSLINKNO"])
+        except (TypeError, ValueError):
+            downstream = -1
+        ends = []
         for line in _line_parts(row.geometry):
             if len(line.coords) < 2:
                 continue
-            if lake_geom.intersects(Point(line.coords[-1])):
-                ends_inside = True
-                break
-        if not ends_inside:
+            for coord in (line.coords[0], line.coords[-1]):
+                end = Point(coord)
+                if lake_geom.intersects(end):
+                    ends.append(end)
+            edge_hit = line.intersection(domain_geom.boundary)
+            for piece in _geom_parts(edge_hit):
+                if piece.geom_type == "Point":
+                    ends.append(piece)
+                elif piece.geom_type in ("LineString", "LinearRing") and piece.length > 0:
+                    ends.append(piece.interpolate(0.5, normalized=True))
+        if not ends:
             continue
-        dout = pd.to_numeric(row.get("DOUTEND"), errors="coerce")
-        dout = float(dout) if pd.notna(dout) else float("inf")
-        if dout < best_dout:
-            best_dout = dout
-            best = row
-    if best is None:
-        return None
-    try:
-        downstream = int(best["DSLINKNO"])
-    except (TypeError, ValueError):
-        downstream = -1
-    if downstream > 0:
+        touches_edge = any(_on_domain_boundary(end, domain_geom, edge_tolerance) for end in ends)
+        if downstream > 0 and not touches_edge:
+            continue
+        anchor = min(ends, key=lambda end: min(part.distance(end) for part in crossings))
+        qualified.append((dout, anchor, int(row["LINKNO"])))
+
+    if not qualified:
         return None
 
-    point = _boundary_center(lake_geom, domain_geom)
-    if point is None:
-        return None
-    return point, int(best["LINKNO"])
+    _dout, anchor, link_id = min(qualified, key=lambda item: item[0])
+    exit_part = min(crossings, key=lambda part: part.distance(anchor))
+    if exit_part.geom_type == "Point":
+        point = exit_part
+    else:
+        point = exit_part.interpolate(0.5, normalized=True)
+    if not _on_domain_boundary(point, domain_geom, edge_tolerance):
+        point = nearest_points(point, domain_geom.boundary)[1]
+    return point, link_id
 
 
 def rename_shapefile_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
