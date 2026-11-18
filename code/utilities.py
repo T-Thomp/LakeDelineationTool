@@ -11,8 +11,8 @@ from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import LineString, MultiLineString
-from shapely.ops import unary_union
+from shapely.geometry import LineString, MultiLineString, Point
+from shapely.ops import nearest_points, unary_union
 
 # ESRI Shapefile limits: 10-character column names, 254-character strings.
 SHAPEFILE_MAX_NAME = 10
@@ -44,6 +44,78 @@ def strip_point_join_artifacts(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     if not cols:
         return gdf
     return gdf.drop(columns=cols)
+
+
+def _line_parts(geom):
+    if geom is None or geom.is_empty:
+        return []
+    if geom.geom_type == "LineString":
+        return [geom]
+    if geom.geom_type == "MultiLineString":
+        return [part for part in geom.geoms if not part.is_empty]
+    return []
+
+
+def _boundary_center(lake_geom, domain_geom):
+    """Mid-point of where the lake meets the domain edge, kept on that edge."""
+    crossing = lake_geom.intersection(domain_geom.boundary)
+    if crossing.is_empty:
+        return None
+    center = crossing.centroid
+    if crossing.geom_type == "Point":
+        return crossing
+    return nearest_points(center, crossing)[1]
+
+
+def off_domain_boundary_outlet(lake_geom, domain_geom, streams):
+    """Outlet for a lake that runs off the geofabric and dies there.
+
+    Returns ``(point, link_id)`` when the lake is not fully inside ``domain_geom``
+    and the most downstream stream end inside the lake is a terminal link
+    (``DSLINKNO`` <= 0). The point is the center of the lake on the domain
+    boundary. Returns None otherwise.
+    """
+    if lake_geom is None or lake_geom.is_empty or domain_geom is None or domain_geom.is_empty:
+        return None
+    if not lake_geom.is_valid:
+        lake_geom = lake_geom.buffer(0)
+    if domain_geom.covers(lake_geom):
+        return None
+
+    hits = streams.iloc[streams.sindex.query(lake_geom, predicate="intersects")]
+    if hits.empty:
+        return None
+
+    best = None
+    best_dout = float("inf")
+    for _, row in hits.iterrows():
+        ends_inside = False
+        for line in _line_parts(row.geometry):
+            if len(line.coords) < 2:
+                continue
+            if lake_geom.intersects(Point(line.coords[-1])):
+                ends_inside = True
+                break
+        if not ends_inside:
+            continue
+        dout = pd.to_numeric(row.get("DOUTEND"), errors="coerce")
+        dout = float(dout) if pd.notna(dout) else float("inf")
+        if dout < best_dout:
+            best_dout = dout
+            best = row
+    if best is None:
+        return None
+    try:
+        downstream = int(best["DSLINKNO"])
+    except (TypeError, ValueError):
+        downstream = -1
+    if downstream > 0:
+        return None
+
+    point = _boundary_center(lake_geom, domain_geom)
+    if point is None:
+        return None
+    return point, int(best["LINKNO"])
 
 
 def rename_shapefile_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:

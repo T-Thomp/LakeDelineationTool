@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 from osgeo import gdal, ogr, osr
-from shapely.geometry import Point
+from shapely.geometry import Point, box
 from scipy.ndimage import binary_erosion
 
 from pipeline_paths import (
@@ -26,7 +26,7 @@ from pipeline_paths import (
     TAUDEM_D8,
     ensure_output_dirs,
 )
-from utilities import export_shapefile, strip_point_join_artifacts
+from utilities import export_shapefile, off_domain_boundary_outlet, strip_point_join_artifacts
 
 # Enable GDAL exceptions to catch raster I/O issues cleanly
 gdal.UseExceptions()
@@ -106,6 +106,10 @@ def extract_reservoir_io_points(paths):
     raster_proj = ds_fdr.GetProjection()
     
     lakes = lakes.to_crs(raster_proj)
+    streams_on_raster = streams_gdf.to_crs(raster_proj)
+    raster_xs = (gt[0], gt[0] + ds_fdr.RasterXSize * gt[1])
+    raster_ys = (gt[3], gt[3] + ds_fdr.RasterYSize * gt[5])
+    raster_domain = box(min(raster_xs), min(raster_ys), max(raster_xs), max(raster_ys))
 
     src_srs = osr.SpatialReference()
     src_srs.ImportFromWkt(raster_proj)
@@ -307,6 +311,21 @@ def extract_reservoir_io_points(paths):
                     resolved_inflows.append(inf) 
             else:
                 resolved_inflows.append(inf)
+
+        # A lake that leaves the DEM and dies inside the polygon gets its outlet
+        # at the center of the lake on the raster edge, not at that false end.
+        boundary_outlet = off_domain_boundary_outlet(geom, raster_domain, streams_on_raster)
+        if boundary_outlet is not None:
+            print(
+                f"Warning: lake {lake_id} is off the geofabric domain. "
+                "Outlet set to the center of the lake on the domain boundary."
+            )
+            outlet_point, _terminal_link = boundary_outlet
+            transformed_pt = raster_to_stream_transform.TransformPoint(outlet_point.x, outlet_point.y)
+            final_lake_records.append({
+                'lake_id': lake_id, 'flow_type': 'outflow', 'geometry': Point(transformed_pt[0], transformed_pt[1])
+            })
+            final_outflows = []
 
         # Save Projected Records using cell-centering offsets (+0.5)
         for out in final_outflows:

@@ -79,7 +79,7 @@ import pandas as pd
 import shapely
 from shapely.geometry import Point
 
-from utilities import load_overrides
+from utilities import load_overrides, off_domain_boundary_outlet
 from pipeline_paths import (
     PATHS as PIPELINE_PATHS,
     LAKE_AREA_COLUMN,
@@ -607,6 +607,7 @@ def process_reservoir_basins(paths: dict[str, str] | None = None):
     intersection = intersection.to_crs(target_crs)
     basins = basins.to_crs(target_crs)
     gauges = gauges.to_crs(target_crs)
+    domain = basins.geometry.union_all()
 
     overrides_gdf = load_overrides(OVERRIDES_CSV, target_crs.to_wkt())
     link_to_dout, link_to_accum, link_to_downstream, link_to_strmorder = build_stream_lookup_tables(streams)
@@ -647,27 +648,40 @@ def process_reservoir_basins(paths: dict[str, str] | None = None):
         out_pts = intersection[(intersection["lake_id"] == l_id) & (intersection["point_type"] == "outflow")]
         in_pts = intersection[(intersection["lake_id"] == l_id) & (intersection["point_type"] == "inflow")]
         lake_polys = lakes[lakes[LAKE_ID_COLUMN] == l_id]
-        if lake_polys.empty or out_pts.empty:
+        if lake_polys.empty:
             continue
 
         lake_geom = lake_polys.geometry.iloc[0]
+        has_override = not overrides_gdf[overrides_gdf["lake_id"] == str(l_id)].empty
+        boundary_outlet = None if has_override else off_domain_boundary_outlet(lake_geom, domain, streams)
 
-        # B. Outlet selection
-        outflow_candidates = build_outflow_candidates(
-            out_pts, streams, buffer_dist, link_to_dout, link_to_accum, link_to_strmorder, gauges,
-        )
-        if not outflow_candidates:
-            continue
+        if boundary_outlet is not None:
+            print(
+                f"Warning: lake {l_id} is off the geofabric domain. "
+                "Outlet set to the center of the lake on the domain boundary."
+            )
+            _outlet_point, winner_id = boundary_outlet
+            raw_outflow_candidates = {winner_id}
+        else:
+            if out_pts.empty:
+                continue
 
-        # All outflow link IDs (used as stop points during internal link tracing)
-        raw_outflow_candidates = {c["link_no"] for c in outflow_candidates}
-        surviving_candidates = filter_upstream_duplicate_outflows(outflow_candidates, link_to_downstream)
-        if not surviving_candidates:
-            continue
+            # B. Outlet selection
+            outflow_candidates = build_outflow_candidates(
+                out_pts, streams, buffer_dist, link_to_dout, link_to_accum, link_to_strmorder, gauges,
+            )
+            if not outflow_candidates:
+                continue
 
-        winner_id = select_winning_outflow_link(l_id, surviving_candidates, overrides_gdf, cell_size)
-        if winner_id is None:
-            continue
+            # All outflow link IDs (used as stop points during internal link tracing)
+            raw_outflow_candidates = {c["link_no"] for c in outflow_candidates}
+            surviving_candidates = filter_upstream_duplicate_outflows(outflow_candidates, link_to_downstream)
+            if not surviving_candidates:
+                continue
+
+            winner_id = select_winning_outflow_link(l_id, surviving_candidates, overrides_gdf, cell_size)
+            if winner_id is None:
+                continue
 
         lake_to_outlet[l_id] = down_map.get(winner_id, -1)  # link downstream of the outlet
         lake_to_winner[l_id] = winner_id

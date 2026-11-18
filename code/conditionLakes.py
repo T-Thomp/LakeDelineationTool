@@ -73,7 +73,7 @@ from shapely import wkt as shapely_wkt
 from shapely.geometry import Point, box
 from scipy.ndimage import distance_transform_edt, binary_erosion, binary_dilation
 
-from utilities import load_overrides
+from utilities import load_overrides, off_domain_boundary_outlet
 from pipeline_paths import (
     FDR_CENTERLINE,
     LAKE_ID_COLUMN,
@@ -497,19 +497,25 @@ def raster_window_from_bounds(geom_bounds, inv_gt, raster_size):
     """
     Compute the pixel window (xoff, yoff, xsize, ysize) covering a polygon bbox.
 
-    Returns None if the lake falls entirely outside the raster extent, in which
-    case the lake is skipped silently.
+    A lake that crosses the raster edge is clipped to the cells that exist.
+    Returns None only when the lake misses the raster entirely.
     """
     min_x, min_y, max_x, max_y = geom_bounds
     px_min, py_max = gdal.ApplyGeoTransform(inv_gt, min_x, min_y)
     px_max, py_min = gdal.ApplyGeoTransform(inv_gt, max_x, max_y)
 
-    xoff = int(np.floor(min(px_min, px_max)))
-    yoff = int(np.floor(min(py_min, py_max)))
-    xsize = int(np.ceil(max(px_min, px_max)) - xoff) + 1
-    ysize = int(np.ceil(max(py_min, py_max)) - yoff) + 1
+    col0 = int(np.floor(min(px_min, px_max)))
+    col1 = int(np.ceil(max(px_min, px_max))) + 1
+    row0 = int(np.floor(min(py_min, py_max)))
+    row1 = int(np.ceil(max(py_min, py_max))) + 1
 
-    if xoff < 0 or yoff < 0 or (xoff + xsize) > raster_size[0] or (yoff + ysize) > raster_size[1]:
+    xoff = max(0, col0)
+    yoff = max(0, row0)
+    xend = min(raster_size[0], col1)
+    yend = min(raster_size[1], row1)
+    xsize = xend - xoff
+    ysize = yend - yoff
+    if xsize <= 0 or ysize <= 0:
         return None
     return xoff, yoff, xsize, ysize
 
@@ -1114,7 +1120,7 @@ def lake_id_for_row(idx, lake_row):
     return str(lake_row.get(LAKE_ID_COLUMN, idx)).strip()
 
 
-def serialize_lake_row(idx, lake_row, neighbor_wkts=None):
+def serialize_lake_row(idx, lake_row, neighbor_wkts=None, domain_outlet_wkt=None):
     """Convert a GeoDataFrame row into a picklable dict for worker processes."""
     geometry = lake_row.geometry
     return {
@@ -1122,6 +1128,7 @@ def serialize_lake_row(idx, lake_row, neighbor_wkts=None):
         "geometry_wkt": geometry.wkt,
         "bounds": tuple(geometry.bounds),
         "neighbor_wkts": neighbor_wkts or [],
+        "domain_outlet_wkt": domain_outlet_wkt,
     }
 
 
@@ -1129,6 +1136,37 @@ def neighbor_lake_wkts(all_lakes, position, geometry):
     """WKT of other lakes whose geometry intersects this lake's bounding box."""
     hits = all_lakes.sindex.query(box(*geometry.bounds), predicate="intersects")
     return [all_lakes.geometry.iloc[i].wkt for i in hits if i != position]
+
+
+def _cell_for_map_point(point, gt, xoff, yoff, lake_mask):
+    """Nearest lake-mask cell to a map point, in window row/col."""
+    inv_gt = gdal.InvGeoTransform(gt)
+    px, py = gdal.ApplyGeoTransform(inv_gt, point.x, point.y)
+    target_c = float(px) - xoff
+    target_r = float(py) - yoff
+    cells = np.argwhere(lake_mask)
+    if len(cells) == 0:
+        return None
+    dist = np.hypot(cells[:, 0] - target_r, cells[:, 1] - target_c)
+    row, col = cells[int(np.argmin(dist))]
+    return int(row), int(col)
+
+
+def _outward_fdr(win_rc, xoff, yoff, raster_size, lake_mask):
+    """D8 code at the outlet cell that steps off the raster, or out of the lake."""
+    r, c = win_rc
+    global_r = yoff + r
+    global_c = xoff + c
+    raster_w, raster_h = raster_size
+    height, width = lake_mask.shape
+    for code, (dr, dc) in D8_OFFSETS.items():
+        if not (0 <= global_r + dr < raster_h and 0 <= global_c + dc < raster_w):
+            return code
+    for code, (dr, dc) in D8_OFFSETS.items():
+        nr, nc = r + dr, c + dc
+        if not (0 <= nr < height and 0 <= nc < width) or not lake_mask[nr, nc]:
+            return code
+    return 1
 
 
 def process_single_lake(
@@ -1153,6 +1191,8 @@ def process_single_lake(
     cell_size,
     gauge_radius_meters,
     lake_through_linknos,
+    domain_outlet_wkt=None,
+    raster_size=None,
 ):
     """
     Process one lake and return its raster patch (xoff, yoff, updated_fdr_win, edit_mask).
@@ -1179,24 +1219,34 @@ def process_single_lake(
     )
     surviving_candidates = filter_upstream_duplicates(preliminary_outlets, link_to_downstream)
 
-    chosen_outlet, selection_type, is_carved_override, breakout_path = select_outlet_for_lake(
-        lake_id,
-        surviving_candidates,
-        overrides_gdf,
-        boundary_pixels,
-        lake_mask,
-        fdr_win,
-        src_win,
-        w_win,
-        acc_win,
-        cell_size,
-        wsno_to_link,
-        link_to_downstream,
-        lake_through_linknos,
-        gt,
-        xoff,
-        yoff,
-    )
+    domain_outlet = None
+    if domain_outlet_wkt and (overrides_gdf.empty or overrides_gdf[overrides_gdf["lake_id"] == lake_id].empty):
+        domain_outlet = _cell_for_map_point(shapely_wkt.loads(domain_outlet_wkt), gt, xoff, yoff, lake_mask)
+
+    if domain_outlet is not None:
+        chosen_outlet = {"win_rc": domain_outlet, "point": None, "link_no": -1, "local_accum": -1}
+        selection_type = "domain_boundary"
+        is_carved_override = False
+        breakout_path = []
+    else:
+        chosen_outlet, selection_type, is_carved_override, breakout_path = select_outlet_for_lake(
+            lake_id,
+            surviving_candidates,
+            overrides_gdf,
+            boundary_pixels,
+            lake_mask,
+            fdr_win,
+            src_win,
+            w_win,
+            acc_win,
+            cell_size,
+            wsno_to_link,
+            link_to_downstream,
+            lake_through_linknos,
+            gt,
+            xoff,
+            yoff,
+        )
     if chosen_outlet is None:
         return None
 
@@ -1207,6 +1257,9 @@ def process_single_lake(
         chosen_outlet["win_rc"],
         lock_target_value=lock_target_value,
     )
+    if selection_type == "domain_boundary" and raster_size is not None:
+        rr, cc = chosen_outlet["win_rc"]
+        updated_fdr_win[rr, cc] = _outward_fdr((rr, cc), xoff, yoff, raster_size, lake_mask)
 
     if is_carved_override and breakout_path:
         for current_node, parent_node in breakout_path:
@@ -1296,6 +1349,8 @@ def process_assigned_lakes(
             cell_size,
             gauge_radius_meters,
             lake_through_linknos,
+            domain_outlet_wkt=lake_row.get("domain_outlet_wkt"),
+            raster_size=raster_size,
         )
         if result is None:
             continue
@@ -1522,6 +1577,10 @@ def process_raster_reservoir_routing(
         ds_fdr = None
 
         lakes = lakes.to_crs(raster_proj)
+        streams_on_raster = streams_gdf.to_crs(raster_proj)
+        raster_xs = (gt[0], gt[0] + raster_size[0] * gt[1])
+        raster_ys = (gt[3], gt[3] + raster_size[1] * gt[5])
+        raster_domain = box(min(raster_xs), min(raster_ys), max(raster_xs), max(raster_ys))
         lake_through_linknos = build_lake_through_stream_linknos(lakes, streams_gdf)
 
         if not os.path.exists(gauges_vector_path):
@@ -1558,14 +1617,27 @@ def process_raster_reservoir_routing(
         total_lakes = len(selected_positions)
         lake_cell_counts = []
         lake_rows = []
+        manual_outlet_ids = set()
+        if os.path.exists(overrides_csv_path):
+            manual_outlet_ids = set(load_overrides(overrides_csv_path, raster_proj)["lake_id"])
         for position in selected_positions:
             idx = lakes.index[position]
             row = lakes.iloc[position]
             neighbor_wkts = (
                 neighbor_lake_wkts(lakes, position, row.geometry) if mode == "override" else None
             )
+            lake_id = lake_id_for_row(idx, row)
+            domain_outlet_wkt = None
+            if lake_id not in manual_outlet_ids:
+                found = off_domain_boundary_outlet(row.geometry, raster_domain, streams_on_raster)
+                if found is not None:
+                    print(
+                        f"Warning: lake {lake_id} is off the geofabric domain. "
+                        "Outlet set to the center of the lake on the domain boundary."
+                    )
+                    domain_outlet_wkt = found[0].wkt
             lake_cell_counts.append(estimate_lake_grid_cells(row.geometry, cell_size))
-            lake_rows.append(serialize_lake_row(idx, row, neighbor_wkts))
+            lake_rows.append(serialize_lake_row(idx, row, neighbor_wkts, domain_outlet_wkt))
 
         paths = {
             "fdr_raster_path": fdr_raster_path,
