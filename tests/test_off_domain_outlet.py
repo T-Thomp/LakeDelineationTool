@@ -20,8 +20,9 @@ def _streams(link, downstream, end):
 def test_terminal_lake_off_domain_uses_boundary_center():
     domain = box(0, 0, 10, 10)
     lake = box(8, -1, 12, 4)
-    point, link = off_domain_boundary_outlet(lake, domain, _streams(1, -1, (9, 0)))
+    point, link, exits = off_domain_boundary_outlet(lake, domain, _streams(1, -1, (9, 0)))
     assert link == 1
+    assert exits == {1}
     assert point.distance(domain.boundary) < 1e-6
     assert point.distance(domain) < 1e-6
 
@@ -53,8 +54,9 @@ def test_three_exits_use_the_downstream_boundary():
             ],
         }
     )
-    point, link = off_domain_boundary_outlet(lake, domain, streams)
+    point, link, exits = off_domain_boundary_outlet(lake, domain, streams)
     assert link == 1
+    assert exits == {1, 2}
     assert point.distance(domain.boundary) < 1e-6
     assert point.distance(domain) < 1e-6
     assert abs(point.y) < 1e-6

@@ -77,7 +77,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely
-from shapely.geometry import Point
+from shapely.geometry import MultiPolygon, Point
 
 from utilities import load_overrides, off_domain_boundary_outlet
 from pipeline_paths import (
@@ -385,6 +385,53 @@ def trace_downstream_links(start_link, down_map, stop_at):
     return collected
 
 
+def _first_exit(link, exit_ids, down_map):
+    """Exit link this one drains to, or None if it reaches none of them."""
+    seen = set()
+    try:
+        current = int(link)
+    except (TypeError, ValueError):
+        return None
+    while current > 0 and current not in seen:
+        if current in exit_ids:
+            return current
+        seen.add(current)
+        nxt = down_map.get(current, -1)
+        try:
+            current = int(nxt)
+        except (TypeError, ValueError):
+            break
+    return None
+
+
+def _sections_as_multipolygon(basins, internal_links, exit_ids, down_map):
+    """Merge each exit's traced basins, then keep those merges as separate parts."""
+    parts = []
+    for exit_id in sorted(exit_ids):
+        section_ids = {
+            link for link in internal_links
+            if _first_exit(link, exit_ids, down_map) == exit_id
+        }
+        section_ids.add(exit_id)
+        section = basins[basins["DN"].isin(section_ids)]
+        if section.empty:
+            continue
+        parts.append(section.geometry.union_all())
+    polygons = []
+    for part in parts:
+        if part is None or part.is_empty:
+            continue
+        if part.geom_type == "Polygon":
+            polygons.append(part)
+        elif part.geom_type == "MultiPolygon":
+            polygons.extend(piece for piece in part.geoms if not piece.is_empty)
+    if not polygons:
+        return None
+    if len(polygons) == 1:
+        return polygons[0]
+    return MultiPolygon(polygons)
+
+
 def collect_internal_links(lake_geom, in_pts, raw_outflow_candidates, streams, buffer_dist, down_map, all_downstream_ids):
     """
     Identify all stream links that should be swallowed into the reservoir unit.
@@ -657,13 +704,15 @@ def process_reservoir_basins(paths: dict[str, str] | None = None):
         has_override = not overrides_gdf[overrides_gdf["lake_id"] == str(l_id)].empty
         boundary_outlet = None if has_override else off_domain_boundary_outlet(lake_geom, domain, streams)
 
+        exit_links = set()
         if boundary_outlet is not None:
             print(
                 f"Warning: lake {l_id} is off the geofabric domain. "
                 "Outlet set to the center of the lake on the domain boundary."
             )
-            _outlet_point, winner_id = boundary_outlet
-            raw_outflow_candidates = {winner_id}
+            _outlet_point, winner_id, exit_links = boundary_outlet
+            # Each place the lake leaves is its own outflow, same as a normal lake.
+            raw_outflow_candidates = set(exit_links) or {winner_id}
         else:
             if out_pts.empty:
                 continue
@@ -696,12 +745,7 @@ def process_reservoir_basins(paths: dict[str, str] | None = None):
         # Always swallow the winning outlet link so the merged unit keeps that DN
         # and the original winner polygon is not left behind.
         internal_links.add(winner_id)
-        if boundary_outlet is not None:
-            # Every on-domain piece of this lake joins the same merged basin.
-            on_domain_lake = lake_geom.intersection(domain)
-            if not on_domain_lake.is_empty:
-                touched = basins[basins.geometry.intersects(on_domain_lake)]
-                internal_links.update(int(value) for value in touched["DN"])
+        internal_links.update(exit_links)
 
         # Union subbasins whose DN matches swallowed internal links
         swallowed_basins = basins[basins["DN"].isin(internal_links)]
@@ -710,7 +754,12 @@ def process_reservoir_basins(paths: dict[str, str] | None = None):
 
         all_swallowed_ids.update(internal_links)
 
-        merged_geom = swallowed_basins.geometry.union_all()
+        if len(exit_links) > 1:
+            merged_geom = _sections_as_multipolygon(basins, internal_links, exit_links, down_map)
+            if merged_geom is None:
+                continue
+        else:
+            merged_geom = swallowed_basins.geometry.union_all()
 
         # Lake area column is km² (HydroLAKES Lake_area); convert to m².
         if LAKE_AREA_COLUMN not in lake_polys.columns:

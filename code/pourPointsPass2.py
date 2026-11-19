@@ -328,7 +328,7 @@ def extract_reservoir_io_points(paths):
                     f"Warning: lake {lake_id} is off the geofabric domain. "
                     "Outlet set to the center of the lake on the domain boundary."
                 )
-                outlet_point, _terminal_link = boundary_outlet
+                outlet_point, _terminal_link, _exit_links = boundary_outlet
                 transformed_pt = raster_to_stream_transform.TransformPoint(outlet_point.x, outlet_point.y)
                 final_lake_records.append({
                     'lake_id': lake_id, 'flow_type': 'outflow', 'geometry': Point(transformed_pt[0], transformed_pt[1])

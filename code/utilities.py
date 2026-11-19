@@ -77,11 +77,12 @@ def off_domain_boundary_outlet(lake_geom, domain_geom, streams):
     """Outlet where a lake runs off the geofabric.
 
     ``domain_geom`` is the basin coverage, not the raster rectangle. Returns
-    ``(point, link_id)`` when part of the lake lies outside that coverage and a
-    stream in the lake is terminal or meets the domain edge. The point is the
-    midpoint of that exit, on the domain boundary. Several exits use the most
-    downstream one. Returns None when the lake is inside the domain or the
-    stream keeps going to a real downstream link.
+    ``(point, link_id, exit_ids)`` when part of the lake lies outside that
+    coverage and a stream in the lake is terminal or meets the domain edge.
+    The point is the midpoint of the most downstream exit, on the domain
+    boundary. ``exit_ids`` is every exit link, one per place the lake leaves.
+    Returns None when the lake is inside the domain or the stream keeps going
+    to a real downstream link.
     """
     if lake_geom is None or lake_geom.is_empty or domain_geom is None or domain_geom.is_empty:
         return None
@@ -141,6 +142,7 @@ def off_domain_boundary_outlet(lake_geom, domain_geom, streams):
         return None
 
     _dout, anchor, link_id = min(qualified, key=lambda item: item[0])
+    exit_ids = {link for _item_dout, _item_anchor, link in qualified}
     exit_part = min(crossings, key=lambda part: part.distance(anchor))
     if exit_part.geom_type == "Point":
         point = exit_part
@@ -148,7 +150,7 @@ def off_domain_boundary_outlet(lake_geom, domain_geom, streams):
         point = exit_part.interpolate(0.5, normalized=True)
     if not _on_domain_boundary(point, domain_geom, edge_tolerance):
         point = nearest_points(point, domain_geom.boundary)[1]
-    return point, link_id
+    return point, link_id, exit_ids
 
 
 def rename_shapefile_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
