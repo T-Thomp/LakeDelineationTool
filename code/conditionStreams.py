@@ -38,7 +38,7 @@ from its end.
 Re-run this script after any full conditionLakes.py run, which rebuilds
 fdr_lakes.tif from the original TauDEM flow directions.
 
-  python3 conditionStreams.py --csv stream_conditioning.csv
+  python3 code/conditionStreams.py --csv stream_conditioning.csv
 """
 
 import argparse

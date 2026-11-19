@@ -138,17 +138,28 @@ def bypass_phantom_streams(streams_path, basins_path, output_path, streams=None,
             try:
                 snapped = snap(phantom_seg["geometry"], geom, 0.01)
                 merged = linemerge([geom, snapped])
-            except Exception:
+            except Exception as exc:
+                print(
+                    f"Warning: could not snap stream {current_link} to phantom "
+                    f"{next_link} ({exc})."
+                )
                 try:
                     merged = MultiLineString([geom, phantom_seg["geometry"]])
-                except Exception:
+                except Exception as exc2:
+                    print(
+                        f"Warning: dropped phantom {next_link} from stream "
+                        f"{current_link}; the line merge failed ({exc2})."
+                    )
                     merged = geom
 
             if isinstance(merged, MultiLineString):
                 try:
                     merged = linemerge(merged)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    print(
+                        f"Warning: stream {current_link} kept a split line after "
+                        f"merging phantom {next_link} ({exc})."
+                    )
 
             geom = merged
 

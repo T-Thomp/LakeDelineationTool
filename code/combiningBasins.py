@@ -87,6 +87,7 @@ from pipeline_paths import (
     LAKE_TYPE_COLUMN,
     PREP_GAUGES,
     PREP_LAKES,
+    PASS3_WATERSHEDS_TIF,
     SNAPPED_OUTLETS,
     WORKING,
     WORKING_BASINS_MERGED,
@@ -161,18 +162,37 @@ def parse_lake_id_column(intersection):
     return pd.to_numeric(intersection["lake_id"], errors="coerce").fillna(-1).astype(int)
 
 
-def estimate_search_buffer(basins):
-    """
-    Estimate the pour-point-to-stream search radius from basin polygon geometry.
+def raster_cell_size(raster_path) -> float | None:
+    """Cell width from a raster geotransform. None when the file cannot be opened."""
+    from osgeo import gdal
 
-    Uses the smallest coordinate step on the first basin polygon as a proxy
-    for DEM cell size, then returns 75% of that value. This keeps the search
-    buffer proportional to grid resolution without reading a raster.
+    dataset = gdal.Open(str(raster_path))
+    if dataset is None:
+        return None
+    transform = dataset.GetGeoTransform()
+    dataset = None
+    width = abs(float(transform[1]))
+    return width if width > 0 else None
+
+
+def estimate_search_buffer(basins, raster_path=None):
     """
-    coords = np.array(basins.geometry.iloc[0].exterior.coords)
-    diffs = np.abs(np.diff(coords, axis=0))
-    diffs = diffs[diffs > 0]
-    dem_res = np.min(diffs) if len(diffs) else 1.0
+    Pour-point search radius: 75% of the DEM cell size.
+
+    The cell size is read from the Pass 3 watershed raster. If that file is
+    missing, the smallest step between vertices on the first basin polygon is
+    used instead.
+    """
+    dem_res = raster_cell_size(raster_path) if raster_path else None
+    if dem_res is None:
+        print(
+            f"Warning: could not read cell size from {raster_path}; "
+            "using the spacing of the first basin polygon."
+        )
+        coords = np.array(basins.geometry.iloc[0].exterior.coords)
+        diffs = np.abs(np.diff(coords, axis=0))
+        diffs = diffs[diffs > 0]
+        dem_res = float(np.min(diffs)) if len(diffs) else 1.0
     return dem_res * 0.75
 
 
@@ -591,7 +611,7 @@ def process_reservoir_basins(paths: dict[str, str] | None = None):
     overrides_gdf = load_overrides(OVERRIDES_CSV, target_crs.to_wkt())
     link_to_dout, link_to_accum, link_to_downstream, link_to_strmorder = build_stream_lookup_tables(streams)
 
-    buffer_dist = estimate_search_buffer(basins)
+    buffer_dist = estimate_search_buffer(basins, PASS3_WATERSHEDS_TIF)
     cell_size = buffer_dist / 0.75  # reverse the 0.75 factor to get DEM resolution
 
     if LAKE_ID_COLUMN not in lakes.columns:
@@ -616,7 +636,7 @@ def process_reservoir_basins(paths: dict[str, str] | None = None):
     all_swallowed_ids = set()
     catchment_results = []
 
-    unique_lakes = intersection["lake_id"].unique()
+    unique_lakes = [lake_id for lake_id in intersection["lake_id"].unique() if lake_id >= 0]
     print(f"Processing {len(unique_lakes)} lakes...")
 
     # --- Per-lake processing ---

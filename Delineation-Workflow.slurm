@@ -418,7 +418,7 @@ gdal_polygonize.py \
 #   mpirun -np 4 python3 code/conditionLakes.py --option override --csv my_fixes.csv --ncores 4
 #
 # Stream conditioning (serial; skipped if the CSV does not exist):
-#   python3 conditionStreams.py --csv stream_conditioning.csv
+#   python3 code/conditionStreams.py --csv stream_conditioning.csv
 #   Re-run it after any full conditionLakes.py run, which rebuilds fdr_lakes.tif.
 # -----------------------------------------------------------------------------
 log_section "Python: lake filtering, gauges, and lake/stream conditioning"
