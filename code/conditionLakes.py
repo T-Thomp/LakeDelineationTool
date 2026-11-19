@@ -1847,15 +1847,16 @@ if __name__ == "__main__":
     lakes_vector_path = str(args.lakes or PREP_LAKES)
     gauges_vector_path = str(args.gauges or PREP_GAUGES)
     output_fdr_path = str(args.output or FDR_CENTERLINE)
-    print(f"fdr:        {fdr_raster_path}")
-    print(f"src:        {src_raster_path}")
-    print(f"ad8:        {accum_raster_path}")
-    print(f"watersheds: {w_raster_path}")
-    print(f"streams:    {streams_vector_path}")
-    print(f"lakes:      {lakes_vector_path}")
-    print(f"gauges:     {gauges_vector_path}")
-    print(f"csv:        {args.csv}")
-    print(f"output:     {output_fdr_path}")
+    if mpi_launch_rank_size()[0] == 0:
+        print(f"fdr:        {fdr_raster_path}")
+        print(f"src:        {src_raster_path}")
+        print(f"ad8:        {accum_raster_path}")
+        print(f"watersheds: {w_raster_path}")
+        print(f"streams:    {streams_vector_path}")
+        print(f"lakes:      {lakes_vector_path}")
+        print(f"gauges:     {gauges_vector_path}")
+        print(f"csv:        {args.csv}")
+        print(f"output:     {output_fdr_path}")
     process_raster_reservoir_routing(
         fdr_raster_path=fdr_raster_path,
         src_raster_path=src_raster_path,
