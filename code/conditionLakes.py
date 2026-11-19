@@ -30,7 +30,7 @@ Inputs (TauDEM / upstream Python products)
   accum (stream-network_elv-ad8.tif) - contributing area per cell
   w_raster (original-delineated-watersheds.tif) - watershed ID (WSNO) per cell
   streams vector                     - TauDEM stream links with topology attrs
-  lakes vector (filtered_lakes.shp)  - reservoir polygons from filterLakes.py
+  lakes vector (outputs/prep/lakes.shp) - reservoir polygons from filterLakes.py
   gauges vector (optional)           - stream gauges from getGauges.py
   overrides CSV (optional)             - manual outlet lat/lon per Hylak_id
 
@@ -59,6 +59,13 @@ Run modes (--option)
 import argparse
 import os
 import heapq
+from pathlib import Path
+
+import study_cli
+
+if __name__ == "__main__":
+    study_cli.apply_settings_arg()
+
 import numpy as np
 import geopandas as gpd
 from osgeo import gdal, ogr, osr
@@ -69,6 +76,7 @@ from scipy.ndimage import distance_transform_edt, binary_erosion, binary_dilatio
 from utilities import load_overrides
 from pipeline_paths import (
     FDR_CENTERLINE,
+    LAKE_ID_COLUMN,
     PASS1_STREAMS,
     PASS1_WATERSHEDS_TIF,
     PREP_GAUGES,
@@ -163,7 +171,7 @@ def build_lake_through_stream_linknos(lakes_gdf, streams_gdf):
 
     lake_through_linknos = {}
     for idx, lake in lakes_gdf.iterrows():
-        lake_id = str(lake.get('Hylak_id', idx)).strip()
+        lake_id = str(lake.get(LAKE_ID_COLUMN, idx)).strip()
         intersecting = streams_gdf[streams_gdf.intersects(lake.geometry)]
         linknos = {
             int(link)
@@ -1103,7 +1111,7 @@ def partition_lakes_by_cell_count(lake_cell_counts, n_workers):
 
 
 def lake_id_for_row(idx, lake_row):
-    return str(lake_row.get("Hylak_id", idx)).strip()
+    return str(lake_row.get(LAKE_ID_COLUMN, idx)).strip()
 
 
 def serialize_lake_row(idx, lake_row, neighbor_wkts=None):
@@ -1320,7 +1328,7 @@ def _print_partition_summary(batches, lake_cell_counts):
 def build_lake_conflict_database(
     lakes_vector_path,
     fdr_raster_path,
-    lake_id_field="Hylak_id",
+    lake_id_field=LAKE_ID_COLUMN,
 ):
     """
     Find raster cells where two lake polygons rasterize into the same cell.
@@ -1544,7 +1552,7 @@ def process_raster_reservoir_routing(
         conflict_db = build_lake_conflict_database(
             lakes_vector_path,
             fdr_raster_path,
-            lake_id_field="Hylak_id",
+            lake_id_field=LAKE_ID_COLUMN,
         )
 
         total_lakes = len(selected_positions)
@@ -1695,6 +1703,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Rewrite TauDEM flow directions inside instream reservoir polygons.",
     )
+    study_cli.add_settings_argument(parser)
+    parser.add_argument("--fdr", type=Path, help="Pass 1 D8 flow-direction raster.")
+    parser.add_argument("--src", type=Path, help="Pass 1 stream-source raster.")
+    parser.add_argument("--ad8", type=Path, help="Pass 1 contributing-area raster.")
+    parser.add_argument("--watersheds", type=Path, help="Pass 1 watershed raster.")
+    parser.add_argument("--streams", type=Path, help="Pass 1 stream network.")
+    parser.add_argument("--lakes", type=Path, help="Filtered lake polygons.")
+    parser.add_argument("--gauges", type=Path, help="Gauge points.")
+    parser.add_argument("--output", type=Path, help="Flow-direction raster to write.")
     parser.add_argument(
         "--ncores",
         type=int,
@@ -1724,16 +1741,33 @@ if __name__ == "__main__":
     ensure_output_dirs()
 
     d8 = TAUDEM_D8
+    fdr_raster_path = str(args.fdr or (d8 / "stream-network_elv-fdir.tif"))
+    src_raster_path = str(args.src or (d8 / "stream-network_elv-src.tif"))
+    accum_raster_path = str(args.ad8 or (d8 / "stream-network_elv-ad8.tif"))
+    w_raster_path = str(args.watersheds or PASS1_WATERSHEDS_TIF)
+    streams_vector_path = str(args.streams or PASS1_STREAMS)
+    lakes_vector_path = str(args.lakes or PREP_LAKES)
+    gauges_vector_path = str(args.gauges or PREP_GAUGES)
+    output_fdr_path = str(args.output or FDR_CENTERLINE)
+    print(f"fdr:        {fdr_raster_path}")
+    print(f"src:        {src_raster_path}")
+    print(f"ad8:        {accum_raster_path}")
+    print(f"watersheds: {w_raster_path}")
+    print(f"streams:    {streams_vector_path}")
+    print(f"lakes:      {lakes_vector_path}")
+    print(f"gauges:     {gauges_vector_path}")
+    print(f"csv:        {args.csv}")
+    print(f"output:     {output_fdr_path}")
     process_raster_reservoir_routing(
-        fdr_raster_path=str(d8 / "stream-network_elv-fdir.tif"),
-        src_raster_path=str(d8 / "stream-network_elv-src.tif"),
-        accum_raster_path=str(d8 / "stream-network_elv-ad8.tif"),
-        w_raster_path=str(PASS1_WATERSHEDS_TIF),
-        streams_vector_path=str(PASS1_STREAMS),
-        lakes_vector_path=str(PREP_LAKES),
-        gauges_vector_path=str(PREP_GAUGES),
+        fdr_raster_path=fdr_raster_path,
+        src_raster_path=src_raster_path,
+        accum_raster_path=accum_raster_path,
+        w_raster_path=w_raster_path,
+        streams_vector_path=streams_vector_path,
+        lakes_vector_path=lakes_vector_path,
+        gauges_vector_path=gauges_vector_path,
         overrides_csv_path=args.csv,
-        output_fdr_path=str(FDR_CENTERLINE),
+        output_fdr_path=output_fdr_path,
         gauge_radius_meters=750,
         ncores=args.ncores,
         mode=args.option,

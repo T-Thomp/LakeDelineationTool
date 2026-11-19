@@ -29,41 +29,6 @@ SHAPEFILE_COLUMN_RENAMES: dict[str, str] = {
     LAKE_AREA_M2: LEGACY_LAKE_AREA,
 }
 
-# Columns that belong on a GeoPackage profile, not a TauDEM / MESH shapefile.
-# GDAL would truncate several of these into the same 10-character name.
-HY_ONLY_COLUMNS: frozenset[str] = frozenset({
-    "hyf_type",
-    "hyf_type_uri",
-    "feature_id",
-    "network_id",
-    "catchment_id",
-    "flowpath_id",
-    "lower_catchment_id",
-    "realizes_catchment",
-    "is_lake_catchment",
-    "waterbody_id",
-    "waterbody_class",
-    "station_code",
-    "host_flowpath_id",
-    "hydro_loc_type",
-    "nexus_id",
-    "outflow_nexus_id",
-    "inflow_nexus_id",
-    "upper_catchment_id",
-    "contributing_catchment_id",
-    "receiving_catchment_id",
-    "realized_nexus_id",
-    "reference_nexus_id",
-    "linear_element_id",
-    "distance_from_outlet_m",
-    "distance_from_outlet_pct",
-    "distance_description",
-    "upstream_waterbody_id",
-    "downstream_waterbody_id",
-    "feature_name",
-    "drainage_pattern",
-})
-
 # TauDEM cumulative/local areas in m² can exceed 1e10.
 WIDE_AREA_FLOAT_COLS = frozenset({"DSContArea", "USContArea", "lake_area", "lake_area_m2"})
 
@@ -79,12 +44,6 @@ def strip_point_join_artifacts(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     if not cols:
         return gdf
     return gdf.drop(columns=cols)
-
-
-def strip_hy_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Drop GeoPackage-only columns before a shapefile write."""
-    cols = [c for c in gdf.columns if c in HY_ONLY_COLUMNS and c != LAKE_AREA_M2]
-    return gdf.drop(columns=cols) if cols else gdf
 
 
 def rename_shapefile_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -121,7 +80,7 @@ def check_shapefile_columns(gdf: gpd.GeoDataFrame, filename: str | Path) -> None
 
 def prepare_shapefile_frame(gdf: gpd.GeoDataFrame, filename: str | Path) -> gpd.GeoDataFrame:
     """Extra columns removed, short names applied, strings capped at the DBF limit."""
-    out = rename_shapefile_columns(strip_hy_columns(gdf.copy()))
+    out = rename_shapefile_columns(gdf.copy())
     check_shapefile_columns(out, filename)
     for col in out.select_dtypes(include=["object", "string"]).columns:
         if col == out.geometry.name:
@@ -210,12 +169,9 @@ def load_overrides(overrides_csv_path: str, target_crs) -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(overrides_df, geometry=geometry, crs="EPSG:4326").to_crs(target_crs)
 
 
-# TauDEM / MESH id columns, with the GeoPackage names accepted when present.
-FLOWPATH_ID = "flowpath_id"
+# TauDEM stream and basin id columns.
 LINKNO = "LINKNO"
 DSLINKNO = "DSLINKNO"
-LOWER_CATCHMENT_ID = "lower_catchment_id"
-CATCHMENT_ID = "catchment_id"
 BASIN_ID = "DN"
 DEFAULT_OUTLET_SENTINEL = -9999
 _US_LINK_COLS = ("USLINKNO1", "USLINKNO2")
@@ -247,15 +203,9 @@ def normalize_id(value: object) -> str:
     return str(int(f)) if f.is_integer() and "." in text else text
 
 
-def _link_col(streams: gpd.GeoDataFrame) -> str:
-    return FLOWPATH_ID if FLOWPATH_ID in streams.columns else LINKNO
-
-
 def _down_col(frame: gpd.GeoDataFrame) -> str | None:
     if DSLINKNO in frame.columns:
         return DSLINKNO
-    if LOWER_CATCHMENT_ID in frame.columns:
-        return LOWER_CATCHMENT_ID
     return None
 
 
@@ -400,7 +350,7 @@ def _parse_downstream_id(down_val: object, outlet_sentinel: int) -> str:
 def _basin_id_column(basins: gpd.GeoDataFrame, stream_ids: set[str]) -> str | None:
     best = None
     best_n = 0
-    for col in (LINKNO, BASIN_ID, CATCHMENT_ID, FLOWPATH_ID):
+    for col in (LINKNO, BASIN_ID):
         if col not in basins.columns:
             continue
         matched = sum(normalize_id(value) in stream_ids for value in basins[col])
@@ -596,7 +546,7 @@ def fold_lineless_catchments(
     if streams is None or streams.empty:
         return streams, basins
 
-    link_col = _link_col(streams)
+    link_col = LINKNO
     down_col = _down_col(streams)
     if down_col is None or link_col not in streams.columns:
         return streams, basins
@@ -779,7 +729,7 @@ def fold_lineless_catchments(
         if column is None:
             return
         id_col = next(
-            (name for name in (FLOWPATH_ID, LINKNO, BASIN_ID, CATCHMENT_ID) if name in frame.columns),
+            (name for name in (LINKNO, BASIN_ID) if name in frame.columns),
             None,
         )
         own_ids = [normalize_id(value) for value in frame[id_col]] if id_col else [""] * len(frame)

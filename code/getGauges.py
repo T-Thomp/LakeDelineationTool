@@ -1,17 +1,21 @@
 """
-Find active HYDAT stream-gauge stations inside the study basin.
+Find stream-gauge stations inside the study basin.
 
 Called by Delineation-Workflow.slurm after TauDEM Pass 1 and before
 conditionLakes.py (gauges inform lake outlet ranking).
 
-Queries HYDAT for active stations with discharge (Q) data, spatially filters
-to the dissolved Pass 1 basin boundary, and exports a point shapefile for
-downstream scripts.
+INPUT_GAUGES is a list. Each item names a file and its columns. A SQLite
+file is read as WSC HYDAT (active stations with discharge). A CSV uses
+latitude and longitude. A shapefile or other point file uses its geometry.
+
+Stations are clipped to the dissolved Pass 1 basin and written for downstream
+scripts. The station id is stored as STATION_NUMBER (STATION_NO in the
+shapefile) and the name as STATION_NAME (STATION_NM).
 
 Inputs
 ------
   outputs/interim/taudem_d8/original-delineated-watersheds.shp  (Pass 1 basins)
-  Hydat.sqlite3                                           (HYDAT database)
+  INPUT_GAUGES                                            (study_settings.py)
 
 Outputs
 -------
@@ -20,13 +24,25 @@ Outputs
 
 from __future__ import annotations
 
+import argparse
 import sqlite3
 from pathlib import Path
+
+import study_cli
+
+if __name__ == "__main__":
+    study_cli.apply_settings_arg()
 
 import geopandas as gpd
 import pandas as pd
 
-from pipeline_paths import INPUT_HYDAT_DB, PASS1_BASINS, PREP_GAUGES, ensure_output_dirs
+from pipeline_paths import (
+    INPUT_GAUGES,
+    PASS1_BASINS,
+    PREP_GAUGES,
+    ensure_output_dirs,
+    gauge_entry,
+)
 from utilities import export_shapefile, strip_point_join_artifacts
 
 # ==============================================================================
@@ -34,7 +50,6 @@ from utilities import export_shapefile, strip_point_join_artifacts
 # ==============================================================================
 PATHS = {
     "basins": str(PASS1_BASINS),
-    "hydat_db": str(INPUT_HYDAT_DB),
     "output_shp": str(PREP_GAUGES),
 }
 
@@ -78,6 +93,60 @@ def query_active_flow_gauges(db_path: str) -> gpd.GeoDataFrame:
     )
 
 
+def _require_columns(frame: pd.DataFrame, columns: list[str], source: Path) -> None:
+    missing = [name for name in columns if not name or name not in frame.columns]
+    if missing:
+        raise ValueError(
+            f"{source} is missing column(s): {', '.join(missing)}. "
+            "Set columns for this file in INPUT_GAUGES. "
+            f"Found columns: {list(frame.columns)}"
+        )
+
+
+def _with_station_fields(gauges: gpd.GeoDataFrame, id_column: str, name_column: str | None) -> gpd.GeoDataFrame:
+    """Copy the mapped id and name onto the columns later scripts look for."""
+    gauges = gauges.copy()
+    gauges["STATION_NUMBER"] = gauges[id_column].astype(str)
+    if name_column and name_column in gauges.columns:
+        gauges["STATION_NAME"] = gauges[name_column].astype(str)
+    elif "STATION_NAME" not in gauges.columns:
+        gauges["STATION_NAME"] = gauges["STATION_NUMBER"]
+    return gauges
+
+
+def load_gauge_file(path: str, columns: dict[str, str]) -> gpd.GeoDataFrame:
+    """Load a CSV (WGS84 lat/lon) or a point file and map its columns."""
+    source = Path(path)
+    id_column = columns.get("id") or ""
+    name_column = columns.get("name") or ""
+    lat_column = columns.get("latitude") or ""
+    lon_column = columns.get("longitude") or ""
+    print(f"Reading gauges from {source}...")
+
+    if source.suffix.lower() == ".csv":
+        table = pd.read_csv(source)
+        table.columns = [str(name).strip() for name in table.columns]
+        _require_columns(table, [id_column, lat_column, lon_column], source)
+        gauges = gpd.GeoDataFrame(
+            table,
+            geometry=gpd.points_from_xy(table[lon_column], table[lat_column]),
+            crs="EPSG:4326",
+        )
+    else:
+        gauges = gpd.read_file(source)
+        gauges.columns = [str(name).strip() for name in gauges.columns]
+        _require_columns(gauges, [id_column], source)
+        has_points = gauges.geometry.notna().any() and not gauges.geometry.is_empty.all()
+        if not has_points:
+            _require_columns(gauges, [lat_column, lon_column], source)
+            gauges = gauges.set_geometry(gpd.points_from_xy(gauges[lon_column], gauges[lat_column]))
+            gauges = gauges.set_crs("EPSG:4326")
+
+    gauges = _with_station_fields(gauges, id_column, name_column)
+    print(f"Loaded {len(gauges)} gauges from {source.name}.")
+    return gauges
+
+
 def clip_gauges_to_basin(
     gauges: gpd.GeoDataFrame,
     basin_dissolved: gpd.GeoDataFrame,
@@ -100,14 +169,49 @@ def export_gauges(gauges: gpd.GeoDataFrame, paths: dict[str, str]) -> None:
     print(f"Saved {len(gauges)} gauges to {output_shp}")
 
 
-def get_gauges_in_basin(paths: dict[str, str] | None = None) -> gpd.GeoDataFrame:
+def _load_one_source(entry: dict) -> gpd.GeoDataFrame:
+    print(f"{entry['name']} ({entry['kind']}): {entry['path']}")
+    if entry["kind"] == "hydat":
+        return query_active_flow_gauges(str(entry["path"]))
+    return load_gauge_file(str(entry["path"]), entry["columns"])
+
+
+def _combine_gauge_frames(frames: list[gpd.GeoDataFrame]) -> gpd.GeoDataFrame:
+    """Stack gauge layers. Several sources keep the station id and name."""
+    if len(frames) == 1:
+        return frames[0]
+    pieces: list[gpd.GeoDataFrame] = []
+    for frame in frames:
+        keep = [column for column in ("STATION_NUMBER", "STATION_NAME") if column in frame.columns]
+        piece = frame[keep + [frame.geometry.name]]
+        if piece.geometry.name != "geometry":
+            piece = piece.rename_geometry("geometry")
+        pieces.append(piece)
+    combined = gpd.GeoDataFrame(
+        pd.concat(pieces, ignore_index=True),
+        geometry="geometry",
+        crs=pieces[0].crs,
+    )
+    return combined
+
+
+def get_gauges_in_basin(
+    paths: dict[str, str] | None = None,
+    entries: list[dict] | None = None,
+) -> gpd.GeoDataFrame:
     """Run the full gauge extraction workflow."""
     paths = paths or PATHS
+    entries = list(INPUT_GAUGES if entries is None else entries)
+    if not entries:
+        raise ValueError("No gauge sources configured")
     ensure_output_dirs()
 
     subbasins, basin_dissolved = load_basin_layers(paths["basins"])
-    gauges = query_active_flow_gauges(paths["hydat_db"])
-    gauges_in_basin = clip_gauges_to_basin(gauges, basin_dissolved, subbasins)
+    clipped: list[gpd.GeoDataFrame] = []
+    for entry in entries:
+        gauges = _load_one_source(entry)
+        clipped.append(clip_gauges_to_basin(gauges, basin_dissolved, subbasins))
+    gauges_in_basin = _combine_gauge_frames(clipped)
     export_gauges(gauges_in_basin, paths)
 
     print(f"{len(gauges_in_basin)} gauge(s) within the combined basin.")
@@ -115,7 +219,34 @@ def get_gauges_in_basin(paths: dict[str, str] | None = None) -> gpd.GeoDataFrame
 
 
 def main() -> None:
-    get_gauges_in_basin()
+    parser = argparse.ArgumentParser(
+        description="Clip stream gauges to the Pass 1 basin.",
+    )
+    study_cli.add_settings_argument(parser)
+    parser.add_argument("--basins", type=Path, help="Pass 1 watershed polygons.")
+    parser.add_argument(
+        "--gauges",
+        type=Path,
+        action="append",
+        help=(
+            "Gauge file. Repeat for another file. The suffix picks the reader: "
+            "SQLite is HYDAT, CSV uses latitude and longitude, and other files are points. "
+            "CSV and point files passed here use STATION_NUMBER, STATION_NAME, LATITUDE, "
+            "and LONGITUDE. Replaces INPUT_GAUGES for this run."
+        ),
+    )
+    parser.add_argument("--output", type=Path, help="Gauge point shapefile.")
+    args = parser.parse_args()
+
+    paths = dict(PATHS)
+    if args.basins is not None:
+        paths["basins"] = str(args.basins)
+    if args.output is not None:
+        paths["output_shp"] = str(args.output)
+    entries = [gauge_entry(path) for path in args.gauges] if args.gauges else None
+    print(f"basins: {paths['basins']}")
+    print(f"output: {paths['output_shp']}")
+    get_gauges_in_basin(paths, entries)
 
 
 if __name__ == "__main__":

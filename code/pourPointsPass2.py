@@ -1,4 +1,12 @@
+import argparse
 import os
+from pathlib import Path
+
+import study_cli
+
+if __name__ == "__main__":
+    study_cli.apply_settings_arg()
+
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -9,6 +17,7 @@ from scipy.ndimage import binary_erosion
 from pipeline_paths import (
     FDR_CENTERLINE,
     FINAL_POUR_POINTS,
+    LAKE_ID_COLUMN,
     PASS2_STREAMS,
     PASS2_WATERSHEDS_TIF,
     PREP_GAUGES,
@@ -114,7 +123,7 @@ def extract_reservoir_io_points(paths):
     # [2/5] Processing Boundary Intersections & Localized Graph Logic
     print("\n[2/5] Identifying and filtering candidate points...")
     for idx, lake in lakes.iterrows():
-        lake_id = str(lake.get('Hylak_id', idx)).strip()
+        lake_id = str(lake.get(LAKE_ID_COLUMN, idx)).strip()
         geom = lake.geometry
         
         min_x, min_y, max_x, max_y = geom.bounds
@@ -364,18 +373,37 @@ def extract_reservoir_io_points(paths):
 # RUNNING THE FUNCTION PART
 # =====================================================================
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Place lake inflow, outflow, and gauge pour points.",
+    )
+    study_cli.add_settings_argument(parser)
+    parser.add_argument("--streams", type=Path, help="Pass 2 stream network.")
+    parser.add_argument("--lakes", type=Path, help="Filtered lake polygons.")
+    parser.add_argument("--gauges", type=Path, help="Gauge points.")
+    parser.add_argument("--fdr", type=Path, help="Lake-conditioned flow-direction raster.")
+    parser.add_argument("--src", type=Path, help="Stream-source raster.")
+    parser.add_argument("--watersheds", type=Path, help="Pass 2 watershed raster.")
+    parser.add_argument("--ad8", type=Path, help="Contributing-area raster.")
+    parser.add_argument("--output", type=Path, help="Pour-point shapefile.")
+    args = parser.parse_args()
+
     ensure_output_dirs()
     d8 = TAUDEM_D8
     input_paths = {
-        "river": str(PASS2_STREAMS),
-        "lakes": str(PREP_LAKES),
-        "gauges": str(PREP_GAUGES),
-        "fdr": str(FDR_CENTERLINE),
-        "stream": str(d8 / "stream-network_elv-src.tif"),
-        "w_raster": str(PASS2_WATERSHEDS_TIF),
-        "fac": str(d8 / "stream-network_elv-ad8.tif"),
+        "river": str(args.streams or PASS2_STREAMS),
+        "lakes": str(args.lakes or PREP_LAKES),
+        "gauges": str(args.gauges or PREP_GAUGES),
+        "fdr": str(args.fdr or FDR_CENTERLINE),
+        "stream": str(args.src or (d8 / "stream-network_elv-src.tif")),
+        "w_raster": str(args.watersheds or PASS2_WATERSHEDS_TIF),
+        "fac": str(args.ad8 or (d8 / "stream-network_elv-ad8.tif")),
         "out_lake_nodes": str(PREP_RESERVOIR_IO_NODES),
-        "out": str(FINAL_POUR_POINTS),
+        "out": str(args.output or FINAL_POUR_POINTS),
     }
+    print(f"streams:    {input_paths['river']}")
+    print(f"lakes:      {input_paths['lakes']}")
+    print(f"gauges:     {input_paths['gauges']}")
+    print(f"fdr:        {input_paths['fdr']}")
+    print(f"output:     {input_paths['out']}")
 
     extract_reservoir_io_points(input_paths)
