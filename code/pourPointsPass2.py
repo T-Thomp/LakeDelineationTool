@@ -18,6 +18,7 @@ from pipeline_paths import (
     FDR_CENTERLINE,
     FINAL_POUR_POINTS,
     LAKE_ID_COLUMN,
+    PASS1_BASINS,
     PASS2_STREAMS,
     PASS2_WATERSHEDS_TIF,
     PREP_GAUGES,
@@ -26,7 +27,7 @@ from pipeline_paths import (
     TAUDEM_D8,
     ensure_output_dirs,
 )
-from utilities import export_shapefile, strip_point_join_artifacts
+from utilities import export_shapefile, off_domain_boundary_outlet, strip_point_join_artifacts
 
 # Enable GDAL exceptions to catch raster I/O issues cleanly
 gdal.UseExceptions()
@@ -106,6 +107,9 @@ def extract_reservoir_io_points(paths):
     raster_proj = ds_fdr.GetProjection()
     
     lakes = lakes.to_crs(raster_proj)
+    streams_on_raster = streams_gdf.to_crs(raster_proj)
+    geofabric = gpd.read_file(PASS1_BASINS).to_crs(raster_proj)
+    geofabric_domain = geofabric.geometry.union_all()
 
     src_srs = osr.SpatialReference()
     src_srs.ImportFromWkt(raster_proj)
@@ -120,6 +124,11 @@ def extract_reservoir_io_points(paths):
 
     final_lake_records = []
     printed_trace_step = False
+    placed_boundary_outlets = set()
+    lake_unions = {
+        str(lake_id).strip(): group.geometry.union_all()
+        for lake_id, group in lakes.groupby(LAKE_ID_COLUMN)
+    } if LAKE_ID_COLUMN in lakes.columns else {}
 
     # [2/5] Processing Boundary Intersections & Localized Graph Logic
     print("\n[2/5] Identifying and filtering candidate points...")
@@ -307,6 +316,23 @@ def extract_reservoir_io_points(paths):
                     resolved_inflows.append(inf) 
             else:
                 resolved_inflows.append(inf)
+
+        # One outlet for the whole lake, including every place it leaves the basins.
+        full_geom = lake_unions.get(lake_id, geom)
+        boundary_outlet = off_domain_boundary_outlet(full_geom, geofabric_domain, streams_on_raster)
+        if boundary_outlet is not None:
+            final_outflows = []
+            if lake_id not in placed_boundary_outlets:
+                placed_boundary_outlets.add(lake_id)
+                print(
+                    f"Warning: lake {lake_id} is off the geofabric domain. "
+                    "Outlet set to the center of the lake on the domain boundary."
+                )
+                outlet_point, _terminal_link, _exit_links = boundary_outlet
+                transformed_pt = raster_to_stream_transform.TransformPoint(outlet_point.x, outlet_point.y)
+                final_lake_records.append({
+                    'lake_id': lake_id, 'flow_type': 'outflow', 'geometry': Point(transformed_pt[0], transformed_pt[1])
+                })
 
         # Save Projected Records using cell-centering offsets (+0.5)
         for out in final_outflows:
