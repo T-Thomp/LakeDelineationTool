@@ -22,7 +22,7 @@
 #   [Python] filterLakes.py      -- clip HydroLAKES reservoirs to basin
 #            getGauges.py        -- find stream gauges inside basin
 #            conditionLakes.py   -- fix flow dirs inside each lake
-#                                   (serial, or mpirun when FLOWPATH_NCORES>1;
+#                                   (serial, or srun when FLOWPATH_NCORES>1;
 #                                   writes fdr_lakes.tif)
 #            conditionStreams.py -- (optional) force flow along CSV valley paths
 #                                   in fdr_lakes.tif
@@ -77,7 +77,7 @@
 #       module restore scimods  -- GDAL + mpi4py (see SOFTWARE REQUIREMENTS)
 #       PATH to TauDEM     -- export PATH="$HOME/taudem-build/taudem:$PATH" (§0)
 #       VENV               -- Python venv activate (pip install -r requirements.txt)
-#       FLOWPATH_NCORES    -- conditionLakes.py workers (1 = plain python; >1 = mpirun)
+#       FLOWPATH_NCORES    -- conditionLakes.py workers (1 = plain python; >1 = srun)
 #       #SBATCH --account / --ntasks / --mem-per-cpu / --time
 #
 # [ ] filterLakes.py
@@ -89,14 +89,14 @@
 #       Pass-1 watersheds under outputs/interim/taudem_d8/
 #       output             -- outputs/prep/gauges.shp
 #
-# [ ] conditionLakes.py  (defaults in __main__ / --ncores)
+# [ ] conditionLakes.py
 #       Requires Pass 1 + filterLakes + getGauges first (see §2 below).
 #       FDR / SRC / AD8 / watershed rasters under outputs/interim/taudem_d8/
 #       streams            -- outputs/interim/taudem_d8/original-delineated-streams.shp
 #       lakes / gauges     -- outputs/prep/lakes.shp, outputs/prep/gauges.shp
 #       outlet_overrides.csv (optional manual lake outlets)
 #       outputs            -- outputs/interim/taudem_d8/fdr_lakes.tif
-#       Launch             -- --ncores 1: python3 directly. N>1: mpirun -np N (not srun)
+#       Launch             -- FLOWPATH_NCORES=1: python3. N>1: srun --ntasks N
 #
 # [ ] conditionStreams.py  (--csv; runs right after conditionLakes.py)
 #       stream_conditioning.csv (optional; id,start_lat,start_lon,end_lat,end_lon,
@@ -143,7 +143,7 @@
 # HPC modules (this script: module restore scimods) — FIR-tested:
 #   GDAL        -- gdal_polygonize.py (must match GDAL==3.9.1 in requirements.txt)
 #   mpi4py      -- conditionLakes.py only when FLOWPATH_NCORES>1 (FIR: module load only)
-#   Slurm       -- sbatch / srun for TauDEM. conditionLakes parallel uses mpirun
+#   Slurm       -- sbatch / srun for TauDEM and for parallel conditionLakes
 #
 # TauDEM (not a cluster module): compile with MPI; add install dir to PATH in §0.
 #
@@ -247,10 +247,10 @@ module restore scimods
 # Workers for conditionLakes.py (lake flow-path edits).
 #
 # FLOWPATH_NCORES=1 runs as a normal Python script and does not import mpi4py.
-# FLOWPATH_NCORES>1 partitions lakes across MPI ranks (by estimated cell count).
+# FLOWPATH_NCORES>1 is srun --ntasks. That task count is the worker count.
 # Rank 0 builds the output GeoTIFF and merges masked FDR patches.
-# Launch that case with mpirun -np N. srun direct-launch aborts in MPI_Init
-# because this Open MPI build has no Slurm PMI support.
+# Launch that case with srun so the step stays inside this allocation.
+# mpirun starts its own daemons and does not cross nodes here.
 #
 FLOWPATH_NCORES=16
 
@@ -397,25 +397,24 @@ gdal_polygonize.py \
 #   outputs/interim/taudem_d8/fdr_lakes.tif  -- full-domain FDR copy with
 #                                                      lake interiors patched only
 #
-# Serial (workstation, login node, or compute node). No mpirun, srun, or mpi4py:
-#   python3 code/conditionLakes.py --ncores 1
+# Serial (workstation, login node, or compute node). No srun or mpi4py:
+#   python3 code/conditionLakes.py
 #
-# Parallel, from inside this allocation. Use mpirun, not srun:
-#   mpirun -np 16 python3 code/conditionLakes.py --ncores 16
+# Parallel, from inside this allocation. The worker count is --ntasks:
+#   srun --ntasks=16 python3 code/conditionLakes.py
 #
-# --ncores 1 always wins, even if FLOWPATH_NCORES is larger.
-# --ncores N>1 is capped at the mpirun process count and at the number of lakes.
+# Extra ranks past the number of lakes get no lake.
 #
 # Re-run standalone (from the study root, after Pass 1 + filterLakes + getGauges):
 #   source "$VENV"
-#   python3 code/conditionLakes.py --option override --csv outlet_overrides.csv --ncores 1
+#   python3 code/conditionLakes.py --option override --csv outlet_overrides.csv
 #
 # Override-only re-run (fix individual lakes without a full rebuild):
 #   Re-runs only the lakes listed in the CSV and pastes them into the existing
 #   fdr_lakes.tif. Workers are capped at the number of lakes in the CSV.
 #   Re-run TauDEM Pass 2 / Pass 3 afterwards for the change to take effect.
-#   python3 code/conditionLakes.py --option override --csv my_fixes.csv --ncores 1
-#   mpirun -np 4 python3 code/conditionLakes.py --option override --csv my_fixes.csv --ncores 4
+#   python3 code/conditionLakes.py --option override --csv my_fixes.csv
+#   srun --ntasks=4 python3 code/conditionLakes.py --option override --csv my_fixes.csv
 #
 # Stream conditioning (serial; skipped if the CSV does not exist):
 #   python3 code/conditionStreams.py --csv stream_conditioning.csv
@@ -427,13 +426,11 @@ python3 "$CODE_DIR/filterLakes.py" --settings "$SETTINGS"
 python3 "$CODE_DIR/getGauges.py" --settings "$SETTINGS"
 
 echo " before conditionLakes.py $(date)"
-export FLOWPATH_NCORES
 if [[ "${FLOWPATH_NCORES}" -le 1 ]]; then
-    python3 "$CODE_DIR/conditionLakes.py" --settings "$SETTINGS" --ncores 1
+    python3 "$CODE_DIR/conditionLakes.py" --settings "$SETTINGS"
 else
-    mpirun -np "${FLOWPATH_NCORES}" \
-        python3 "$CODE_DIR/conditionLakes.py" --settings "$SETTINGS" \
-        --ncores "${FLOWPATH_NCORES}"
+    srun --ntasks="${FLOWPATH_NCORES}" \
+        python3 "$CODE_DIR/conditionLakes.py" --settings "$SETTINGS"
 fi
 echo " after conditionLakes.py $(date)"
 
