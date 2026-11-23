@@ -58,10 +58,10 @@ module save scimods    # optional; restored by Delineation-Workflow.slurm
 | Software | Purpose (FIR) |
 |----------|----------------|
 | **GDAL 3.9.1** | `gdal_polygonize.py`; pip `GDAL==3.9.1` must match the loaded module |
-| **mpi4py 4.0.0** | `conditionLakes.py` only when `--ncores` > 1 — module load only |
-| **Slurm** | `sbatch`, `srun` — TauDEM MPI passes. `conditionLakes.py` parallel uses `mpirun` |
+| **mpi4py 4.0.0** | `conditionLakes.py` only under `srun --ntasks` greater than 1 — module load only |
+| **Slurm** | `sbatch`, `srun` — TauDEM MPI passes and parallel `conditionLakes.py` |
 
-TauDEM Pass 1–3 invoke MPI tools via `srun` with `#SBATCH --ntasks=250`. `conditionLakes.py` is separate: `--ncores 1` is a normal Python script (no mpi4py). Parallel lake processing uses `mpirun -np $FLOWPATH_NCORES`, not `srun`.
+TauDEM Pass 1–3 and parallel `conditionLakes.py` run under `srun`. The job asks for 250 tasks; `conditionLakes.py` uses `srun --ntasks=$FLOWPATH_NCORES`. A plain `python3` run does not import mpi4py. `mpirun` is not used: it starts its own daemons and does not cross nodes on this cluster.
 
 ### Python venv (FIR)
 
@@ -79,7 +79,7 @@ Day-to-day: `module restore scimods` then `source ~/virtual-envs/scienv/bin/acti
 
 ## Other HPC sites or local setups
 
-Module names and versions differ by cluster (`module spider gdal`, `module spider mpi4py`). Serial `conditionLakes.py` (`--ncores 1`) does not need mpi4py. For a parallel run on a system **without** an Alliance-style mpi4py module, install MPI Python bindings yourself, for example:
+Module names and versions differ by cluster (`module spider gdal`, `module spider mpi4py`). A plain `python3 code/conditionLakes.py` does not need mpi4py. For a parallel run on a system **without** an Alliance-style mpi4py module, install MPI Python bindings yourself, for example:
 
 ```bash
 pip install mpi4py==4.0.0   # after loading your site MPI compiler/module stack
@@ -104,7 +104,7 @@ Adapt `module restore scimods` in `Delineation-Workflow.slurm` to your site’s 
 | **pyproj** | 3.7.1 | CRS transforms (geopandas) |
 | **pytest** | 8.3.4 | `tests/test_condition_streams.py`, `tests/test_condition_lakes_serial.py` |
 
-**mpi4py 4.0.0** — required only for parallel `conditionLakes.py` (`--ncores` > 1). On **FIR**: `module load mpi4py/4.0.0` (not pip). Elsewhere: `pip install mpi4py` or your site’s equivalent. A one-core run does not import it.
+**mpi4py 4.0.0** — required only when `conditionLakes.py` is started with `srun --ntasks` greater than 1. On **FIR**: `module load mpi4py/4.0.0` (not pip). Elsewhere: `pip install mpi4py` or your site’s equivalent. A plain Python run does not import it.
 
 Stdlib only (no pip): `sqlite3` in `getGauges.py`.
 
@@ -280,20 +280,20 @@ outputs/interim/taudem_d8/
 
 Options:
 
-- `--ncores N` — worker count (default: `FLOWPATH_NCORES`, or 1). `1` is a normal Python script. `N>1` is capped at the `mpirun -np` process count and at the number of lakes being edited.
+- Worker count is `srun --ntasks`. A plain `python3` run is one process. Ranks beyond the number of lakes get no lake.
 - `--option full|override` — `full` (default) rebuilds `fdr_lakes.tif` for every lake. `override` re-runs only the lakes listed in `--csv` and pastes them into the existing `fdr_lakes.tif`, first resetting each re-run lake (plus a small ring for old breakout cells) to the original flow directions.
 - `--csv PATH` — outlet override CSV (`lake_id,lat,lon`; default `./outlet_overrides.csv`).
 
 Serial, on a workstation or a compute node:
 
 ```bash
-python3 code/conditionLakes.py --option override --csv outlet_overrides.csv --ncores 1
+python3 code/conditionLakes.py --option override --csv outlet_overrides.csv
 ```
 
-Parallel. This Open MPI build has no Slurm PMI support, so start it with `mpirun`:
+Parallel, inside the Slurm allocation. `srun --ntasks` is the worker count:
 
 ```bash
-mpirun -np 4 python3 code/conditionLakes.py --option override --csv my_fixes.csv --ncores 4
+srun --ntasks=4 python3 code/conditionLakes.py --option override --csv my_fixes.csv
 ```
 
 Re-run TauDEM Pass 2 / Pass 3 after an override-only run.
